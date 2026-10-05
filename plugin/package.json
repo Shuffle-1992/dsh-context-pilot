@@ -1,0 +1,10 @@
+{
+  "name": "@local/dsh-context-pilot",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "DSH 上下文领航：读取上下文用量、每轮注入、按任务复杂度决策压缩",
+  "exports": {
+    ".": "./entry.mjs"
+  }
+}
