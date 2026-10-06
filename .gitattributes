@@ -1,0 +1,8 @@
+# 统一换行：源码保持 LF（插件由 Node 直接加载，且避免 autocrlf 造成的整文件 diff 噪音）
+* text=auto eol=lf
+
+# 二进制/抽取物不做换行转换
+*.png binary
+*.jpg binary
+*.ico binary
+*.asar binary

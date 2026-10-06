@@ -1,0 +1,5 @@
+# dsh-context-pilot 的 bundle 层 patch：把插件插进 profile。
+# 机器专有配置（如有）放 ~/.dsh/profiles/<profile>/cordis.patch.yml 按 id 覆盖，不放这里。
+- insert:
+    - id: dsh-context-pilot
+      name: '@local/dsh-context-pilot'
