@@ -179,7 +179,13 @@ window.__ModuleLoader__.load({
 			{ id: "kimi-k3", label: "Kimi K3", hit: 1, miss: 4, out: 16, unit: "¥", div: 1e6, note: "参考价 ¥/1M（沿用 K2 系 1/4/16）；K3 另收缓存写入费（TTL 5min/1h）——以官方定价页为准" },
 			{ id: "qwen-max", label: "千问 3.8-Max", hit: 1.78, miss: 14.2, out: 42.6, unit: "¥", div: 1e6, note: "QwenCloud 统一价 $×7.1 折算（官方无 ¥ 价）；北京区原生 $1.98/$5.94（缓存未列）" },
 			{ id: "qwen-flash", label: "千问 3.8-Flash", hit: 0.1, miss: 0.8, out: 2.7, unit: "¥", div: 1e6, note: "官方北京区 ¥/1M（原生人民币价，无需换算）" },
-			{ id: "step-5", label: "阶跃 step-5", hit: 0.35, miss: 7, out: 20, unit: "¥", div: 1e6, note: "官方 ¥/1M；命中:未命中 1:20，折扣强度仅次于 DeepSeek" },
+			{ id: "step-5", label: "阶跃 step-5(API)", hit: 0.35, miss: 7, out: 20, unit: "¥", div: 1e6, note: "官方 API ¥/1M；命中:未命中 1:20，折扣强度仅次于 DeepSeek" },
+			/* 阶跃 Step Plan：订阅制折算（用户规则：折算倍率 = Credits额度 / 订阅价，API 价 ÷ 倍率 = 实际等效单价）
+			 * 官方额度取自 platform.stepfun.com/step-plan：Mini 400M / Plus 1600M / Pro 8000M / Max 40000M
+			 * 价格页为 JS 渲染抓不到，Plus 按用户给定 99 元锚点，Pro/Max 按同单价线性推算（标注「推算」）。 */
+			{ id: "step-plus", label: "阶跃 Step Plan Plus", hit: 0.0217, miss: 0.433, out: 1.238, unit: "¥", div: 1e6, note: "订阅折算：1600M Credits / 99元 = 16.16 倍；API 价(0.35/7/20) ÷ 16.16（官方额度实价，Plus 价为用户给定锚点）" },
+			{ id: "step-pro", label: "阶跃 Step Plan Pro", hit: 0.0217, miss: 0.433, out: 1.238, unit: "¥", div: 1e6, note: "订阅折算：8000M Credits；价位为线性推算(495元) ⇒ 同为 16.16 倍；若官方 Pro 单价更优则倍率更高、等效价更低" },
+			{ id: "step-max", label: "阶跃 Step Plan Max", hit: 0.0217, miss: 0.433, out: 1.238, unit: "¥", div: 1e6, note: "订阅折算：40000M Credits；价位为线性推算(2475元) ⇒ 同为 16.16 倍；若官方 Max 单价更优则倍率更高、等效价更低" },
 		];
 		/**
 		 * 由单价算推荐阈值。核心判据 = 上下文项占单请求成本的比例 ctxShare：
