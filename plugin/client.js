@@ -236,23 +236,62 @@ window.__ModuleLoader__.load({
 				setDraft((d) => ({ ...(d ?? {}), [field.key]: raw }));
 				setMessage(void 0);
 			};
+			/**
+			 * 持久化一组字段值（{key: 值}），逐个写 + 回读校验；未变的跳过。
+			 * 抽成独立函数的原因：计算器的「一键填入并保存」要写的是**推荐值**而非当前 draft，
+			 * 若直接调 save() 只会存下旧 draft（闭包读的是 draft 快照）。
+			 * @returns {Promise<{written: number}>}
+			 */
+			const persist = async (values) => {
+				let written = 0;
+				for (const field of FIELDS) {
+					if (!Object.prototype.hasOwnProperty.call(values, field.key)) continue;
+					const parsed = parseInput(field, values[field.key]);
+					if (parsed === null) throw new Error(`${field.label}：输入不是合法的${field.type === "text" ? "字符串" : "数值"}。`);
+					const base = canon(field, stored[field.key] === void 0 ? field.def : stored[field.key]);
+					if (JSON.stringify(canon(field, parsed)) === JSON.stringify(base)) continue; // 未变不写
+					await writeField(settingsScope, field, parsed);
+					written += 1;
+				}
+				return { written };
+			};
 			const save = async () => {
 				if (saving || draft === null) return;
 				setSaving(true);
 				setMessage(void 0);
 				try {
-					for (const field of FIELDS) {
-						if (!Object.prototype.hasOwnProperty.call(draft, field.key)) continue;
-						const parsed = parseInput(field, draft[field.key]);
-						if (parsed === null) throw new Error(`${field.label}：输入不是合法的${field.type === "text" ? "字符串" : "数值"}。`);
-						const base = canon(field, stored[field.key] === void 0 ? field.def : stored[field.key]);
-						if (JSON.stringify(canon(field, parsed)) === JSON.stringify(base)) continue; // 未变不写
-						await writeField(settingsScope, field, parsed);
-					}
+					const { written } = await persist(draft);
 					setDraft(null);
-					setMessage({ kind: "ok", text: "已保存并回读校验通过。" });
+					setMessage({ kind: "ok", text: `已保存并回读校验通过${written === 0 ? "（无变化）" : `（${written} 项）`}。` });
 				} catch (error) {
 					setMessage({ kind: "error", text: String(error?.message ?? error) });
+				} finally {
+					setSaving(false);
+				}
+			};
+			/** 计算器「一键填入并保存」：写推荐值 + 同步草稿（让上方表单立即反映新值）。
+			 *  @returns {Promise<{ok:boolean, text:string}>} 供计算器内联展示结果 */
+			const applyRecommendation = async (rec) => {
+				if (saving) return { ok: false, text: "正在保存中，请稍候。" };
+				setSaving(true);
+				setMessage(void 0);
+				try {
+					const values = {
+						markerMinRatio: rec.markerMinRatio,
+						policyCardMinRatio: rec.policyCardMinRatio,
+						criticalRatio: rec.criticalRatio,
+					};
+					const { written } = await persist(values);
+					setDraft(null); // 以写入值清理草稿，避免残留脏值
+					const text = written === 0
+						? "推荐值与当前配置一致，无需写入。"
+						: `已应用并回读校验通过（${written} 项：标记 ${rec.markerMinRatio} / 决策卡 ${rec.policyCardMinRatio} / 危险线 ${rec.criticalRatio}）`;
+					setMessage({ kind: "ok", text: `${text}。` });
+					return { ok: true, text };
+				} catch (error) {
+					const text = String(error?.message ?? error);
+					setMessage({ kind: "error", text });
+					return { ok: false, text };
 				} finally {
 					setSaving(false);
 				}
@@ -297,19 +336,22 @@ window.__ModuleLoader__.load({
 				),
 				el("div", { className: "dcp-hint" },
 					"保存写入插件配置并触发重载；标记通道：模型回复尾行写标记 → 本轮结束自动压缩（详见政策卡）。"),
-				el(PriceCalculator),
+				el(PriceCalculator, { writable, saving, onApply: applyRecommendation }),
 			);
 		}
 		/**
 		 * 成本计算器（面板下方）：输入三档单价 → 推荐阈值 + 结构诊断。
-		 * 纯前端计算，不写配置、不调 host（避免误改用户设置）；点「应用」按钮才由用户手动参照填写。
+		 * 默认只计算（不写配置）；「一键填入并保存」按钮由用户显式点击才写入，
+		 * 走 onApply → applyRecommendation → persist → writeField（命名空间 set + 回读校验），
+		 * 与上方表单同一条持久化路径，故失败原因（未就绪/未持久化）提示完全一致。
 		 */
-		function PriceCalculator() {
+		function PriceCalculator({ writable, saving, onApply }) {
 			const [hit, setHit] = react.useState("0.003");
 			const [miss, setMiss] = react.useState("0.15");
 			const [out, setOut] = react.useState("0.6");
 			const [active, setActive] = react.useState("ds-flash");
-			const pick = (p) => { setHit(String(p.hit)); setMiss(String(p.miss)); setOut(String(p.out)); setActive(p.id); };
+			const [applied, setApplied] = react.useState(void 0);
+			const pick = (p) => { setHit(String(p.hit)); setMiss(String(p.miss)); setOut(String(p.out)); setActive(p.id); setApplied(void 0); };
 			const h = Number(hit), m = Number(miss), o = Number(out);
 			const rec = Number.isFinite(h) && Number.isFinite(m) ? recommendFromPrice(h, m) : null;
 			/** 单请求成本与结构占比（用于展示诊断，口径同 README §7.3） */
@@ -333,12 +375,12 @@ window.__ModuleLoader__.load({
 				el("label", { className: "dcp-label", title: hint }, label),
 				el("input", {
 					className: "dcp-input dcp-calc-num", type: "number", step: "any", value: val,
-					onChange: (e) => { set(e.target.value); setActive(""); },
+					onChange: (e) => { set(e.target.value); setActive(""); setApplied(void 0); },
 				}),
 				el("span", { className: "dcp-hint" }, hint ?? ""),
 			);
 			return el("div", { className: "dcp-calc" },
-				el("div", { className: "dcp-calc-title" }, "成本阈值计算器（参考值，不写入配置）"),
+				el("div", { className: "dcp-calc-title" }, "成本阈值计算器（参考值；点下方按钮可写入配置）"),
 				el("div", { className: "dcp-presets" },
 					PRICE_PRESETS.map((p) => el("button", {
 						key: p.id, className: "dcp-preset", dataset: { active: active === p.id ? "1" : "0" },
@@ -360,6 +402,20 @@ window.__ModuleLoader__.load({
 					el("span", null, "危险线 ", el("b", null, rec.criticalRatio)),
 				) : null,
 				rec ? el("div", { className: "dcp-hint" }, rec.verdict) : null,
+				rec ? el("div", { className: "dcp-actions" },
+					el("button", {
+						className: "dcp-btn dcp-btn-primary",
+						disabled: !writable || saving === true,
+						title: writable ? "把上面三个推荐值写入配置并回读校验（可撤销：改回原值再保存）" : "设置命名空间未就绪，暂不可写入",
+						onClick: async () => {
+							setApplied(void 0);
+							const r = await onApply(rec);
+							setApplied(r);
+						},
+					}, saving === true ? "写入中…" : "一键填入并保存"),
+					writable ? null : el("span", { className: "dcp-hint" }, "设置命名空间未就绪，当前只读。"),
+					applied ? el("span", { className: applied.ok ? "dcp-msg-ok" : "dcp-msg-error", role: "status" }, applied.text) : null,
+				) : null,
 				el("div", { className: "dcp-hint" },
 					"模型说明：压缩摊销成本 ≈ 新增内容 × 未命中价，与阈值几乎无关（摘要调用 ∝ 阈值，但压缩间隔也 ∝ 阈值，两者相消）——全部收益来自上下文规模。详见 README §7。"),
 			);
