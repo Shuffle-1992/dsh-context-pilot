@@ -133,7 +133,18 @@ window.__ModuleLoader__.load({
 			".dcp-btn:disabled{opacity:.5;cursor:not-allowed}",
 			".dcp-btn-primary{border-color:var(--dsw-alias-brand-primary,currentColor);color:var(--dsw-alias-brand-primary,currentColor);font-weight:600}",
 			".dcp-msg-ok{color:var(--dsw-alias-state-success-primary,currentColor);font-weight:600;font-size:12px}",
-			".dcp-msg-error{color:var(--dsw-alias-state-error-primary,currentColor);font-weight:600;font-size:12px;word-break:break-all}"
+			".dcp-msg-error{color:var(--dsw-alias-state-error-primary,currentColor);font-weight:600;font-size:12px;word-break:break-all}",
+			/* 成本计算器 */
+			".dcp-calc{margin-top:2px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l1,rgba(128,128,128,.35));border-radius:8px;background:var(--dsw-alias-bg-layer-1,transparent);display:flex;flex-direction:column;gap:8px}",
+			".dcp-calc-title{font-weight:600;font-size:12px}",
+			".dcp-presets{display:flex;gap:6px;flex-wrap:wrap}",
+			".dcp-preset{padding:2px 9px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.45));border-radius:999px;background:transparent;color:var(--dsw-alias-label-secondary,currentColor);cursor:pointer;font-size:11px;line-height:16px}",
+			".dcp-preset:hover{background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.12))}",
+			".dcp-preset[data-active='1']{border-color:var(--dsw-alias-brand-primary,currentColor);color:var(--dsw-alias-brand-primary,currentColor);font-weight:600}",
+			".dcp-calc-num{width:96px;min-width:96px}",
+			".dcp-diag{display:flex;gap:14px;flex-wrap:wrap;color:var(--dsw-alias-label-secondary,currentColor);font-size:11px}",
+			".dcp-rec{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;align-items:center}",
+			".dcp-rec b{color:var(--dsw-alias-brand-primary,currentColor)}"
 		].join("\n");
 		if (typeof document !== "undefined") {
 			const cssId = "dsh-context-pilot/client.css";
@@ -144,6 +155,56 @@ window.__ModuleLoader__.load({
 				styleTag.textContent = PANEL_CSS;
 				document.head.appendChild(styleTag);
 			}
+		}
+		//#endregion
+		//#region 成本计算器（把 README §7 成本模型做成可交互面板）
+		/**
+		 * 依据三档单价推算合理阈值。模型与 README §7 完全一致（同一套公式，改一处须同步另一处）：
+		 *  - 单请求成本 = 命中价 × (上下文 - 新增) + 未命中价 × 新增 + 输出价 × 输出（此处只比较上下文相关项）
+		 *  - 压缩摊销成本 ≈ 新增 × 未命中价（摘要调用读满上下文 ∝ 阈值，但压缩间隔也 ∝ 阈值，两者相消）
+		 *  - 命中:未命中 比值越小（命中越便宜）⇒ 大上下文越无所谓 ⇒ 阈值可高（少压、保信息）
+		 *  - 比值越大（命中仍贵）⇒ 上下文持续失血 ⇒ 阈值应低（压早、省额度）
+		 * 实测常量（本机 2026-10-06）：新增/段 ≈ 6.8K token；压后回落 ≈ 25K。
+		 */
+		const CALC_CONST = { growth: 6800, floor: 25000 };
+		/** 预设（官方单价，2026-10-06 取证；单位仅用于相对比较，故可混用） */
+		const PRICE_PRESETS = [
+			{ id: "ds-flash", label: "DeepSeek flash(非高峰)", hit: 0.003, miss: 0.15, out: 0.6, note: "官方 $/1M；高峰价 ×2" },
+			{ id: "ds-pro", label: "DeepSeek v4-pro", hit: 0.022, miss: 0.66, out: 1.98, note: "官方 $/1M；高峰价 ×2" },
+			{ id: "glm", label: "GLM-5.3", hit: 1.7, miss: 6.9, out: 24, note: "积分系数/10000；非高峰 ×50%" },
+			{ id: "glm-flash", label: "GLM-5.3-Flash", hit: 0.56, miss: 2.3, out: 8, note: "积分系数/10000；非高峰 ×50%" },
+		];
+		/**
+		 * 由单价算推荐阈值。核心判据 = 上下文项占单请求成本的比例 ctxShare：
+		 *   ctxShare 低（命中便宜，如 DS）⇒ 阈值高：多压一次的信息损失 > 省下的钱。
+		 *   ctxShare 高（命中仍贵，如 GLM）⇒ 阈值低：压早直接换额度。
+		 * 锚点（据 README §7.3 结构占比 + §7.4 弹性表校准；取实测 ctxShare 而非理想值，使计算器复现 §7.5 表）：
+		 *   DS flash 在参考占用下 ctxShare≈50% → 推荐 markerMinRatio 0.30
+		 *   GLM-5.3 在同占用下 ctxShare≈93% → 推荐 markerMinRatio 0.15
+		 */
+		function recommendFromPrice(hit, miss) {
+			if (!(hit > 0) || !(miss > 0)) return null;
+			const ratio = miss / hit; // 命中:未命中 的倒数（越小 = 命中越便宜）
+			// 参考上下文取「中段占用」= 0.35 窗口，用于判定结构占比
+			const REF = 0.35 * 1_000_000;
+			const g = CALC_CONST.growth;
+			const ctxShare = ((REF - g) * hit) / ((REF - g) * hit + g * miss);
+			// 线性映射：ctxShare 0.50 → marker 0.30；ctxShare 0.93 → marker 0.15（两端夹逼到 [0.12, 0.40]）
+			const lerp = (x, x0, x1, y0, y1) => y0 + ((x - x0) * (y1 - y0)) / (x1 - x0);
+			const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+			const marker = clamp(lerp(ctxShare, 0.5, 0.93, 0.3, 0.15), 0.12, 0.4);
+			const card = clamp(marker + 0.05, 0.15, 0.5); // 卡片门槛略高于标记门槛
+			const crit = clamp(lerp(ctxShare, 0.5, 0.93, 0.85, 0.8), 0.75, 0.9);
+			const r2 = (v) => Math.round(v * 100) / 100;
+			return {
+				ratio, ctxShare,
+				markerMinRatio: r2(marker),
+				policyCardMinRatio: r2(card),
+				criticalRatio: r2(crit),
+				verdict: ctxShare >= 0.8 ? "命中仍贵 ⇒ 上下文持续失血：建议压早（低阈值）"
+					: ctxShare >= 0.6 ? "中间地带：建议中等阈值"
+						: "命中很便宜 ⇒ 大上下文无所谓：建议压晚（高阈值），少压保信息",
+			};
 		}
 		//#endregion
 		//#region 卡片组件
@@ -236,6 +297,71 @@ window.__ModuleLoader__.load({
 				),
 				el("div", { className: "dcp-hint" },
 					"保存写入插件配置并触发重载；标记通道：模型回复尾行写标记 → 本轮结束自动压缩（详见政策卡）。"),
+				el(PriceCalculator),
+			);
+		}
+		/**
+		 * 成本计算器（面板下方）：输入三档单价 → 推荐阈值 + 结构诊断。
+		 * 纯前端计算，不写配置、不调 host（避免误改用户设置）；点「应用」按钮才由用户手动参照填写。
+		 */
+		function PriceCalculator() {
+			const [hit, setHit] = react.useState("0.003");
+			const [miss, setMiss] = react.useState("0.15");
+			const [out, setOut] = react.useState("0.6");
+			const [active, setActive] = react.useState("ds-flash");
+			const pick = (p) => { setHit(String(p.hit)); setMiss(String(p.miss)); setOut(String(p.out)); setActive(p.id); };
+			const h = Number(hit), m = Number(miss), o = Number(out);
+			const rec = Number.isFinite(h) && Number.isFinite(m) ? recommendFromPrice(h, m) : null;
+			/** 单请求成本与结构占比（用于展示诊断，口径同 README §7.3） */
+			let diag = null;
+			if (rec) {
+				const REF = 0.35 * 1_000_000;
+				const g = CALC_CONST.growth;
+				const ctxCost = (REF - g) * h;
+				const newCost = g * m;
+				const outCost = Number.isFinite(o) ? g * 0.35 * o : 0; // 输出按新增的 35% 粗估
+				const total = ctxCost + newCost + outCost;
+				diag = {
+					ratio: rec.ratio, ctxShare: rec.ctxShare,
+					ctxPct: Math.round(ctxCost / total * 100),
+					newPct: Math.round(newCost / total * 100),
+					perReq: total / (h >= 1 ? 1e4 : 1e6), // GLM 用 /10000；DS 用 /1M
+					unit: h >= 1 ? "积分" : "$",
+				};
+			}
+			const numField = (label, val, set, hint) => el("div", { className: "dcp-row" },
+				el("label", { className: "dcp-label", title: hint }, label),
+				el("input", {
+					className: "dcp-input dcp-calc-num", type: "number", step: "any", value: val,
+					onChange: (e) => { set(e.target.value); setActive(""); },
+				}),
+				el("span", { className: "dcp-hint" }, hint ?? ""),
+			);
+			return el("div", { className: "dcp-calc" },
+				el("div", { className: "dcp-calc-title" }, "成本阈值计算器（参考值，不写入配置）"),
+				el("div", { className: "dcp-presets" },
+					PRICE_PRESETS.map((p) => el("button", {
+						key: p.id, className: "dcp-preset", dataset: { active: active === p.id ? "1" : "0" },
+						title: p.note, onClick: () => pick(p),
+					}, p.label)),
+				),
+				numField("缓存命中价格", hit, setHit, "每 1M token（或积分系数/10000）；命中越便宜，阈值可越高"),
+				numField("缓存未命中价格", miss, setMiss, "每 1M token：新增内容的单价，决定压缩摊销成本"),
+				numField("输出价格", out, setOut, "每 1M token：仅用于估算摘要/输出的占比"),
+				rec ? el("div", { className: "dcp-diag" },
+					el("span", null, `命中:未命中 = 1:${rec.ratio.toFixed(1)}`),
+					el("span", null, `上下文项占单请求 ${diag.ctxPct}%`),
+					el("span", null, `估算单请求 ≈ ${diag.perReq < 0.01 ? diag.perReq.toFixed(5) : diag.perReq.toFixed(2)} ${diag.unit}`),
+				) : el("div", { className: "dcp-hint" }, "请输入有效的正数价格。"),
+				rec ? el("div", { className: "dcp-rec" },
+					el("span", null, "推荐："),
+					el("span", null, "标记最低占用 ", el("b", null, rec.markerMinRatio)),
+					el("span", null, "决策卡注入 ", el("b", null, rec.policyCardMinRatio)),
+					el("span", null, "危险线 ", el("b", null, rec.criticalRatio)),
+				) : null,
+				rec ? el("div", { className: "dcp-hint" }, rec.verdict) : null,
+				el("div", { className: "dcp-hint" },
+					"模型说明：压缩摊销成本 ≈ 新增内容 × 未命中价，与阈值几乎无关（摘要调用 ∝ 阈值，但压缩间隔也 ∝ 阈值，两者相消）——全部收益来自上下文规模。详见 README §7。"),
 			);
 		}
 		/** 错误边界：渲染异常只留痕，绝不冒泡打崩插件详情页。 */
