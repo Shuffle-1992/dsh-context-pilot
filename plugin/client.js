@@ -700,10 +700,9 @@ window.__ModuleLoader__.load({
 								chips.appendChild(c);
 							}
 							if (v.dryRun === true) chips.appendChild(chip("演习", "rgba(128,128,128,.9)"));
-							/* 阈值速览：标记 / 决策卡 / 危险线（来自配置镜像，面板改值即跟随） */
+							/* 阈值速览：标记最低占用 / 决策卡注入 / 危险线（来自配置镜像，面板改值即跟随） */
 							const pct = (x, d) => `${Math.round((Number.isFinite(Number(x)) ? Number(x) : d) * 100)}%`;
-							const markerTxt = typeof v.marker === "string" && v.marker ? v.marker : "关闭";
-							thr.textContent = `标记 ${markerTxt} ｜ 决策卡 ${pct(v.policyCardMinRatio, 0.3)} ｜ 危险线 ${pct(v.criticalRatio, 0.85)}`;
+							thr.textContent = `标记最低占用 ${pct(v.markerMinRatio, 0.2)} ｜ 决策卡注入 ${pct(v.policyCardMinRatio, 0.3)} ｜ 危险线 ${pct(v.criticalRatio, 0.85)}`;
 						} catch { /* 快照失败保持现状 */ }
 					};
 					if (typeof settingsScope.subscribe === "function") liveRows.push({ row, off: settingsScope.subscribe(renderHud) }); // C4：off 在册
