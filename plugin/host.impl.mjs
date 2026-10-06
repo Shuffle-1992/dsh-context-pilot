@@ -281,11 +281,40 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       try { state.m5.lastPublish = { at: new Date().toISOString(), step: 'exception', error: msg(e) }; } catch { /* 吞 */ }
     }
   };
-  /** 记录一条压缩历史（新→旧，cap 8；带 sessionId 供按会话过滤）。 */
+  /** 记录一条压缩历史（新→旧；带 sessionId 供按会话过滤）。
+   *  ⚠️ 2026-10-06：改为 **hud-acts.json 持久化**（用户反馈：重启丢历史 + 只显示 1 条）。
+   *  根因：历史只存内存（cap 8），重启后回填源 = 报告 120 条环形缓冲，被心跳/状态等高频事件
+   *  快速剪掉 m3-act ⇒ 回填无源（实测 15:0x 报告内 m3-act 已 0 条）；且每次 toggle/重启都重置内存。
+   *  专文件 cap 50，压缩时同步落盘（压缩低频，写放大可忽略）。 */
+  const hudActsPath = join(pluginDir, '.data', 'hud-acts.json');
+  const HUD_ACTS_CAP = 50;
+  const loadHudActs = () => {
+    try {
+      const raw = readFileSync(hudActsPath, 'utf8');
+      const j = JSON.parse(raw.replace(/^\uFEFF/, '')); // 剥 BOM（外部工具写入可能带，JSON.parse 不容忍）
+      if (j && Array.isArray(j.acts)) {
+        return j.acts
+          .filter((a) => a && typeof a.sid === 'string' && typeof a.text === 'string' && typeof a.at === 'string')
+          .slice(0, HUD_ACTS_CAP);
+      }
+    } catch (e) {
+      if (e?.code !== 'ENOENT') log('warn', `hud-acts.json 读取失败（忽略，走报告回填）：${msg(e)}`);
+    }
+    return null; // 文件缺失/损坏 → null（调用方回退报告回填）
+  };
+  const saveHudActs = (acts) => {
+    try {
+      mkdirSync(dirname(hudActsPath), { recursive: true });
+      writeFileSync(hudActsPath, JSON.stringify({ version: 1, savedAt: new Date().toISOString(), acts: acts.slice(0, HUD_ACTS_CAP) }, null, 2));
+    } catch (e) {
+      log('warn', `hud-acts.json 写入失败（吞）：${msg(e)}`);
+    }
+  };
   const recordHudAct = (sid, text) => {
     try {
       state.m5.acts.unshift({ sid: String(sid ?? ''), text: String(text ?? ''), at: new Date().toISOString() });
-      if (state.m5.acts.length > 8) state.m5.acts.length = 8;
+      if (state.m5.acts.length > HUD_ACTS_CAP) state.m5.acts.length = HUD_ACTS_CAP;
+      saveHudActs(state.m5.acts);
     } catch { /* 吞 */ }
   };
 
@@ -508,6 +537,9 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     // M5.5 恢复通道取证（每次尝试逐相位落报告，杜绝 log-only 黑洞）
     m55: { armed: null, attempts: [], channelProbe: null },
   };
+  /* 激活即从 hud-acts.json 恢复压缩历史（跨重启/跨 toggle 存续）；
+   * 报告回填降级为迁移/兜底源（bfOnce 内合并去重，不再覆盖式写 acts）。 */
+  state.m5.acts = loadHudActs() ?? [];
 
   /** 解析某 agent 作用域的 compaction 服务实例（顶层 ctx 实测 absent，必须走 agent 上下文）。 */
   const resolveCompactionFor = (agent) => {
@@ -1223,7 +1255,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
             ok: true,
             ...state.m5.hud,
             hudLastAct: filtered[0]?.text || '',
-            acts: filtered.slice(0, 5).map((a) => a.text),
+            acts: filtered.slice(0, 8).map((a) => a.text),
             at: new Date().toISOString(),
           };
         },
@@ -1251,20 +1283,31 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     const bfOnce = () => {
       bfTries += 1;
       try {
+        /* 主源 = hud-acts.json（激活时已加载进 state.m5.acts，跨重启存续）。
+         * 报告降级为迁移/兜底源：合并去重（at+sid）导入，**不再覆盖式写 acts**
+         * ——顺带修掉 C2 记录的「激活后 1.2-10s 内回填覆盖运行期记录」竞态。 */
         const prev = loadReportBase(); // C3：直接读盘（回填最多 4 发；不占用 writeReport 的缓存/对账状态）
         const acts = (prev?.history ?? []).filter((e) => e?.reason === 'm3-act' && e?.m3?.lastAct);
-        const last = acts[acts.length - 1]?.m3?.lastAct;
-        if (!last) return;
-        // 会话历史回填（新→旧，最多 5 条，带 sid 供按会话过滤）；B1：formatAct 复用（含记录时刻）
-        state.m5.acts = acts.slice(-5).reverse().map((e) => {
-          const a = e.m3.lastAct;
-          return { sid: String(a.sessionId ?? ''), text: formatAct(a.reason, a.shadowedTokens, a.at), at: a.at };
-        });
-        publishHud({
-          hudLastAct: formatAct(last.reason, last.shadowedTokens, last.at),
-          hudArmed: '',
-        }); // 内存写入，无 HMR 问题；跨激活显示靠这里回填
-        log('info', `M5 HUD 启动回填：${last.at} ${last.reason}（历史 ${state.m5.acts.length} 条）`);
+        if (acts.length) {
+          // 会话历史迁移（新→旧，最多 8 条）；B1：formatAct 复用（含记录时刻）
+          const fromReport = acts.slice(-8).reverse().map((e) => {
+            const a = e.m3.lastAct;
+            return { sid: String(a.sessionId ?? ''), text: formatAct(a.reason, a.shadowedTokens, a.at), at: a.at };
+          });
+          const have = new Set(state.m5.acts.map((a) => `${a.at}|${a.sid}`));
+          const merged = [...state.m5.acts];
+          for (const a of fromReport) if (!have.has(`${a.at}|${a.sid}`)) merged.push(a);
+          merged.sort((x, y) => (x.at < y.at ? 1 : -1)); // 新→旧
+          if (merged.length > state.m5.acts.length) {
+            state.m5.acts = merged.slice(0, HUD_ACTS_CAP);
+            saveHudActs(state.m5.acts);
+          }
+        }
+        const newest = state.m5.acts[0];
+        if (newest) {
+          publishHud({ hudLastAct: newest.text, hudArmed: '' }); // 内存写入，无 HMR 问题；跨激活显示靠这里回填
+          log('info', `M5 HUD 启动回填：${newest.at}（历史 ${state.m5.acts.length} 条，持久化 hud-acts.json）`);
+        }
       } catch (e) {
         /* C1②（审查）：同步 + 3 次重试（共 4 发）全失败即终态留痕，不再永久静默 */
         if (bfTries >= 4) log('warn', `M5 HUD 回填 ${bfTries} 次尝试均失败（终态放弃）：${msg(e)}`);
