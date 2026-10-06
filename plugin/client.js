@@ -664,12 +664,16 @@ window.__ModuleLoader__.load({
 				const buildHudRow = () => {
 					const row = document.createElement("div");
 					row.dataset.dcpHud = "1";
-					/* HUD 行水平居中（用户要求）：对称 padding + justify-content:center，文字+徽章整组居中 */
-					row.style.cssText = "display:flex;align-items:center;justify-content:center;gap:8px;padding:2px 12px 8px;text-align:center;";
+					/* 行结构：line1 = 压缩记录+徽章（居中），line2 = 阈值速览（标记/决策卡/危险线，配置镜像实时跟随） */
+					row.style.cssText = "display:flex;flex-direction:column;align-items:center;gap:1px;padding:2px 12px 8px;text-align:center;";
+					const line1 = document.createElement("div");
+					line1.style.cssText = "display:flex;align-items:center;justify-content:center;gap:8px;";
 					const label = document.createElement("span");
 					label.style.cssText = "opacity:.72;white-space:nowrap;";
 					const chips = document.createElement("span");
 					chips.style.cssText = "display:inline-flex;align-items:center;gap:4px;flex:none;";
+					const thr = document.createElement("div");
+					thr.style.cssText = "font-size:10px;letter-spacing:.2px;opacity:.55;white-space:nowrap;";
 					const chip = (text, color) => {
 						const c = document.createElement("span");
 						c.textContent = text;
@@ -696,6 +700,10 @@ window.__ModuleLoader__.load({
 								chips.appendChild(c);
 							}
 							if (v.dryRun === true) chips.appendChild(chip("演习", "rgba(128,128,128,.9)"));
+							/* 阈值速览：标记 / 决策卡 / 危险线（来自配置镜像，面板改值即跟随） */
+							const pct = (x, d) => `${Math.round((Number.isFinite(Number(x)) ? Number(x) : d) * 100)}%`;
+							const markerTxt = typeof v.marker === "string" && v.marker ? v.marker : "关闭";
+							thr.textContent = `标记 ${markerTxt} ｜ 决策卡 ${pct(v.policyCardMinRatio, 0.3)} ｜ 危险线 ${pct(v.criticalRatio, 0.85)}`;
 						} catch { /* 快照失败保持现状 */ }
 					};
 					if (typeof settingsScope.subscribe === "function") liveRows.push({ row, off: settingsScope.subscribe(renderHud) }); // C4：off 在册
@@ -764,8 +772,10 @@ window.__ModuleLoader__.load({
 					if (NS.hudTimer) { try { clearInterval(NS.hudTimer); } catch { /* 忽略 */ } }
 					myTimerId = setInterval(() => { try { pullHud(); } catch { /* 忽略 */ } }, 5000);
 					NS.hudTimer = myTimerId;
-					row.appendChild(label);
-					row.appendChild(chips);
+					line1.appendChild(label);
+					line1.appendChild(chips);
+					row.appendChild(line1);
+					row.appendChild(thr);
 					return row;
 				};
 				/** 弹窗根定位（v3，源码取证版）：dsh-client-ui-conversation 的 ContextMeter 面板
