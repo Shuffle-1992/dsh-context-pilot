@@ -167,17 +167,17 @@ window.__ModuleLoader__.load({
 		 * 实测常量（本机 2026-10-06）：新增/段 ≈ 6.8K token；压后回落 ≈ 25K。
 		 */
 		const CALC_CONST = { growth: 6800, floor: 25000 };
-		/** 预设（官方单价，2026-10-06 取证；单位仅用于相对比较，故可混用）。
-		 *  ⚠️ Kimi/千问两档为参考价（官方定价页 JS 渲染无法直读，以 platform.kimi.com/docs/pricing/chat
-		 *  与 help.aliyun.com/zh/model-studio/model-pricing 为准；预设仅预填输入框，可手改）。 */
+		/** 预设（官方单价取证；unit/div 决定「估算单请求」的币种显示与除数——推荐值只依赖命中:未命中比值，与币种无关）。
+		 *  ⚠️ Kimi/千问/阶跃为参考或官方原生价（官方定价页 JS 渲染无法直读，以官方页为准；预设仅预填输入框，可手改）。 */
 		const PRICE_PRESETS = [
-			{ id: "ds-flash", label: "DeepSeek flash(非高峰)", hit: 0.003, miss: 0.15, out: 0.6, note: "官方 $/1M；高峰价 ×2" },
-			{ id: "ds-pro", label: "DeepSeek v4-pro", hit: 0.022, miss: 0.66, out: 1.98, note: "官方 $/1M；高峰价 ×2" },
-			{ id: "glm", label: "GLM-5.3", hit: 1.7, miss: 6.9, out: 24, note: "积分系数/10000；非高峰 ×50%" },
-			{ id: "glm-flash", label: "GLM-5.3-Flash", hit: 0.56, miss: 2.3, out: 8, note: "积分系数/10000；非高峰 ×50%" },
-			{ id: "kimi-k3", label: "Kimi K3", hit: 1, miss: 4, out: 16, note: "参考价 ¥/1M（沿用 K2 系 1/4/16）；K3 另收缓存写入费（TTL 5min/1h）——以官方定价页为准" },
-			{ id: "qwen-max", label: "千问 3.8-Max", hit: 0.25, miss: 2.0, out: 6.0, note: "QwenCloud 统一价 $/1M（官方实价）；北京区输入 $1.98/输出 $5.94" },
-			{ id: "qwen-flash", label: "千问 3.8-Flash", hit: 0.016, miss: 0.15, out: 0.47, note: "QwenCloud 统一价 $/1M（官方实价）；北京区 ¥0.1/¥0.8/¥2.7" },
+			{ id: "ds-flash", label: "DeepSeek flash(非高峰)", hit: 0.003, miss: 0.15, out: 0.6, unit: "$", div: 1e6, note: "官方 $/1M；高峰价 ×2" },
+			{ id: "ds-pro", label: "DeepSeek v4-pro", hit: 0.022, miss: 0.66, out: 1.98, unit: "$", div: 1e6, note: "官方 $/1M；高峰价 ×2" },
+			{ id: "glm", label: "GLM-5.3", hit: 1.7, miss: 6.9, out: 24, unit: "积分", div: 1e4, note: "积分系数/10000；非高峰 ×50%" },
+			{ id: "glm-flash", label: "GLM-5.3-Flash", hit: 0.56, miss: 2.3, out: 8, unit: "积分", div: 1e4, note: "积分系数/10000；非高峰 ×50%" },
+			{ id: "kimi-k3", label: "Kimi K3", hit: 1, miss: 4, out: 16, unit: "¥", div: 1e6, note: "参考价 ¥/1M（沿用 K2 系 1/4/16）；K3 另收缓存写入费（TTL 5min/1h）——以官方定价页为准" },
+			{ id: "qwen-max", label: "千问 3.8-Max", hit: 0.25, miss: 2.0, out: 6.0, unit: "$", div: 1e6, note: "QwenCloud 统一价 $/1M（官方实价）；北京区输入 $1.98/输出 $5.94" },
+			{ id: "qwen-flash", label: "千问 3.8-Flash", hit: 0.016, miss: 0.15, out: 0.47, unit: "$", div: 1e6, note: "QwenCloud 统一价 $/1M（官方实价）；北京区 ¥0.1/¥0.8/¥2.7" },
+			{ id: "step-5", label: "阶跃 step-5", hit: 0.35, miss: 7, out: 20, unit: "¥", div: 1e6, note: "官方 ¥/1M；≈ $0.049/$0.99/$2.82（÷7.1）——命中:未命中 1:20，折扣强度仅次于 DeepSeek" },
 		];
 		/**
 		 * 由单价算推荐阈值。核心判据 = 上下文项占单请求成本的比例 ctxShare：
@@ -354,9 +354,11 @@ window.__ModuleLoader__.load({
 			const [hit, setHit] = react.useState("0.003");
 			const [miss, setMiss] = react.useState("0.15");
 			const [out, setOut] = react.useState("0.6");
+			const [unit, setUnit] = react.useState("$");
+			const [div, setDiv] = react.useState(1e6);
 			const [active, setActive] = react.useState("ds-flash");
 			const [applied, setApplied] = react.useState(void 0);
-			const pick = (p) => { setHit(String(p.hit)); setMiss(String(p.miss)); setOut(String(p.out)); setActive(p.id); setApplied(void 0); };
+			const pick = (p) => { setHit(String(p.hit)); setMiss(String(p.miss)); setOut(String(p.out)); setUnit(p.unit || "$"); setDiv(p.div || 1e6); setActive(p.id); setApplied(void 0); };
 			const h = Number(hit), m = Number(miss), o = Number(out);
 			const rec = Number.isFinite(h) && Number.isFinite(m) ? recommendFromPrice(h, m) : null;
 			/** 单请求成本与结构占比（用于展示诊断，口径同 README §7.3） */
@@ -372,8 +374,8 @@ window.__ModuleLoader__.load({
 					ratio: rec.ratio, ctxShare: rec.ctxShare,
 					ctxPct: Math.round(ctxCost / total * 100),
 					newPct: Math.round(newCost / total * 100),
-					perReq: total / (h >= 1 ? 1e4 : 1e6), // GLM 用 /10000；DS 用 /1M
-					unit: h >= 1 ? "积分" : "$",
+					perReq: total / (div || 1e6),
+					unit,
 				};
 			}
 			const numField = (label, val, set, hint) => el("div", { className: "dcp-row" },
