@@ -167,12 +167,16 @@ window.__ModuleLoader__.load({
 		 * 实测常量（本机 2026-10-06）：新增/段 ≈ 6.8K token；压后回落 ≈ 25K。
 		 */
 		const CALC_CONST = { growth: 6800, floor: 25000 };
-		/** 预设（官方单价，2026-10-06 取证；单位仅用于相对比较，故可混用） */
+		/** 预设（官方单价，2026-10-06 取证；单位仅用于相对比较，故可混用）。
+		 *  ⚠️ Kimi/千问两档为参考价（官方定价页 JS 渲染无法直读，以 platform.kimi.com/docs/pricing/chat
+		 *  与 help.aliyun.com/zh/model-studio/model-pricing 为准；预设仅预填输入框，可手改）。 */
 		const PRICE_PRESETS = [
 			{ id: "ds-flash", label: "DeepSeek flash(非高峰)", hit: 0.003, miss: 0.15, out: 0.6, note: "官方 $/1M；高峰价 ×2" },
 			{ id: "ds-pro", label: "DeepSeek v4-pro", hit: 0.022, miss: 0.66, out: 1.98, note: "官方 $/1M；高峰价 ×2" },
 			{ id: "glm", label: "GLM-5.3", hit: 1.7, miss: 6.9, out: 24, note: "积分系数/10000；非高峰 ×50%" },
 			{ id: "glm-flash", label: "GLM-5.3-Flash", hit: 0.56, miss: 2.3, out: 8, note: "积分系数/10000；非高峰 ×50%" },
+			{ id: "kimi-k3", label: "Kimi K3", hit: 1, miss: 4, out: 16, note: "参考价 ¥/1M（沿用 K2 系 1/4/16）；K3 另收缓存写入费（TTL 5min/1h）——以官方定价页为准" },
+			{ id: "qwen-plus", label: "千问 Plus(qwen3.7)", hit: 0.2, miss: 0.8, out: 2, note: "参考价 ¥/1M（非思考输出；思考模式输出 ¥8/M）——以官方定价页为准" },
 		];
 		/**
 		 * 由单价算推荐阈值。核心判据 = 上下文项占单请求成本的比例 ctxShare：
