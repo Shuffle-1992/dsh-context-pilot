@@ -176,8 +176,8 @@ window.__ModuleLoader__.load({
 			{ id: "glm", label: "GLM-5.3", hit: 1.7, miss: 6.9, out: 24, note: "积分系数/10000；非高峰 ×50%" },
 			{ id: "glm-flash", label: "GLM-5.3-Flash", hit: 0.56, miss: 2.3, out: 8, note: "积分系数/10000；非高峰 ×50%" },
 			{ id: "kimi-k3", label: "Kimi K3", hit: 1, miss: 4, out: 16, note: "参考价 ¥/1M（沿用 K2 系 1/4/16）；K3 另收缓存写入费（TTL 5min/1h）——以官方定价页为准" },
-			{ id: "qwen-max", label: "千问 3.8-Max", hit: 0.6, miss: 2.4, out: 9.6, note: "占位参考价 ¥/1M（千问系命中:输入≈1:4）——请以模型广场实价修改输入框" },
-			{ id: "qwen-flash", label: "千问 3.8-Flash", hit: 0.15, miss: 0.6, out: 1.5, note: "占位参考价 ¥/1M（千问系命中:输入≈1:4）——请以模型广场实价修改输入框" },
+			{ id: "qwen-max", label: "千问 3.8-Max", hit: 0.25, miss: 2.0, out: 6.0, note: "QwenCloud 统一价 $/1M（官方实价）；北京区输入 $1.98/输出 $5.94" },
+			{ id: "qwen-flash", label: "千问 3.8-Flash", hit: 0.016, miss: 0.15, out: 0.47, note: "QwenCloud 统一价 $/1M（官方实价）；北京区 ¥0.1/¥0.8/¥2.7" },
 		];
 		/**
 		 * 由单价算推荐阈值。核心判据 = 上下文项占单请求成本的比例 ctxShare：
