@@ -1,5 +1,17 @@
-node_modules/
+# 运行时数据（不入库：报告/探针日志/dump 脚本产物）
 .data/
+plugin/.data/
+
+# 依赖
+node_modules/
+
+# 日志与临时
 *.log
+*.tmp
 .DS_Store
 Thumbs.db
+
+# 第三方材料的无关副本（docs/reference 只留查阅所需最小集合，说明见该目录 README）
+# 说明：抽取的官方包副本带许可/来源说明（docs/reference/README.md），按需保留；
+#      大体积 asar 解包草稿一律不入库。
+docs/reference/**/asar-out*/
