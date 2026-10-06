@@ -55,18 +55,22 @@ window.__ModuleLoader__.load({
 			],
 		};
 
-		/** 字段描述符（与 host.impl.mjs M3_DEFAULTS / plugin-config.schema.mjs 一一对应）。 */
+		/** 字段描述符（与 host.impl.mjs M3_DEFAULTS / plugin-config.schema.mjs 一一对应）。
+		 *  备注里的「推荐值」分两种计费口径（2026-10-06 官方文档实证，见 README §6 成本模型）：
+		 *   - DeepSeek API：缓存命中 $0.003/M vs 未命中 $0.15/M（1:50）⇒ 大上下文便宜，别为省钱压掉信息，阈值可高。
+		 *   - GLM Coding Plan：缓存命中 1.7 vs 输入 6.9（1:4.1，命中仍计费）⇒ 上下文是持续失血，压早更省额度。
+		 *  两者「压低绝对值都省钱」，但 GLM 收益约 2 倍于 DeepSeek（上下文成本占比 ~6.5x vs ~2x）。 */
 		const FIELDS = [
-			{ key: "enabled", label: "总开关", type: "bool", def: true, hint: "关闭后不注入、不决策、不压缩" },
+			{ key: "enabled", label: "总开关", type: "bool", def: true, hint: "关闭后不注入、不决策、不压缩（完全恢复原生 DSH）" },
 			{ key: "dryRun", label: "演习模式", type: "bool", def: false, hint: "只记录决策，不真执行压缩" },
-			{ key: "criticalRatio", label: "危险线", type: "num", def: 0.85, hint: "占用达此值：任务执行前/空闲时无条件强制压缩" },
+			{ key: "criticalRatio", label: "危险线", type: "num", def: 0.85, hint: "达此值无条件强制压缩。推荐 0.85（DeepSeek）／0.80（GLM 套餐）" },
 			{ key: "marker", label: "压缩标记", type: "text", def: "[cp:compact]", hint: "模型回复尾行标记；置空字符串关闭标记通道" },
-			{ key: "markerMinRatio", label: "标记最低占用", type: "num", def: 0.2, hint: "低于此占用，标记不触发压缩（无意义）" },
-			{ key: "armedTtlMs", label: "标记武装有效期(ms)", type: "int", def: 120000 },
-			{ key: "policyCardMinRatio", label: "压缩决策提示词注入", type: "num", def: 0.3, hint: "占用达此值（0-1）才注入压缩决策提示词；低于此不注入（省 token）" },
-			{ key: "highRatio", label: "审计参考线", type: "num", def: 0.6, hint: "仅审计口径" },
-			{ key: "lightTaskChars", label: "轻任务字符阈值", type: "int", def: 4000, hint: "仅审计口径" },
-			{ key: "sweepMinIntervalMs", label: "兜底扫除最小间隔(ms)", type: "int", def: 600000, hint: "危险线兜底受限；标记模式不受限" },
+			{ key: "markerMinRatio", label: "标记最低占用", type: "num", def: 0.2, hint: "标记低于此占用不触发。推荐 0.30（DeepSeek）／0.15–0.20（GLM）" },
+			{ key: "armedTtlMs", label: "标记武装有效期(ms)", type: "int", def: 120000, hint: "标记→空闲超过此值失效；120000（2 分钟）够用" },
+			{ key: "policyCardMinRatio", label: "压缩决策提示词注入", type: "num", def: 0.3, hint: "达此值才注入决策卡（每轮约 300 token）。推荐 0.35（DeepSeek）／0.15–0.20（GLM）" },
+			{ key: "highRatio", label: "审计参考线", type: "num", def: 0.6, hint: "仅审计口径，不参与压缩触发" },
+			{ key: "lightTaskChars", label: "轻任务字符阈值", type: "int", def: 4000, hint: "仅审计口径，不参与压缩触发" },
+			{ key: "sweepMinIntervalMs", label: "兜底扫除最小间隔(ms)", type: "int", def: 600000, hint: "危险线兜底的最小间隔；标记模式不受限" },
 		];
 
 		//#region helpers

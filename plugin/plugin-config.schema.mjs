@@ -64,21 +64,28 @@ export async function resolveSchemastery() {
   return null;
 }
 
-/** 用 z 构建本插件 schema（字段与 host.impl.mjs M3_DEFAULTS 一一对应）。
+/**
+ * 用 z 构建本插件 schema（字段与 host.impl.mjs M3_DEFAULTS 一一对应）。
  *  ⚠️ 全部字段 .volatile()：DSH 设置写入门禁要求条目存在 volatile 字段，否则面板每次保存
- *  被静默拒绝（`Plugin entry "x" has no volatile fields`，且 set() 照样 resolve）——zcode 实测。 */
+ *  被静默拒绝（`Plugin entry "x" has no volatile fields`，且 set() 照样 resolve）——zcode 实测。
+ *  ⚠️ description 与 client.js FIELDS[].hint 逐条对账（P29：两端漂移 = 用户看到的说明与实际不符）。
+ *
+ *  备注里的分模型推荐值 = 官方单价口径（2026-10-06 实证，详见 README §6 成本模型）：
+ *   - DeepSeek API：缓存命中 $0.003/M vs 未命中 $0.15/M（1:50）⇒ 大上下文便宜，阈值可高、少压保信息；
+ *   - GLM Coding Plan：Cached 1.7 vs Input 6.9（1:4.1，命中仍计费）⇒ 上下文持续失血，压早更省额度。
+ */
 function buildWith(z) {
   try {
     return z.object({
-      enabled: z.boolean().default(true).description('总开关（关闭后不注入、不决策、不压缩）').volatile(),
+      enabled: z.boolean().default(true).description('总开关（关闭后不注入、不决策、不压缩，完全恢复原生 DSH）').volatile(),
       dryRun: z.boolean().default(false).description('演习模式：只记录决策不真执行压缩').volatile(),
       highRatio: z.number().default(0.6).description('审计参考线（决策主体是模型标记，此值仅用于审计口径）').volatile(),
-      criticalRatio: z.number().default(0.85).description('危险线：任务执行前/空闲时无条件强制压缩').volatile(),
-      lightTaskChars: z.number().default(4000).description('轻任务字符阈值（仅审计口径）').volatile(),
+      criticalRatio: z.number().default(0.85).description('危险线：达此值无条件强制压缩。推荐 0.85（DeepSeek）／0.80（GLM 套餐）').volatile(),
+      lightTaskChars: z.number().default(4000).description('轻任务字符阈值（仅审计口径，不参与触发）').volatile(),
       marker: z.string().default('[cp:compact]').description('模型回复尾部标记（置空字符串关闭标记通道）').volatile(),
-      markerMinRatio: z.number().default(0.2).description('标记通道最低占用（低于此压缩无意义）').volatile(),
-      armedTtlMs: z.number().default(120000).description('标记武装有效期（毫秒）').volatile(),
-      policyCardMinRatio: z.number().default(0.3).description('压缩决策提示词注入的最低占用（0-1，低于此不注入，省 token）').volatile(),
+      markerMinRatio: z.number().default(0.2).description('标记通道最低占用：低于此不压缩。推荐 0.30（DeepSeek）／0.15–0.20（GLM）').volatile(),
+      armedTtlMs: z.number().default(120000).description('标记武装有效期（毫秒）：标记→空闲超过此值失效，120000（2 分钟）够用').volatile(),
+      policyCardMinRatio: z.number().default(0.3).description('决策卡注入的最低占用（每轮约 300 token）。推荐 0.35（DeepSeek）／0.15–0.20（GLM）').volatile(),
       sweepMinIntervalMs: z.number().default(600000).description('危险线兜底扫除的最小间隔（毫秒；标记模式不受限）').volatile(),
       hudLastAct: z.string().default('').description('M5 状态：最近一次压缩摘要（host 自动写入，无需手改）').volatile(),
       hudArmed: z.string().default('').description('M5 状态：标记武装中时为 "armed"（host 自动写入）').volatile(),

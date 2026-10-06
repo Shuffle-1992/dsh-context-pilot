@@ -43,17 +43,27 @@ const DSH_LLM_REL = ['dsh', 'node_modules', '@deepseek-ai', 'dsh-llm', 'lib', 'i
  * 读数（注入）、选项（政策卡）、执行（轮内先压/兜底）。场景映射：
  *  - 场景1 任务与远端关联小 / 场景2 重任务需腾退 → 政策卡教模型写标记 → idle 后自动压缩（用户零输入）
  *  - 场景3+ 中途/空闲越线 → criticalRatio 无条件兜底（pre-step pressure 路径 + idle compactNow）
+ *
+ * ⚠️ 默认值取舍 = 计费口径的函数（2026-10-06 官方文档 + 本机实测校准，模型详见 README §6「成本模型」）：
+ *  - DeepSeek API：命中 $0.003/M vs 未命中 $0.15/M（1:50）。285K 上下文里「重读上下文」只占单请求成本 **45%**
+ *    ⇒ 上下文规模化便宜，默认偏保守（少压、保信息，避免压缩导致返工）——markerMinRatio 0.30 偏高：
+ *      3 倍价格差才能换回一次多余压缩的代价。
+ *  - GLM Coding Plan：Cached 1.7 vs Input 6.9（1:4.1，**命中仍计费**）。同样 285K 下上下文占 **91%**
+ *    ⇒ 上下文是持续失血，压早直接换额度——建议 markerMinRatio 0.15–0.20、policyCardMinRatio 0.15–0.20。
+ *  - 阈值→成本弹性（实测增速 6.8K/段、压后回落 25K）：0.15→0.30 平均上下文 88K→163K，
+ *    单请求成本 DS 仅 +18% 而 GLM +69%。**同一组阈值在 GLM 上的钱效约为 DeepSeek 的 3.8 倍**。
+ * 面板备注（client.js FIELDS[].hint）与 schema description 已写入两套推荐值，改这里须三处同步。
  */
 const M3_DEFAULTS = {
   enabled: true,
   dryRun: false,
   highRatio: 0.6, // 审计参考线（决策主体已移交给模型，此值仅用于审计口径）
-  criticalRatio: 0.85, // 危险线：pre-step 无条件压（官方 pressure 路径）
+  criticalRatio: 0.85, // 危险线：pre-step 无条件压（官方 pressure 路径）；GLM 套餐可降 0.80
   lightTaskChars: 4000, // 轻任务字符阈值（仅 inbox 审计口径）
-  markerMinRatio: 0.2, // 标记通道最低占用（低于此压缩无意义）
+  markerMinRatio: 0.2, // 标记通道最低占用；DeepSeek 建议 0.30（少压保信息）／GLM 建议 0.15–0.20（压早省额度）
   armedTtlMs: 120_000, // 标记武装有效期（事件→idle 之间）
   marker: '[cp:compact]', // M3.6：模型回复尾部标记 → idle 后自动压缩（用户零输入，标记在回复里可见）
-  policyCardMinRatio: 0.3, // 注入政策卡的最低占用（低于此不花这笔 token）
+  policyCardMinRatio: 0.3, // 注入政策卡的最低占用；DeepSeek 建议 0.35／GLM 建议 0.15–0.20（每轮卡约 300 token）
   sweepMinIntervalMs: 600_000, // safety-net 两次 idle 扫除最小间隔（marker 模式不受限）
 };
 // 注：关键词「先压缩」通道已按用户决定裁撤（2026-10-06）——"要写先压缩不如直接手动执行压缩指令"。
