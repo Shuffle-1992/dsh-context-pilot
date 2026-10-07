@@ -63,7 +63,7 @@ window.__ModuleLoader__.load({
 			{ key: "enabled", label: "总开关", type: "bool", def: true, hint: "关闭后完全恢复原生 DSH" },
 			{ key: "dryRun", label: "演习模式", type: "bool", def: false, hint: "只记录，不真压缩" },
 			{ key: "markerMinRatio", label: "智能压缩线", type: "num", def: 0.2, hint: "占用达此值时，模型可自行决定压缩并自动续跑" },
-			{ key: "criticalRatio", label: "强制压缩线", type: "num", def: 0.85, hint: "占用达此值无条件强制压缩" },
+			{ key: "criticalRatio", label: "强制压缩线", type: "num", def: 0.85, hint: "占用达此值无条件强制压缩（先于 DSH 引擎自动压缩触发）" },
 			{ key: "marker", label: "压缩标记", type: "text", def: "[cp:compact]", hint: "模型回复尾行标记；置空则关闭智能压缩" },
 			{ key: "armedTtlMs", label: "标记有效期(秒)", type: "int", def: 120000, scale: 1000, hint: "标记后多久内有效" },
 			{ key: "sweepMinIntervalMs", label: "强制压缩冷却(秒)", type: "int", def: 600000, scale: 1000, hint: "两次强制压缩的最小间隔" },
@@ -238,6 +238,15 @@ window.__ModuleLoader__.load({
 				if (draft !== null && Object.prototype.hasOwnProperty.call(draft, field.key)) return draft[field.key];
 				return toUi(field, stored[field.key]);
 			};
+			/** 字段备注：criticalRatio 动态追加引擎上限（C-own，NS.engineCap 由 HUD 轮询下发）。
+			 *  上限值不写死（DSH 未来改 thresholdRatio 时自动跟随）；未探测到时只显示静态规则。 */
+			const hintFor = (field) => {
+				if (field.key !== "criticalRatio") return field.hint ?? "";
+				const cap = typeof NS.engineCap === "number" && Number.isFinite(NS.engineCap) ? NS.engineCap : null;
+				return cap === null
+					? `${field.hint}；上限=DSH 引擎阈值（待探测，见弹窗阈值行）`
+					: `${field.hint}；不可超过 DSH 内置 ${Math.round(cap * 100)}%，超出自动钳到该值`;
+			};
 			const dirty = draft !== null && FIELDS.some((f) => {
 				const cur = parseInput(f, valueOf(f));
 				const base = canon(f, stored[f.key] === void 0 ? f.def : stored[f.key]);
@@ -326,7 +335,7 @@ window.__ModuleLoader__.load({
 			return el("div", { className: "dcp-panel" },
 				el("div", { className: "dcp-grid" },
 					FIELDS.map((field) => el("div", { className: "dcp-row", key: field.key },
-						el("label", { className: "dcp-label", title: field.hint }, field.label),
+						el("label", { className: "dcp-label", title: hintFor(field) }, field.label),
 						field.type === "bool"
 							? el("input", {
 								type: "checkbox", disabled: !writable || saving,
@@ -340,7 +349,7 @@ window.__ModuleLoader__.load({
 								value: String(valueOf(field)),
 								onChange: (e) => setField(field, e.target.value),
 							}),
-						el("span", { className: "dcp-hint" }, field.hint ?? ""),
+						el("span", { className: "dcp-hint" }, hintFor(field)),
 					)),
 				),
 				el("div", { className: "dcp-actions" },
@@ -421,7 +430,15 @@ window.__ModuleLoader__.load({
 				rec ? el("div", { className: "dcp-rec" },
 					el("span", null, "推荐："),
 					el("span", null, "智能压缩线 ", el("b", null, rec.markerMinRatio)),
-					el("span", null, "强制压缩线 ", el("b", null, rec.criticalRatio)),
+					(() => {
+						/* C-own：推荐强制线同样不得越过引擎上限——超出则按上限收敛并注明 */
+						const cap = typeof NS.engineCap === "number" && Number.isFinite(NS.engineCap) && NS.engineCap > 0 && NS.engineCap <= 1 ? NS.engineCap : null;
+						const eff = cap !== null && rec.criticalRatio > cap ? cap : rec.criticalRatio;
+						return el("span", null,
+							"强制压缩线 ", el("b", null, eff),
+							eff < rec.criticalRatio ? el("span", { className: "dcp-hint" }, `（推荐值 ${rec.criticalRatio} 超引擎上限，按 ${eff} 生效）`) : null,
+						);
+					})(),
 				) : null,
 				rec ? el("div", { className: "dcp-hint" }, rec.verdict) : null,
 				rec ? el("div", { className: "dcp-actions" },
