@@ -1,6 +1,6 @@
-# dsh-context-pilot — DSH 上下文领航插件
+# dsh-context-pilot — DSH 上下文智能压缩插件
 
-DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`：**让长会话的上下文压力可见、可控，
+DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`（面板名「上下文智能压缩」，曾用名「上下文领航」）：**让长会话的上下文压力可见、可控，
 并把「何时压缩」的决策权交给模型**——压缩后自动拉起续跑任务，用户零重发。
 
 > **交接说明**：本文是入口，读完 §1–§3 即可上手；深入内容在 [`docs/`](docs/)。

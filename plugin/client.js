@@ -636,7 +636,7 @@ window.__ModuleLoader__.load({
 					const icon = document.createElement("span");
 					icon.style.cssText = "display:inline-block;width:8px;height:8px;border-radius:2px;background:#4c7dff;flex:none;";
 					const label = document.createElement("span");
-					label.textContent = "上下文领航";
+					label.textContent = "智能压缩";
 					label.title = "注入 + 压缩总开关（关闭 = 恢复原生 DSH 行为）";
 					label.style.cssText = "flex:1 1 auto;opacity:.85;white-space:nowrap;";
 					/** 滑动开关：与面板 .dcp-switch 同一套官方样式（PANEL_CSS 全局注入，token 双主题自适配）。 */
@@ -647,7 +647,7 @@ window.__ModuleLoader__.load({
 					const input = document.createElement("input");
 					input.type = "checkbox";
 					input.setAttribute("role", "switch");
-					input.setAttribute("aria-label", "上下文领航总开关");
+					input.setAttribute("aria-label", "智能压缩总开关");
 					const knob = document.createElement("span");
 					knob.className = "dcp-slider";
 					box.appendChild(input);
