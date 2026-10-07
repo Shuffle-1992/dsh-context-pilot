@@ -561,6 +561,8 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     m5: { lastPublish: null, hud: { hudLastAct: '', hudArmed: '', hudPending: '', gen: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}` }, hudFace: 'absent', acts: [], lastSid: null, lineage: {} },
     // M5.5 恢复通道取证（每次尝试逐相位落报告，杜绝 log-only 黑洞）
     m55: { armed: null, attempts: [], channelProbe: null },
+    // R1（2026-10-07）：思考强度调查探针（一次性只读；见 apply 尾部 r1ProbeOnce）
+    r1Probe: null,
   };
   /* 激活即从 hud-acts.json 恢复压缩历史（跨重启/跨 toggle 存续）；
    * 报告回填降级为迁移/兜底源（bfOnce 内合并去重，不再覆盖式写 acts）。 */
@@ -803,6 +805,11 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         attempts: state.m55.attempts.slice(-10).map((a) => ({ ...a })),
         channelProbe: state.m55.channelProbe ? { ...state.m55.channelProbe } : null,
       },
+      /* R1（2026-10-07）：思考强度可读/可枚举/可写调查探针（一次性只读）。
+       * ⚠️ 只在产生它的那条 `r1-probe` 条目上落盘——否则 modelCatalog 全目录（17 个模型）
+       * 会被复制进之后每一条 FULL 快照（activation+2s / m3-act / m4-probe…），稳态报告白胖。
+       * 该条目在 history 里长期留存（HISTORY_CAP=120），取证随时可回读。 */
+      ...(reason === 'r1-probe' && state.r1Probe ? { r1: { ...state.r1Probe } } : {}),
     };
 
     for (const k of ['tokenMeter', 'sessions', 'agents', 'systemPrompt', 'compaction', 'llm', 'sessionProjections', 'sessionQuery', 'configEditor', 'sessionController', 'typertGateway']) {
@@ -1513,5 +1520,175 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
   /* ---- 启动快照：激活后 2s 一发，10s 再一发（捕捉晚到的会话重水化） ---- */
   schedule('activation+2s', 2000);
   schedule('boot+10s', 10000);
+
+  /* ═══════════ R1 探针（2026-10-07）：思考强度（reasoning effort）可读/可枚举/可写调查 ═══════════
+   * 目标（用户需求）：把「当前会话所用模型的思考强度档位」暴露给 Agent，并让 Agent 自己改档。
+   * 三条腿的源码结论（asar 实证，见 docs/reference/asar-out/）：
+   *   ① 读当前档：sessionController.selectionFor(agent).current → {provider, model, reasoningEffort?}
+   *      更直接：agent.session.requestHeader()?.config → {provider, model, reasoningEffort}（**已生效的**）
+   *   ② 枚举可选档：llm.resolveModelInfo(provider, model) → .reasoning.efforts[{id,name,description}]
+   *      + .reasoning.defaultEffort（可选）；无 reasoning 字段 = 该模型不支持思考档
+   *   ③ 写档：sessionController.selectModel({sessionId, provider, model, reasoningEffort})
+   *      → 内部 llm.resolveCallConfig 校验（非法档抛 UNSUPPORTED_REASONING_EFFORT）
+   *      → agents.selectForNextRequest → installModelSelection 在下一轮 request 上生效（**不打断本轮**）
+   * 本探针只读不写（调查阶段）：落一份真实形状到报告，验证三条腿在本机是否真的可达。
+   * ⚠️ 探针一次性（probeDone 守卫），不污染稳态报告。 */
+  const r1ProbeOnce = async () => {
+    if (state.r1Probe) return;
+    try {
+      const aList = tryOf(() => svc('agents')?.list?.() ?? []).value ?? [];
+      const agent = aList[0] ?? null;
+      const out = { at: new Date().toISOString(), legs: {} };
+      if (!agent) {
+        out.error = 'no agent';
+        state.r1Probe = out;
+        return;
+      }
+      /* 腿①：读当前档（两条路径都试，看哪条真实可用） */
+      const hdr = tryOf(() => agent.session?.requestHeader?.());
+      out.legs.readViaHeader = hdr.error
+        ? { error: hdr.error }
+        : { hasHeader: !!hdr.value, config: hdr.value?.config ?? null, adapterDefaults: hdr.value?.adapterDefaults ?? null };
+      const sc = tryOf(() => svc('sessionController'));
+      out.legs.sessionController = { reachable: !!sc.value, hasSelectionFor: typeof sc.value?.selectionFor === 'function', hasSelectModel: typeof sc.value?.selectModel === 'function' };
+      const sel = tryOf(() => sc.value?.selectionFor?.(agent)?.current);
+      out.legs.readViaSelection = sel.error ? { error: sel.error } : { current: sel.value ?? null };
+      /* 腿②：枚举可选档（llm.resolveModelInfo） */
+      const cfg = hdr.value?.config ?? null;
+      const llm = tryOf(() => svc('llm'));
+      out.legs.llm = { reachable: !!llm.value, hasResolveModelInfo: typeof llm.value?.resolveModelInfo === 'function', hasListModels: typeof llm.value?.listModels === 'function' };
+      if (cfg?.provider && cfg?.model) {
+        const info = tryOf(() => llm.value?.resolveModelInfo?.(cfg.provider, cfg.model));
+        if (info.error) out.legs.modelInfo = { error: info.error };
+        else {
+          const p = Promise.resolve(info.value);
+          out.legs.modelInfo = await p.then(
+            (mi) => ({
+              provider: mi?.provider ?? null,
+              id: mi?.id ?? null,
+              contextWindow: mi?.context?.contextWindow ?? null,
+              reasoning: mi?.reasoning
+                ? { defaultEffort: mi.reasoning.defaultEffort ?? null, efforts: (mi.reasoning.efforts ?? []).map((e) => ({ id: e.id, name: e.name })) }
+                : null,
+            }),
+            (e) => ({ error: msg(e) }),
+          );
+        }
+      }
+      /* 腿③：写档 API 形状（只读检查，不实际调用） */
+      out.legs.writePath = {
+        api: 'sessionController.selectModel({sessionId, provider, model, reasoningEffort?})',
+        available: typeof sc.value?.selectModel === 'function',
+        note: '本轮只做只读调查，未实际写入',
+      };
+      /* 腿②b：官方聚合目录 modelCatalog()（Remote 暴露）——一次拿到全部 provider/model/efforts。
+       * 比逐个 resolveModelInfo 更省事，且含 default（当前部署默认档）。 */
+      const cat = tryOf(() => sc.value?.modelCatalog?.());
+      if (cat.error) out.legs.modelCatalog = { error: cat.error };
+      else {
+        out.legs.modelCatalog = await Promise.resolve(cat.value).then(
+          (c) => ({
+            default: c?.default ?? null,
+            routableProviders: c?.routableProviders ?? null,
+            groups: (c?.groups ?? []).map((g) => ({
+              id: g.id,
+              name: g.name,
+              models: (g.models ?? []).slice(0, 30).map((m) => ({
+                id: m.id,
+                name: m.name,
+                efforts: m.reasoning ? (m.reasoning.efforts ?? []).map((e) => e.id) : null,
+                defaultEffort: m.reasoning?.defaultEffort ?? null,
+              })),
+            })),
+            failures: c?.failures ?? null,
+          }),
+          (e) => ({ error: msg(e) }),
+        );
+      }
+      /* 腿③实测（同值写入 + 非法值负测）——只做**可证明无副作用**的两发：
+       *  a) 同值写入：把当前档位再写一遍（值相同 ⇒ 行为不变，但验证 API 真能接受并落 selection）
+       *  b) 非法值负测：故意传非法档，验证 resolveCallConfig 在**任何状态变更之前**抛错
+       *     （源码顺序 requireModel → resolveCallConfig(校验) → selectForNextRequest(变更)，
+       *      故抛错 ⇒ 无变更。这发证明「非法输入不会污染会话」。）
+       *  ⚠️ **副作用实测（重要）**：selectModel 内部还会 `agentDefaultModel.saveSelection(selected)`，
+       *     即把该选择**写成全局默认模型**（落 profile 的 agent-default-model 条目，经 configEditor.edit）。
+       *     实测：同值写入也触发了 profile 重写（cordis.patch.yml mtime 更新、行数/条目/注释均保留完好）。
+       *     ⇒ 实施「Agent 自改档」时若走 selectModel，会**顺带改掉新会话的默认档**——这是必须规避的副作用。
+       *  ⚠️ 故本探针**不做异值写入**（会真实改档 + 改全局默认），异值安装链留待实施阶段用
+       *     agent/request waterfall（router-laya 路线，无副作用）验证。 */
+      const sid0 = String(pick(agent.session?.id, agent.sessionId, agent.id, ''));
+      const cur = cfg?.reasoningEffort;
+      const writeTest = {};
+      if (process.env.DCP_R1_WRITE_TEST === '1' && typeof sc.value?.selectModel === 'function' && sid0 && cfg?.provider && cfg?.model) {
+        if (cur) {
+          const same = tryOf(() =>
+            sc.value.selectModel({ sessionId: sid0, provider: cfg.provider, model: cfg.model, reasoningEffort: cur }),
+          );
+          writeTest.sameValue = same.error
+            ? { ok: false, error: same.error }
+            : await Promise.resolve(same.value).then(
+                (v) => ({ ok: true, selected: v?.selected ?? null }),
+                (e) => ({ ok: false, error: msg(e) }),
+              );
+        } else {
+          writeTest.sameValue = { skipped: '当前档位未显式设置（adapter 默认）' };
+        }
+        const bad = tryOf(() =>
+          sc.value.selectModel({ sessionId: sid0, provider: cfg.provider, model: cfg.model, reasoningEffort: '__r1_invalid__' }),
+        );
+        writeTest.invalidValue = bad.error
+          ? { rejected: true, error: bad.error }
+          : await Promise.resolve(bad.value).then(
+              (v) => ({ rejected: false, WARNING: '非法档竟被接受', selected: v?.selected ?? null }),
+              (e) => ({ rejected: true, error: msg(e) }),
+            );
+        /* 写后复核：档位应仍等于原值（同值写入无变化、非法写入无变更） */
+        const after = tryOf(() => agent.session?.requestHeader?.()?.config?.reasoningEffort);
+        writeTest.effortAfter = after.error ? { error: after.error } : { value: after.value ?? null, unchanged: (after.value ?? null) === (cur ?? null) };
+      } else {
+        writeTest.skipped = process.env.DCP_R1_WRITE_TEST === '1'
+          ? 'selectModel 不可达，或缺 sid/provider/model'
+          : '默认关闭（selectModel 会写全局默认模型，副作用未获授权）；设 DCP_R1_WRITE_TEST=1 才跑';
+      }
+      out.legs.writeTest = writeTest;
+      /* 腿④：facade 方法面 —— 插件经 ctx.get('sessionController') 拿到的是**命令门面**，
+       * 实测 selectionFor 不在其上（内部类方法不外露）⇒ 读当前档只能走 session.requestHeader()。
+       * 列出可调用方法名，避免实施期再次猜 API。 */
+      const facadeMethods = (o) => {
+        const names = new Set();
+        let p = o;
+        for (let d = 0; d < 3 && p && p !== Object.prototype; d++) {
+          for (const n of Object.getOwnPropertyNames(p)) names.add(n);
+          p = Object.getPrototypeOf(p);
+        }
+        return [...names].filter((n) => n !== 'constructor').sort();
+      };
+      out.legs.facades = {
+        sessionController: tryOf(() => facadeMethods(sc.value)).value ?? null,
+        llm: tryOf(() => facadeMethods(llm.value)).value ?? null,
+      };
+      /* 腿⑤（**只读**）：安装链目标——agent/request waterfall 的 config 就是请求配置，
+       * 改它即可改档且**无全局副作用**（router-laya 实证路线，见 .data/ref/router-laya-index.js
+       * applyRoute L444 / agent/request L886）。此处只记录 seam 可达性，不注册监听。 */
+      out.legs.seam = {
+        chosen: 'agent/request waterfall（改 config.reasoningEffort）',
+        alternative: 'sessionController.selectModel（有写全局默认的副作用）',
+        reference: 'HapyRain/dsh-router-laya：applyRoute() 改 provider/model/reasoningEffort，'
+          + '并 delete maxTokens（避免把上一个 adapter 的 cap 钉到新模型）；'
+          + 'isOurRoute() 区分「自己上轮写的档」与「他人显式指定的档」，避免自我锁定',
+        hasAgentRequestSeam: true,
+      };
+
+      out.provider = cfg?.provider ?? null;
+      out.model = cfg?.model ?? null;
+      out.currentEffort = cfg?.reasoningEffort ?? null;
+      state.r1Probe = out;
+      log('info', `R1 探针：model=${out.provider}/${out.model} effort=${out.currentEffort ?? '(adapter默认)'} 可选=${out.legs.modelInfo?.reasoning?.efforts?.map((e) => e.id).join('/') ?? 'n/a'}`);
+      refresh('r1-probe');
+    } catch (e) {
+      state.r1Probe = { at: new Date().toISOString(), error: msg(e) };
+    }
+  };
+  setTimeout(() => { r1ProbeOnce().catch(() => {}); }, 3500)?.unref?.();
   return { reportPath };
 }

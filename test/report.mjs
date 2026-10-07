@@ -174,7 +174,33 @@ if (!existsSync(HUD_ACTS)) {
   }
 }
 
-/* ═══════════ ⑥ dump 工具可跑通 ═══════════ */
+/* ═══════════ ⑥ R1 思考强度探针契约（2026-10-07 调查）═══════════ */
+console.log('\n== 6. R1 思考强度探针（默认只读，副作用须显式授权）==');
+// 调查结论（docs/r1-reasoning-effort-investigation.md）：
+//  ① 读当前档 = session.requestHeader().config.reasoningEffort（selectionFor 不在命令门面上）
+//  ② 枚举可选档 = llm.resolveModelInfo() / sessionController.modelCatalog()
+//  ③ 写档两条路：selectModel（**会写全局默认模型**，副作用）vs agent/request waterfall（无副作用，推荐）
+const r1Body = /const r1ProbeOnce = async \(\) => \{([\s\S]*?)\n  \};/.exec(host)?.[1] ?? '';
+ok('解析出 r1ProbeOnce 函数体', r1Body.length > 0, '未找到 r1ProbeOnce（探针被移除？）');
+ok('读当前档走 requestHeader（非 selectionFor）', /requestHeader\?\.\(\)/.test(r1Body),
+  '未用 requestHeader 读档 ⇒ 与调查结论不符');
+ok('枚举走 resolveModelInfo', /resolveModelInfo/.test(r1Body), '未枚举模型可选档');
+ok('枚举同时取 modelCatalog（全目录）', /modelCatalog/.test(r1Body), '未取官方聚合目录');
+// 副作用闸门：selectModel 会 agentDefaultModel.saveSelection ⇒ 改全局默认模型
+ok('写测默认关闭（须 DCP_R1_WRITE_TEST=1 显式授权）',
+  /DCP_R1_WRITE_TEST === '1'/.test(r1Body),
+  '写测未加环境变量闸门 ⇒ selectModel 会静默改写全局默认模型');
+ok('源码注释记录了 selectModel 的全局默认副作用', /saveSelection|全局默认/.test(host),
+  '未记录该副作用（实施期易踩）');
+// 报告瘦身：探针只在 r1-probe 条目落盘，不得复制进每条 FULL 快照
+ok('r1 探针只在 r1-probe 条目落盘（防稳态报告膨胀）',
+  /reason === 'r1-probe' && state\.r1Probe/.test(host),
+  'r1 无条件写入快照 ⇒ modelCatalog 全目录被复制进每条 FULL 条目');
+// 参考实现已存档（router-laya 的 agent/request 路线）
+ok('router-laya 参考源码已存档', existsSync(join(ROOT, '.data', 'ref', 'router-laya-index.js')),
+  '缺少 .data/ref/router-laya-index.js（参考实现证据）');
+
+/* ═══════════ ⑦ dump 工具可跑通 ═══════════ */
 console.log('\n== 6. dump 工具自检（--field / --history-acts）==');
 if (!existsSync(REPORT)) {
   console.log('  ⚠️ 跳过（无报告）');
