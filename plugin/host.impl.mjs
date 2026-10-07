@@ -694,7 +694,11 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
    * 独占一行后：散文/文档/引用教学全部不再误触发（代码块内独占一行仍会触发，
    * 属可接受残余风险——正则无法识别 markdown 上下文）。 */
   const EFFORT_MARKER_RE = /^[ \t]*\[cp:effort[ \t]+([A-Za-z0-9_-]+)[ \t]*\][ \t]*$/gm;
-  /** sid → { effort, at, reason }：待应用的档位（agent/request 现读现用）。 */
+  /** sid → { effort, at }：本会话**期望档位**（持久态，非一次性）。
+   * ⚠️ 必须持久：官方 installModelSelection 也在 agent/request 上，且它在**外层**——
+   * 它 `await next()` 后 `delete reasoningEffort` 再套上自己的（来自持久化 header）
+   * ⇒ 内层写的 effort 会被剥掉（实测：applied:true 但之后每轮仍是旧档）。
+   * 故本插件用 `{ prepend: true }` 成为**最外层**，每轮都覆盖一次。 */
   const pendingEffortBySid = new Map();
   /** 换档冷却（默认 30s）：防频繁换档反复打断前缀缓存。 */
   const EFFORT_SWITCH_MIN_MS = 30_000;
@@ -735,10 +739,14 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
           if (!pend) return config;
           /* 实际命中的 key（用于后续 delete / 记忆写入，避免留下孤儿 pending） */
           const sidKey = pendingEffortBySid.get(sidNow) ? sidNow : sidAtInstall;
-          /* 尊重「他人显式指定」：若当前 config 带 effort 且**不是我们上次写的**，
-           * 说明是用户手动选档或 subagent 自带 ⇒ 让位（router-laya carriesExplicitRoute 语义）。 */
+          /* 尊重「他人显式指定」：若当前 config 带 effort 且**既不是我们上次写的、也不是我们本次想写的**，
+           * 说明是用户手动选档或 subagent 自带 ⇒ 让位（router-laya carriesExplicitRoute 语义）。
+           * ⚠️ 必须同时排除 pend.effort：本 hook 每轮都会跑（pending 持久），
+           * 官方内层会把 config 设为持久化 header 值——若该值恰为我们已写入的档，
+           * 只比 applied 会漏判；加上 pend 比较才稳。 */
           const applied = appliedEffortBySid.get(sidKey);
-          if (config?.reasoningEffort !== undefined && applied !== undefined && config.reasoningEffort !== applied) {
+          if (config?.reasoningEffort !== undefined && applied !== undefined
+              && config.reasoningEffort !== applied && config.reasoningEffort !== pend.effort) {
             pendingEffortBySid.delete(sidKey);
             state.m3.effortSkips = state.m3.effortSkips ?? {};
             state.m3.effortSkips.foreign = (state.m3.effortSkips.foreign ?? 0) + 1;
@@ -766,27 +774,41 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
             schedule('r1-effort', 400);
             return config;
           }
-          /* 应用（去掉 maxTokens：换档不应把上个 adapter 的 cap 钉住——router-laya applyRoute 同款） */
+          /* 应用（去掉 maxTokens：换档不应把上个 adapter 的 cap 钉住——router-laya applyRoute 同款）。
+           * ⚠️ **不删除 pending**：本 hook 用 prepend 处于最外层，官方 installModelSelection 在内层
+           * 会 delete reasoningEffort 再套回持久化 header 的值 ⇒ 必须**每轮**都覆盖一次，
+           * 否则只有第一轮生效、之后被打回旧档（实测缺陷）。
+           * 持久 pending = 「本会话期望档位」，直到被新的 [cp:effort] 替换或被让位逻辑清除。 */
           const out = { ...config, reasoningEffort: pend.effort };
           delete out.maxTokens;
-          pendingEffortBySid.delete(sidKey);
-          effortSwitchAtBySid.set(sidKey, Date.now());
           appliedEffortBySid.set(sidKey, pend.effort);
-          state.m3.effortSwitches = (state.m3.effortSwitches ?? 0) + 1;
-          state.m3.lastEffortApply = {
-            at: new Date().toISOString(), sessionId: sidKey, want: pend.effort,
-            from: config?.reasoningEffort ?? null, applied: true,
-            provider: eff.provider, model: eff.model, options: opts,
-            sidNow, sidAtInstall,
-          };
-          log('info', `R1 换档应用：${config?.reasoningEffort ?? '(默认)'} → ${pend.effort}（${eff.provider}/${eff.model}，下一步生效）`);
-          schedule('r1-effort', 400);
+          /* ⚠️ 计数器只在**档位真正变化**时自增：pending 持久 ⇒ 本 hook 每轮都跑，
+           * 若无条件自增会变成「请求次数」而非「换档次数」，失去取证意义。
+           * ⚠️ effortSwitchAtBySid（冷却基准）也**只在变化时**更新——否则每轮刷新会让
+           * 冷却永远处于「刚刚换过」状态，把模型后续的新标记全部挡掉。 */
+          const changed = config?.reasoningEffort !== pend.effort;
+          if (changed) {
+            effortSwitchAtBySid.set(sidKey, Date.now());
+            state.m3.effortSwitches = (state.m3.effortSwitches ?? 0) + 1;
+            state.m3.lastEffortApply = {
+              at: new Date().toISOString(), sessionId: sidKey, want: pend.effort,
+              from: config?.reasoningEffort ?? null, applied: true,
+              provider: eff.provider, model: eff.model, options: opts,
+              sidNow, sidAtInstall,
+            };
+            log('info', `R1 换档应用：${config?.reasoningEffort ?? '(默认)'} → ${pend.effort}（${eff.provider}/${eff.model}，下一步生效）`);
+            schedule('r1-effort', 400);
+          } else {
+            /* 已一致：只记「维持」次数（每轮覆盖仍在做，防被内层打回），不刷 lastEffortApply */
+            state.m3.effortReasserts = (state.m3.effortReasserts ?? 0) + 1;
+          }
           return out;
         } catch (e) {
           log('warn', `R1 换档应用异常（吞，原样放行）：${msg(e)}`);
           return config;
         }
-      });
+      }, { prepend: true }); // ⚠️ 必须 prepend：官方 installModelSelection 在同 seam 上且在内层，
+      // 它 await next() 后会 delete reasoningEffort 再套回持久化 header 值 ⇒ 非最外层会被剥掉（实测缺陷）。
       state.m3.effortHooks = (state.m3.effortHooks ?? 0) + 1;
       return true;
     } catch (e) {
@@ -1550,16 +1572,26 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
               /* 取**最后一个**标记（模型可能先写错再改；与压缩标记的 pop 语义一致） */
               const want = String(hits[hits.length - 1][1]);
               state.m3.effortMarkerHits = (state.m3.effortMarkerHits ?? 0) + 1;
-              const lastAt = effortSwitchAtBySid.get(sidE) ?? 0;
-              const since = Date.now() - lastAt;
-              if (since < EFFORT_SWITCH_MIN_MS) {
+              /* 幂等短路：若期望档位已经是该值，不必重设（也**不该**消耗冷却——
+               * 冷却只为「真实换档」计，重复写同值不应阻塞后续换档）。 */
+              const cur = pendingEffortBySid.get(sidE);
+              if (cur && cur.effort === want) {
                 state.m3.effortSkips = state.m3.effortSkips ?? {};
-                state.m3.effortSkips.cooldown = (state.m3.effortSkips.cooldown ?? 0) + 1;
-                log('info', `R1 换档标记 ${want} 被冷却跳过（距上次 ${Math.round(since / 1000)}s < ${EFFORT_SWITCH_MIN_MS / 1000}s）`);
+                state.m3.effortSkips.sameValue = (state.m3.effortSkips.sameValue ?? 0) + 1;
+                log('info', `R1 换档标记 ${want} 与期望档位相同，忽略（不消耗冷却）`);
+                schedule('r1-effort', 400);
               } else {
-                pendingEffortBySid.set(sidE, { effort: want, at: Date.now(), source: 'marker' });
-                state.m3.lastEffortMarker = { at: new Date().toISOString(), sessionId: sidE, want, via: 'marker' };
-                log('info', `R1 换档标记命中：[cp:effort ${want}]（session ${sidE.slice(0, 8)}…）→ 下一步应用`);
+                const lastAt = effortSwitchAtBySid.get(sidE) ?? 0;
+                const since = Date.now() - lastAt;
+                if (since < EFFORT_SWITCH_MIN_MS) {
+                  state.m3.effortSkips = state.m3.effortSkips ?? {};
+                  state.m3.effortSkips.cooldown = (state.m3.effortSkips.cooldown ?? 0) + 1;
+                  log('info', `R1 换档标记 ${want} 被冷却跳过（距上次 ${Math.round(since / 1000)}s < ${EFFORT_SWITCH_MIN_MS / 1000}s）`);
+                } else {
+                  pendingEffortBySid.set(sidE, { effort: want, at: Date.now(), source: 'marker' });
+                  state.m3.lastEffortMarker = { at: new Date().toISOString(), sessionId: sidE, want, via: 'marker' };
+                  log('info', `R1 换档标记命中：[cp:effort ${want}]（session ${sidE.slice(0, 8)}…）→ 下一步应用`);
+                }
               }
               schedule('r1-effort', 400);
             }

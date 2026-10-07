@@ -362,8 +362,27 @@ ok('有换档冷却（防频繁换档反复打断前缀缓存）',
   /const EFFORT_SWITCH_MIN_MS = 30_000/.test(host) && /since < EFFORT_SWITCH_MIN_MS/.test(host),
   '无冷却 ⇒ 模型可每轮换档，反复使缓存失效');
 ok('尊重他人显式指定档位（让位，不覆盖）',
-  /config\?\.reasoningEffort !== undefined && applied !== undefined && config\.reasoningEffort !== applied/.test(host),
+  /config\?\.reasoningEffort !== undefined && applied !== undefined\s*\n?\s*&& config\.reasoningEffort !== applied && config\.reasoningEffort !== pend\.effort/.test(host),
   '未区分「自己写的档」与「他人显式指定」⇒ 与用户/subagent 选择打架或自我锁死');
+/* ⚠️ 必须 prepend：官方 installModelSelection 挂在**同一** agent/request 上且在内层，
+ * 它 await next() 后 delete reasoningEffort 再套回持久化 header 值 ⇒ 非最外层会被剥掉。
+ * 实测缺陷（2026-10-07）：applied:true 但之后每轮注入仍是旧档 ⇒ 换档实际未生效。 */
+ok('换档 hook 用 prepend（否则被官方 installModelSelection 剥掉）',
+  /\}, \{ prepend: true \}\); \/\/ ⚠️ 必须 prepend/.test(host),
+  '未 prepend ⇒ 官方内层会 delete 我们写入的 effort 再套回旧档（换档静默失效）');
+ok('pending 持久（每轮覆盖，不一次性消费）',
+  /pendingEffortBySid\.set\(sidE, \{ effort: want/.test(host) &&
+  !/const out = \{ \.\.\.config, reasoningEffort: pend\.effort \};\s*\n\s*delete out\.maxTokens;\s*\n\s*pendingEffortBySid\.delete/.test(host),
+  'pending 被一次性删除 ⇒ 只有第一轮生效，之后被内层打回旧档');
+ok('换档计数只在档位真变化时自增（否则变成请求次数）',
+  /const changed = config\?\.reasoningEffort !== pend\.effort;/.test(host) && /effortReasserts/.test(host),
+  '无条件自增 ⇒ effortSwitches 失去取证意义');
+ok('冷却基准只在真变化时更新（否则后续标记全被挡）',
+  /if \(changed\) \{\s*\n\s*effortSwitchAtBySid\.set\(sidKey, Date\.now\(\)\);/.test(host),
+  '每轮刷新冷却基准 ⇒ 冷却永远处于「刚换过」，模型后续标记全被跳过');
+ok('同值标记幂等短路（不消耗冷却）',
+  /cur && cur\.effort === want/.test(host) && /effortSkips\.sameValue/.test(host),
+  '同值标记未短路 ⇒ 重复写同值会白耗冷却');
 ok('应用时删除 maxTokens（不把上个 adapter 的 cap 钉住）',
   /const out = \{ \.\.\.config, reasoningEffort: pend\.effort \};\s*\n\s*delete out\.maxTokens;/.test(host),
   '未删 maxTokens ⇒ 换档后沿用旧 adapter 的输出上限（router-laya applyRoute 同款教训）');
