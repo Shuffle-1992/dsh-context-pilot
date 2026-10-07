@@ -692,18 +692,19 @@ window.__ModuleLoader__.load({
 				const buildHudRow = () => {
 					const row = document.createElement("div");
 					row.dataset.dcpHud = "1";
-					/* 行结构：line1 = 最近压缩（**按会话血统链过滤**，C-lineage）+徽章，line2 = 阈值速览（底部）。
-					 * 记录易丢的根因（已证）：DSH 压缩会轮转 session id（实测一个会话连换 3 个 id），
-					 * 仅按当前 id 过滤会在轮转后误判「无记录」；host getHud 现沿血统链回溯匹配。 */
-					row.style.cssText = "display:flex;flex-direction:column;align-items:center;gap:1px;padding:2px 12px 8px;text-align:center;";
+					/* 行结构：line1 = 最近压缩（**按会话血统链过滤**）+徽章，line2 = 阈值速览（贴底）。
+					 * 记录易丢的真根因（2026-10-07 定案）：host getHud 曾因 agents 作用域错误抛
+					 * ReferenceError ⇒ client 永远拿不到数据（与 session id 无关，血统链为旁路加固）。 */
+					row.style.cssText = "display:flex;flex-direction:column;align-items:center;gap:0;padding:2px 12px 1px;text-align:center;overflow:hidden;max-width:100%;box-sizing:border-box;";
 					const line1 = document.createElement("div");
-					line1.style.cssText = "display:flex;align-items:center;justify-content:center;gap:8px;";
+					line1.style.cssText = "display:flex;align-items:center;justify-content:center;gap:8px;max-width:100%;overflow:hidden;";
 					const label = document.createElement("span");
-					label.style.cssText = "opacity:.72;white-space:nowrap;";
+					/* 记录文字超长时在边界内省略（此前 nowrap 会溢出弹窗右缘） */
+					label.style.cssText = "opacity:.72;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;";
 					const chips = document.createElement("span");
 					chips.style.cssText = "display:inline-flex;align-items:center;gap:4px;flex:none;";
 					const thr = document.createElement("div");
-					thr.style.cssText = "font-size:10px;letter-spacing:.2px;opacity:.55;white-space:nowrap;";
+					thr.style.cssText = "font-size:10px;letter-spacing:.2px;opacity:.55;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis;";
 					const chip = (text, color) => {
 						const c = document.createElement("span");
 						c.textContent = text;

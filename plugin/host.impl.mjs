@@ -1386,12 +1386,16 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
           let guard = 0;
           while (cur && !chain.has(cur) && guard < 16) { chain.add(cur); cur = state.m5.lineage?.[cur]; guard++; }
           const filtered = sid ? list.filter((a) => chain.has(a.sid)) : list;
+          /* ⚠️ 2026-10-07 真根因修复：agents/sess 必须提到 onGetHud 作用域。
+           * 原实现在下方 occ IIFE 内部声明 agents，而 criticalCap 在 IIFE 外引用它
+           * ⇒ 每次 getHud 抛 ReferenceError("agents is not defined") ⇒ client 永远拿不到数据，
+           * 弹窗恒「本会话暂无压缩记录」。此前追的会话 id/血统链理论都在修一条走不到的路径。 */
+          const agents = svc('agents')?.list?.() ?? [];
+          const sess = svc('sessions')?.list?.() ?? [];
           /* 占用读数：让弹窗能显示「距智能压缩线还差多少」（client 侧可选消费，缺省不影响）。
            * 取目标会话的实时 measure —— sid 传了就测该会话，否则测最热的那个。 */
           const occ = (() => {
             try {
-              const agents = svc('agents')?.list?.() ?? [];
-              const sess = svc('sessions')?.list?.() ?? [];
               const pickTarget = () => {
                 if (sid) {
                   const a = agents.find((x) => String(pick(x?.session?.id, x?.sessionId, x?.id)) === sid);

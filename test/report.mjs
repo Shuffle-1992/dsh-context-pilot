@@ -77,6 +77,30 @@ for (const mustFull of ['m3-act', 'm4-probe', 'activation+2s', 'boot+10s']) {
 ok('slimSnapshot 函数存在且被 refresh 调用', /const slimSnapshot = /.test(host) && /SLIM_REASONS\.has\(reason\)/.test(host),
   'slimSnapshot 未被 refresh 使用（瘦身未生效）');
 
+/* ═══════════ 3.5 getHud 作用域契约（防 ReferenceError 回归）═══════════ */
+console.log('\n== 3.5 getHud 作用域契约（2026-10-07 真根因）==');
+// 实测事故：agents 声明在 occ IIFE 内部，criticalCap 却在 IIFE 外引用它 ⇒ 每次 getHud 抛
+// ReferenceError("agents is not defined") ⇒ client 永远拿不到数据、弹窗恒「暂无压缩记录」。
+const getHudBody = (() => {
+  const s = host.indexOf('onGetHud: (sid) =>');
+  if (s < 0) return '';
+  const e = host.indexOf('state.m5.hudPollReq', s);
+  return e > s ? host.slice(s, e) : host.slice(s, s + 4000);
+})();
+ok('解析出 onGetHud 函数体', getHudBody.length > 0, '未找到 onGetHud');
+ok('agents 在 onGetHud 顶层声明（不在 IIFE 内）',
+  /const agents = svc\('agents'\)/.test(getHudBody),
+  'agents 未在 onGetHud 顶层声明 ⇒ criticalCap 引用会抛 ReferenceError');
+const occStart = getHudBody.indexOf('const occ = (()');
+const occBody = occStart >= 0 ? getHudBody.slice(occStart, getHudBody.indexOf('})();', occStart)) : '';
+ok('occ IIFE 内不再重复声明 agents', !/const agents\s*=/.test(occBody),
+  'occ IIFE 内仍声明 agents ⇒ 外层 criticalCap 引用会 ReferenceError');
+ok('criticalCap 引用的 agents 在作用域内',
+  /criticalCap:[\s\S]{0,240}agents\.find/.test(getHudBody) && /const agents = svc\('agents'\)/.test(getHudBody),
+  'criticalCap 引用 agents 但作用域内无声明');
+ok('getHud 有常驻取证字段 hudPollReq', /state\.m5\.hudPollReq = \{/.test(host),
+  '缺 hudPollReq ⇒ 下次同类问题无法从报告判断 host 是否被调用');
+
 /* ═══════════ ④ 真实报告结构自洽（有报告才跑）═══════════ */
 console.log('\n== 4. 真实报告结构自洽 ==');
 if (!existsSync(REPORT)) {
