@@ -690,12 +690,12 @@ window.__ModuleLoader__.load({
 				const buildHudRow = () => {
 					const row = document.createElement("div");
 					row.dataset.dcpHud = "1";
-					/* 行结构：line1 = 压缩记录+徽章（居中），line2 = 阈值速览（智能压缩线/强制压缩线，配置镜像实时跟随） */
+					/* 行结构：line1 = 状态徽章（武装/待执行，无则整行隐藏），line2 = 阈值速览（底部）。
+					 * 压缩记录显示已移除（2026-10-07 用户决定：记录链路易丢、修过一轮仍不稳，不再上屏；
+					 * 数据仍在 hud-acts.json / 报告 m3.lastAct 取证，不受影响）。 */
 					row.style.cssText = "display:flex;flex-direction:column;align-items:center;gap:1px;padding:2px 12px 8px;text-align:center;";
 					const line1 = document.createElement("div");
 					line1.style.cssText = "display:flex;align-items:center;justify-content:center;gap:8px;";
-					const label = document.createElement("span");
-					label.style.cssText = "opacity:.72;white-space:nowrap;";
 					const chips = document.createElement("span");
 					chips.style.cssText = "display:inline-flex;align-items:center;gap:4px;flex:none;";
 					const thr = document.createElement("div");
@@ -711,11 +711,8 @@ window.__ModuleLoader__.load({
 						try {
 							const cfg = unwrapLiveDeep(settingsScope.getSnapshot()?.value) ?? {};
 							const v = { ...cfg, ...(hudRemote ?? {}) };
-							const act = typeof v.hudLastAct === "string" && v.hudLastAct ? v.hudLastAct : "";
-							label.textContent = act ? `最近压缩 ${act}` : "本会话暂无压缩记录";
-							/* 悬停 = 本会话最近压缩列表（新→旧，最多 5 条）+ 取证指纹 */
-							const actLines = Array.isArray(v.acts) && v.acts.length ? v.acts : (act ? [act] : []);
-							row.title = `${actLines.length ? actLines.join("\n") : "（本会话暂无压缩记录）"}\n—— dcp: gen=${v.gen || "?"} sid=${(NS.sid || "").slice(0, 13) || "?"}`;
+							/* 悬停仅保留取证指纹（压缩记录不再上屏/悬停，理由见行结构注释） */
+							row.title = `—— dcp: gen=${v.gen || "?"} sid=${(NS.sid || "").slice(0, 13) || "?"}`;
 							chips.replaceChildren();
 							if (v.hudArmed === "armed") chips.appendChild(chip("武装中", "#4c7dff"));
 							let pendingTask = "";
@@ -725,7 +722,8 @@ window.__ModuleLoader__.load({
 								c.title = `压缩后自动恢复执行：${pendingTask}`;
 								chips.appendChild(c);
 							}
-							/* 阈值速览：智能压缩线 / 强制压缩线（配置镜像实时跟随）+ 生效上限（C-own） */
+							line1.style.display = chips.childNodes.length ? "flex" : "none"; // 无徽章不占行
+							/* 底部阈值速览：智能压缩线 / 强制压缩线（配置镜像实时跟随）+ 生效上限（C-own） */
 							const pct = (x, d) => `${Math.round((Number.isFinite(Number(x)) ? Number(x) : d) * 100)}%`;
 							const capTxt = typeof NS.engineCap === "number" ? `（上限 ${pct(NS.engineCap)}）` : "";
 							thr.textContent = `智能压缩线 ${pct(v.markerMinRatio, 0.2)} ｜ 强制压缩线 ${pct(v.criticalRatio, 0.85)}${capTxt}`;
@@ -815,7 +813,6 @@ window.__ModuleLoader__.load({
 					if (NS.hudTimer) { try { clearInterval(NS.hudTimer); } catch { /* 忽略 */ } }
 					myTimerId = setInterval(() => { try { pullHud(); } catch { /* 忽略 */ } }, 5000);
 					NS.hudTimer = myTimerId;
-					line1.appendChild(label);
 					line1.appendChild(chips);
 					row.appendChild(line1);
 					row.appendChild(thr);
