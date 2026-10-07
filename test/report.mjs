@@ -100,6 +100,15 @@ ok('criticalCap 引用的 agents 在作用域内',
   'criticalCap 引用 agents 但作用域内无声明');
 ok('getHud 有常驻取证字段 hudPollReq', /state\.m5\.hudPollReq = \{/.test(host),
   '缺 hudPollReq ⇒ 下次同类问题无法从报告判断 host 是否被调用');
+/* 实测缺陷（2026-10-07）：getHud 给 engineThreshold 传了 `?.session`（Session 本体），
+ * 而 resolveCompactionFor 要的是 Agent（走 agent.ctx / agentPresets.serviceFor(agent,...)）
+ * ⇒ 每次 5s 轮询都写 via:unresolved/fallback:true，criticalCap 恒为兜底 0.8。
+ * 证据：getHud 的 engineCapProbe 时间戳与 hudPollReq 逐次吻合，而 pre-step 全部解析成功。 */
+const capArg = /criticalCap:\s*engineThreshold\(([\s\S]{0,260}?)\),\n/.exec(getHudBody)?.[1] ?? '';
+ok('解析出 criticalCap 的 engineThreshold 实参', capArg.length > 0, '未匹配到 criticalCap 实参');
+ok('criticalCap 传 Agent 本体（不得传 .session）',
+  capArg.length > 0 && !/\.session\s*\)/.test(capArg) && !/\)\?\.session/.test(capArg),
+  'criticalCap 传了 Session 而非 Agent ⇒ resolveCompactionFor 返回 unresolved，cap 恒为兜底值');
 
 /* ═══════════ ④ 真实报告结构自洽（有报告才跑）═══════════ */
 console.log('\n== 4. 真实报告结构自洽 ==');

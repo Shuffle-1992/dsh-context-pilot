@@ -310,3 +310,35 @@
   `crit/markerMin = 0.8/0.3`）——即 0.8 恰为引擎上限，钳制在此值上**不产生差异**（符合预期）。
   记录：`crit` 历史轨迹 0.7 → 0.5 → 0.75 → 0.5 → 0.7 → 0.8（面板写入实时到达 host，
   `mergeConfig` 活引用现读机制再次被验证）。
+
+### 方案 C 潜伏缺陷：getHud 传 Session 而非 Agent —— ✅ 2026-10-07
+
+**发现方式**（在上一轮验证「阈值行截断」时顺带核对报告，非用户报障）：
+`m3.engineCapProbe` 按事件分组统计后出现**两类互斥结果**：
+```
+35 x m3.5-prestep  -> agentPresets.serviceFor ratio=0.8 fallback=false
+24 x heartbeat     -> agentPresets.serviceFor ratio=0.8 fallback=false
+ 4 x heartbeat     -> unresolved            ratio=null fallback=true
+ 1 x m5-publish    -> unresolved            ratio=null fallback=true
+```
+`unresolved` 的时间戳与 `m5.hudPollReq`（13:18:50.660Z）**逐次吻合** ⇒ 锁定唯一嫌疑路径：
+getHud（client 5s 轮询）。
+
+**根因**：`criticalCap: engineThreshold(...?.session || agents[0]?.session || ...)` 传了
+**Session 本体**，而 `resolveCompactionFor(agent)` 的解析链是
+`agent.ctx.get('compaction')` / `agentPresets.serviceFor(agent,'compaction')` —— 两者都只认
+**Agent**，传 Session 全部落空 ⇒ 返回 `unresolved` ⇒ `engineThreshold` 走兜底
+`DEFAULT_ENGINE_THRESHOLD = 0.8`。
+
+**影响评估（诚实结论：当前无可见症状，但机制是坏的）**：
+- 引擎阈值恰为 0.8（官方默认），与兜底值相同 ⇒ **此刻 cap 恰好正确**，用户看不到任何异常；
+- 但方案 C 的**全部价值就在「动态跟随引擎阈值」**：一旦 DSH 改 `thresholdRatio`
+  （或未来换 provider/policy 导致阈值变化），client 拿到的 cap 会**静默停留在 0.8**，
+  钳制失效——即"看起来在工作、实际已失效"的典型潜伏故障。
+- 这正是我上一轮刚修完 `agents is not defined` 的同一函数里的**第二个作用域/实参错误**：
+  两个 bug 都藏在 getHud 里，且都被"恰好正确"的兜底值掩盖。
+
+**修复**：传 Agent 本体（`agents.find(...) || agents[0]`），删掉 `?.session` 两处。
+**防回归**：`report.mjs` §3.5 新增 2 条断言（解析 criticalCap 实参 + 断言不含 `.session`），
+并**实测验证断言是有效绊线**——对旧代码 `flaggedBad=true`（失败），对新代码通过；
+「两边都通过的测试等于没测」。

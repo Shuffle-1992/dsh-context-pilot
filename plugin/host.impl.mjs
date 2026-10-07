@@ -1423,8 +1423,17 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
             occupancyRatio: occ.ratio,
             occupancyWindow: occ.window,
             /* C-own：生效强制线上限（用户配置与引擎阈值取小）——client 保存时钳制用。
-             * 引擎阈值与具体会话无关（服务实例级配置），但解析需一个 agent 作用域 ⇒ 有 sid 用该会话，否则用首个 agent。 */
-            criticalCap: engineThreshold((sid && agents.find((x) => String(pick(x?.session?.id, x?.sessionId, x?.id)) === sid)?.session) || agents[0]?.session || agents[0] || null),
+             * 引擎阈值与具体会话无关（服务实例级配置），但解析需一个 agent 作用域 ⇒ 有 sid 用该会话，否则用首个 agent。
+             * ⚠️ 2026-10-07 修：这里必须传 **Agent 本体**，不能传 `agent.session`——resolveCompactionFor
+             * 走 `agent.ctx.get('compaction')` / `agentPresets.serviceFor(agent,'compaction')`，
+             * 传 Session 两者都不认 ⇒ 返回 unresolved ⇒ criticalCap 恒为 fallback 0.8。
+             * 实测证据：getHud（5s 轮询）写入的 engineCapProbe 全部 `via:unresolved, fallback:true`
+             * （时间戳与 hudPollReq 逐次吻合），而 pre-step/快照（传 Agent）全部
+             * `via:agentPresets.serviceFor, ratio:0.8, fallback:false`。当前引擎阈值恰为 0.8
+             * 故无可见差异，但引擎阈值被改时 client 会拿到错误的 cap。 */
+            criticalCap: engineThreshold(
+              (sid && agents.find((x) => String(pick(x?.session?.id, x?.sessionId, x?.id)) === sid)) || agents[0] || null,
+            ),
             at: new Date().toISOString(),
           };
           /* getHud 取证（2026-10-07）：记录不显示时从报告直接看「client 传了什么 sid、host 回了什么」——
