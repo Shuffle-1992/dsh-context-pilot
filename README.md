@@ -19,7 +19,7 @@ DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`（面板名�
 
 可选（智能思考开关）：
           读当前模型的思考强度档位 → 注入给 Agent → Agent 按任务难度自行换档
-          （写 [cp:effort <档>]，下一步生效，任务不中断）
+          （调用工具 set_reasoning_effort，**本次任务内立即生效**，任务不中断）
 ```
 
 **要解决的问题**：长会话上下文压力不可见；原生自动压缩（80%）只看占用、不看任务——
@@ -68,12 +68,27 @@ DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`（面板名�
 
 | 项 | 内容 |
 | --- | --- |
-| **注入** | 一次性教学（教用法）+ 每轮用量行后缀「｜ 思考强度 xhigh」 |
-| **标记** | `[cp:effort high]` —— Agent 在回复最后一行**独占一行**写，**下一步生效** |
+| **注入** | 一次性教学（教工具用法）+ 每轮用量行后缀「｜ 思考强度 high」 |
+| **触发** | **工具 `set_reasoning_effort`**（参数 `effort=<档位>`）—— 见下「为什么是工具不是标记」 |
 | **执行 seam** | `agent/request` waterfall + **`prepend: true`**（见下「为什么必须 prepend」） |
 | **不中断** | 只改请求头一个字段：会话历史不动、不插消息、工具链不断 |
-| **显示** | 输入框模型选择器左侧 chip「智能思考档位 low · 冷却 23s」——**响应式投影，零轮询** |
+| **显示** | 输入框模型选择器左侧 chip「智能思考档位 high · 冷却 23s」——**响应式投影，零轮询** |
 | **冷却** | 30s（防频繁换档反复打断前缀缓存）；chip 上显示剩余秒数 |
+
+**为什么是工具而不是文本标记（2026-10-08 用户指出后重构）**：
+原方案是模型在回复末尾写 `[cp:effort high]` 文本标记，但有**两个致命问题**：
+1. **需要用户再发消息**——标记写在回复末尾时本轮已结束，档位只在**下一轮**（用户下次说话）生效
+2. **若仿压缩"自动拉起"则是伪造用户输入**——那是往 `inbox.next-turn` 塞一条假用户消息
+
+**工具为什么能解决**（`dsh-agent-loop` L1152-1155 源码实证）：
+```js
+const toolCalls = message.content.filter((b) => b.type === "tool-call");
+if (toolCalls.length === 0) return { kind: "completed" };   // 无工具 ⇒ 本轮结束
+return concluded ? { kind: "completed" } : null;            // 有工具 ⇒ null = 继续下一步
+```
+⇒ **工具调用让本轮继续到下一步**，而每步都重走 `agent/request` ⇒ 下一步的请求即带新档位。
+**全程零用户输入、零伪造消息、同轮内生效。** 顺带消除了文本标记的「散文提及误触发」风险
+（工具参数结构化，无正则误判面）。
 
 **为什么必须 `prepend: true`（2026-10-08 实测踩坑）**：
 官方 `installModelSelection` 挂在**同一个** `agent/request` 上且在**外层**，
@@ -89,20 +104,17 @@ Agent 自改档不应改掉新会话的默认档。
 （实测 `trae/deepseek-v4.1-flash` = `low/high/xhigh`，workbuddy 同名模型 = `off/low/high/max`），
 **绝不硬编码档位表**。应用前必须校验合法性，否则 `dsh-llm` 会抛
 `UNSUPPORTED_REASONING_EFFORT` **中断该次请求**。
-
-**标记必须独占一行**：正则锚定 `^...$`。宽松子串匹配会被**散文提及**误触发——
-本插件注入的教学文本本身就含该语法，模型复述它（「你可以写 `[cp:effort high]` 来换档」）
-就会被当成指令。（压缩标记用 `endsWith` 天然规避；effort 因位置自由才暴露此坑。）
+工具侧**不抛错**——非法档/冷却中返回结构化错误让模型自行纠正（抛错会中断本轮）；
+`agent/request` 侧则必须校验并静默忽略（那是请求能否发出的最后一道闸）。
 
 **让位他人选择**：若当前请求的档位既不是本插件上次写的、也不是本次想写的
 （用户手动选档 / subagent 自带 `reasoning_effort`）⇒ 不覆盖。
 
-**成本**：一次性教学 ≈80 token + 每轮后缀 ≈7 token（20 轮共 ≈220 token ≈ $0.00003）。
+**成本**：一次性教学 ≈120 token + 每轮后缀 ≈7 token。
 ⚠️ 换档可能使前缀缓存失效（`call-config.js` 注明 effort 属 cache-affecting 状态）——
 这是换档的真实代价，故设 30s 冷却并建议一次任务 1–2 次（已写进注入的教学文本）。
 
-**已实测闭环**（2026-10-08）：写 `[cp:effort low]` → 标记解析 → 档位校验 →
-prepend 应用 → **下一轮注入行变为「｜ 思考强度 low」** ✅
+**已实测**（2026-10-08）：工具注册成功（`effortTool.ok=true, via=tools.register`）+ 注入改写为工具版本。
 
 > 调查与设计全文：[`docs/r1-reasoning-effort-investigation.md`](docs/r1-reasoning-effort-investigation.md)
 > ｜ [`docs/r1-effort-design.md`](docs/r1-effort-design.md)
@@ -142,10 +154,12 @@ prepend 应用 → **下一轮注入行变为「｜ 思考强度 low」** ✅
 - **M5.5** 任务挂起-自动恢复：多通道投递（A sessionController → B remote → C direct-followup），
   **三测复现通过**，实际走通道 C
 - **M5.7** 压缩历史持久化（`hud-acts.json`，cap 50）：跨重启/跨 toggle 存续
-- **R1 智能思考**（2026-10-07/08，**全链路完成并真机验证**）：读档/枚举/写档三腿运行时实证；
+- **R1 智能思考**（2026-10-07，**已由 R2 取代触发方式**）：读档/枚举/写档三腿运行时实证；
   注入教学 + 每轮档位后缀；弹窗开关 + 输入框档位 chip（**响应式投影，零轮询**）；
-  `[cp:effort]` 换档通道（**prepend 最外层应用** + 合法性校验 + 30s 冷却 + 让位他人选择）；
-  **实测闭环**：写标记 → 下一轮注入行变为新档位 ✅
+  `agent/request` + **prepend 最外层应用**（R2 沿用）+ 合法性校验 + 30s 冷却 + 让位他人选择
+- **R2 换档改工具**（2026-10-08，**已注册生效**）：`set_reasoning_effort` 工具取代文本标记。
+  工具调用让本轮**继续到下一步**（源码实证）⇒ **本次任务内立即生效、零用户输入、零伪造消息**；
+  顺带消除文本标记的「散文提及误触发」面。实测 `effortTool.ok=true, via=tools.register`
 - **配置面**：7 个字段，面板按秒/比率显示（总开关为开关滑块）；成本阈值计算器（8 个模型预设，一键算推荐值并写入）
 - **只读审查落地**：外部审查 23 条，批次 1/2/3 全部实施（含心跳泄漏、`ctx.effect` 语义误用等真 bug）
 
@@ -231,15 +245,16 @@ npm run asar -- grep --pattern compactIfNeeded --ext js --ctx 3
 | 面板字段 | 配置键 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | 总开关 | `enabled` | true | 关闭后完全恢复原生 DSH（面板为开关滑块） |
-| **智能思考** | `effortEnabled` | false | 开=向 Agent 暴露思考档位并允许其自主换档；关=提示词不注入、标记也不生效 |
+| **智能思考** | `effortEnabled` | false | 开=暴露思考档位 + 注册 `set_reasoning_effort` 工具；关=提示词不注入、工具也不注册 |
 | **智能压缩线** | `markerMinRatio` | 0.2 | 占用达此值时模型可自行决定压缩并自动续跑 |
 | **强制压缩线** | `criticalRatio` | 0.85 | 占用达此值无条件强制压缩 |
 | 压缩标记 | `marker` | `[cp:compact]` | 模型回复尾行标记；置空则关闭智能压缩 |
 | 标记有效期(秒) | `armedTtlMs` | 120 | 标记后多久内有效（存储为 ms） |
 | 强制压缩冷却(秒) | `sweepMinIntervalMs` | 600 | 两次强制压缩的最小间隔（存储为 ms） |
 
-**智能思考档位标记**：`[cp:effort <档>]`（如 `[cp:effort high]`）——固定语法，档位取值由
-当前模型动态决定（插件注入时会告知可选档）。**不设独立配置键**（无需用户填）。
+**智能思考换档工具**：`set_reasoning_effort`（参数 `effort=<档位>`）——工具名固定，
+档位取值由当前模型动态决定（插件注入时会告知可选档）。**不设独立配置键**（无需用户填）。
+> R1 曾用文本标记 `[cp:effort <档>]`，因「需用户再发消息才生效」于 R2 改为工具（用户决定，不保留标记）。
 
 > 历史版本曾有的 `policyCardMinRatio`（决策卡门槛）、`highRatio`（审计参考线）、
 > `lightTaskChars`（轻任务阈值）**已删除**——前者并入 `markerMinRatio`，后两者在决策主体
@@ -304,5 +319,5 @@ node docs/reference/tools/asar-query.cjs extract --paths "/dsh/node_modules/..."
 3. 占用达**强制压缩线**时，插件无条件压缩（pre-step / idle 兜底），压缩事件出现在会话日志；
 4. 两条线可经 Config 配置（面板按秒/比率显示），改后**即时生效**（活读，无需重启）；
 5. 插件任何异常不影响 DSH 主流程（激活安全零抛）。
-6. **智能思考**（开启时）：注入当前档位 + 可选档；Agent 写 `[cp:effort <档>]` 可自主换档，
-   **下一步生效、任务不中断**；关闭时提示词不注入、标记不生效。
+6. **智能思考**（开启时）：注入当前档位 + 可选档；Agent 调用工具 `set_reasoning_effort`
+   可自主换档，**本次任务内立即生效、任务不中断、无需用户操作**；关闭时提示词不注入、工具不注册。

@@ -504,3 +504,65 @@ return { ...withoutInheritedEffort,        // ← 内层写的 effort 在这里�
 **防回归**：`contract.mjs` §6.9/§6.12 共 15 条相关断言，总计 **233 断言**。
 **6 条绊线均实测有效**：恢复 5s 轮询 / 倒计时不按 cooling 启停 / 冷却不显示在档位后 /
 去掉 cooling 判断 / 加回 setInterval / 去掉 useProjection → 全部 FIRES。
+
+### R2：换档改「工具」——用户指出标记方案的根本缺陷 —— ✅ 2026-10-08
+
+**用户诊断（完全正确）**：
+> 「我发起问题，第一步思考时就获取到当前档位和可选档位和提示词，换档位，执行标记，触发，
+> 重新进入思考（以新档位），继续干活，过程中如果有必要就继续换，完成任务结束。」
+> 「需要我再发起才能触发标记。这个就失去意义了。」
+> 「最好是无感换档执行的，不要像压缩标记那样重新自动拉起——
+> **压缩标记的自动拉起本质是调用我的输入框发起新的内容拉起的**。」
+
+**R1 标记方案的两个致命缺陷**：
+1. 标记写在回复末尾 ⇒ 本轮已结束 ⇒ 档位只在**下一轮**（用户下次说话）生效
+2. 若仿压缩用 `agent.followup()` 自动拉起 ⇒ 往 `inbox.next-turn` **伪造一条用户消息**（替用户发言）
+
+**正确的机制（源码实证）**：`dsh-agent-loop` L1152-1155
+```js
+const toolCalls = message.content.filter((b) => b.type === "tool-call");
+if (toolCalls.length === 0) return { kind: "completed" };   // 无工具 ⇒ 本轮结束
+return concluded ? { kind: "completed" } : null;            // 有工具 ⇒ null = 继续下一步
+```
+⇒ **工具调用让本轮继续**（turnEnds 保持 null ⇒ L1005 不 break ⇒ `target="next-step"`），
+而每步都重走 `prepareRequest` → `agent/request` waterfall（L1179）
+⇒ **下一步的请求即带新档位**。零用户输入、零伪造消息、同轮内生效。
+
+**对比**：
+
+| 方案 | 生效时机 | 需用户输入 | 模型知道结果 | 误触发风险 |
+| --- | --- | --- | --- | --- |
+| 文本标记 | 回复末尾 → 本轮结束 | ❌ **需要** | ❌ 不知道 | ❌ 散文提及会误触发 |
+| **工具调用** | **同轮下一步** | ✅ 不需要 | ✅ 有返回值 | ✅ 无（结构化参数） |
+
+**参考项目原理（补充分析）**：`dsh-router-laya` 在 `agent/request` 里直接改 config
+（L886-975），任务文本从 `agent/inbox/claimed` 抓（L875），难度由本地小模型判（L582）——
+**换档发生在「请求组装时」，无需用户输入**。但它"外部模型替你决定"，
+与用户要的"Agent 自己决定"不同 ⇒ 取它的「生效时机」，决定权仍交 Agent。
+
+**前置验证（不建立在假设上）**：先加一次性只读探针 `snap.r2Probe` 实测：
+`toolsService: "object" | hasRegister: true | agentHasCtxTools: true` ⇒ 注册路径可达。
+
+**实现**（照官方 `dsh-tool-ask-user` 范式）：
+- `loadDefineTool()`：与 `createUserMessage` 同款候选链（bare → env → resourcesPath → 硬编码）。
+  实测 `via: "resourcesPath/app.asar|import"`（bare import 第三方目录必失败——本项目已有教训）
+- `registerEffortTool()`：`defineTool({ name, description, parameters, output, execute })`
+  + `tools.register(def)`
+- **工具不抛错**：非法档/冷却中返回结构化结果（`{ok:false, error, options}` /
+  `{ok:false, cooling:true, remainSec}`）让模型自行纠正——抛错会中断本轮。
+  这与 `agent/request` 侧必须校验（否则 llm 抛 `UNSUPPORTED_REASONING_EFFORT` 中断请求）
+  是**两层不同的保护**
+- `effortEnabled` 关闭时**不注册**（完全不介入）；会话中途打开开关则懒注册
+- 教学文本改写为教工具用法（6/6 覆盖度，③ 由「标记语法」→「工具名+调用方式」，
+  ⑤ 由「下一步生效」→「本次任务内立即生效」）
+- **移除**：`EFFORT_MARKER_RE` 正则、`session/event` 里的标记解析、§6.13 散文误触发断言
+  （工具方案无正则误判面，该断言随之退役）
+
+**取证字段**：`m3.effortTool`（注册结果）、`m3.effortToolLoader`（加载链）、`m3.effortToolCalls`。
+
+**实测**：`effortTool = {ok:true, name:"set_reasoning_effort", via:"tools.register"}` ✅
+注入文本已变为工具版本（本轮上下文可见）。
+
+**防回归**：`contract.mjs` §6.13 重写为 16 条工具契约断言（标记已移除 / 工具名 /
+官方 defineTool / tools.register / 候选链 / 关闭不注册 / 懒注册 / 不抛错 / 冷却返回 remainSec /
+写持久 pending / 参数与 output schema / 异常吞 / 取证字段），总计 **242 断言全通过**。

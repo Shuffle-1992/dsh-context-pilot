@@ -61,7 +61,7 @@ window.__ModuleLoader__.load({
 		 *  备注精简原则（2026-10-07 用户要求）：一行说清用途，不写推荐值枚举（推荐值在计算器里实时算）。 */
 		const FIELDS = [
 			{ key: "enabled", label: "总开关", type: "bool", def: true, hint: "关闭后完全恢复原生 DSH" },
-			/* R1（2026-10-07）：智能思考总门——开=注入思考强度信息 + 允许 Agent 写 [cp:effort] 改档；
+			/* R2（2026-10-08）：智能思考总门——开=注入思考强度信息 + 注册 set_reasoning_effort 工具；
 			 * 关=提示词不注入、标记也不生效（用户明确定义：一个开关管两件事，不做"只读/只写"拆分）。 */
 			{ key: "effortEnabled", label: "智能思考", type: "bool", def: false, hint: "开启后向 Agent 暴露思考档位并允许其自主换档；关闭则完全不介入" },
 			{ key: "markerMinRatio", label: "智能压缩线", type: "num", def: 0.2, hint: "占用达此值时，模型可自行决定压缩并自动续跑" },
@@ -388,7 +388,7 @@ window.__ModuleLoader__.load({
 				),
 				el("div", { className: "dcp-hint" },
 					"保存写入插件配置并触发重载。压缩标记通道：模型回复尾行写标记 → 本轮结束自动压缩（详见政策卡）。"
-					+ "智能思考：开启后向 Agent 暴露当前思考档位（可选档由模型动态决定）并允许其写 [cp:effort <档>] 自主换档，下一步生效、任务不中断；关闭则提示词不注入、标记也不生效。"),
+					+ "智能思考：开启后向 Agent 暴露当前思考档位（可选档由模型动态决定）并允许其调用 set_reasoning_effort 工具自主换档，本次任务内立即生效、不中断；关闭则提示词不注入、工具也不注册。"),
 				el(PriceCalculator, { writable, saving, onApply: applyRecommendation }),
 			);
 		}
@@ -575,7 +575,7 @@ window.__ModuleLoader__.load({
 				coolLeft > 0
 					? `换档冷却中：还剩 ${coolLeft}s（冷却 ${Math.round((hostInfo.cooldownTotalMs || 30000) / 1000)}s，防频繁换档打断前缀缓存）`
 					: "换档冷却：已就绪",
-				"Agent 可写 [cp:effort <档>] 自主换档（下一步生效）",
+				"Agent 可调用 set_reasoning_effort 工具自主换档（本次任务内立即生效）",
 			].join("\n");
 			return el("div", {
 				ref,
@@ -828,7 +828,7 @@ window.__ModuleLoader__.load({
 						}
 					});
 					/* ② 智能思考开关（R1 新增）：独立配置字段 effortEnabled，与总开关解耦。
-					 * 语义（用户定义）：开 = 注入思考强度提示词 + 允许 Agent 写 [cp:effort] 改档；关 = 两者都不做。 */
+					 * 语义（用户定义）：开 = 注入思考强度提示词 + 注册换档工具；关 = 两者都不做。 */
 					const wrapE = document.createElement("label");
 					/* 右对齐（用户要求「智能思考+开关右对齐」）：margin-left:auto 吃掉中间全部剩余空间，
 					 * 把本组推到行最右缘 —— 与上方数值列（如 ~282K）右对齐，也与弹窗右边界一致。

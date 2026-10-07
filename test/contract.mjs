@@ -285,8 +285,11 @@ const effInject = (() => {
 })();
 ok('解析出 effort 注入段', effInject.length > 0, '未找到 effort 注入段');
 ok('智能思考注入用独立门控 effortEnabled（不共用 markerMinRatio）',
-  /if \(M3\.effortEnabled === true\) \{[\s\S]{0,120}?ensureEffortHooks\(\);[\s\S]{0,80}?eff = await readEffort\(agent\)/.test(effInject),
+  /if \(M3\.effortEnabled === true\) \{[\s\S]{0,200}?eff = await readEffort\(agent\)/.test(effInject),
   'effort 注入未走 effortEnabled 独立门控 ⇒ 低占用时被压缩门控挡掉（用户要求全程允许）');
+ok('注入段同时确保钩子与工具就绪（懒安装）',
+  /ensureEffortHooks\(\);/.test(effInject) && /registerEffortTool\(\);/.test(effInject),
+  '未懒安装 ⇒ 会话中途打开开关后钩子/工具不生效');
 /* 剥注释后再查：注释里说明「与 markerMinRatio 解耦」是正常文字，代码里引用才是耦合。 */
 const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 ok('effort 注入段不引用 markerMinRatio（剥注释后）', !/markerMinRatio/.test(stripComments(effInject)),
@@ -302,18 +305,21 @@ ok('用量行后缀拼装（每轮告知当前实际档位）',
   /effSuffix \? `\$\{r\.text\} ｜ \$\{effSuffix\}` : r\.text/.test(injectBody),
   '未拼后缀 ⇒ 模型不知道当前**实际生效**档位');
 // 教学文本覆盖度 6/6（用户指出「暴露了但不会调用」——必须教）
+// R2 变更：③ 由「标记语法」改为「**工具名 + 调用方式**」；⑤ 由「下一步生效」改为「本次任务内立即生效」
 const effBrief = /const renderEffortBrief = \(eff\) => \{([\s\S]*?)\n  \};/.exec(host)?.[1] ?? '';
 ok('解析出 renderEffortBrief', effBrief.length > 0, '未找到教学文本函数');
 for (const [name, re] of [
   ['① 当前值', /当前思考强度档位：' \+ eff\.current/],
   ['② 可选档', /本模型可选 ' \+ opts/],
-  ['③ 标记语法', /\[cp:effort <档>\]/],
+  ['③ 工具名+调用方式', /EFFORT_TOOL_NAME \+ '（参数 effort=<档位>）'|调用工具 '/],
   ['④ 何时该用', /更深推理|更快响应/],
-  ['⑤ 生效时机+不中断', /下一步生效，上下文与任务不中断/],
+  ['⑤ 生效时机+不中断', /本次任务内立即生效|任务与上下文不中断/],
   ['⑥ 代价提醒', /缓存失效|1-2 次/],
 ]) {
   ok(`教学覆盖 ${name}`, re.test(effBrief), `教学文本缺 ${name} ⇒ 模型无法自主调用`);
 }
+ok('教学不再提文本标记（用户要求不保留）', !/\[cp:effort/.test(effBrief),
+  '教学仍教 [cp:effort] 标记 ⇒ 与「不保留文本标记」的决定矛盾');
 ok('无档可调时不注入（返回 null）', /if \(!eff\?\.ok \|\| !eff\.current\) return null;/.test(effBrief),
   '模型不支持思考档时仍注入 ⇒ 打扰且误导');
 
@@ -369,9 +375,9 @@ ok('删除/记忆用实际命中的 key（避免孤儿 pending）',
   '用固定 sid 删除 ⇒ 命中另一 key 时留下孤儿 pending（下次误触发）');
 // 声明顺序（const 无提升，TDZ 会抛 ReferenceError）
 for (const [name, def, use] of [
-  ['EFFORT_MARKER_RE', 'const EFFORT_MARKER_RE', 'etext.matchAll(EFFORT_MARKER_RE)'],
   ['installEffortRequestHook', 'const installEffortRequestHook', 'installEffortRequestHook(a)'],
   ['ensureEffortHooks', 'const ensureEffortHooks', 'ensureEffortHooks();'],
+  ['registerEffortTool', 'const registerEffortTool', 'registerEffortTool();'],
 ]) {
   ok(`${name} 声明早于使用（防 const TDZ）`, host.indexOf(def) < host.indexOf(use),
     `${name} 声明在使用之后 ⇒ 运行时 TDZ 抛错`);
@@ -398,51 +404,76 @@ ok('换档 hook 用 prepend（否则被官方 installModelSelection 剥掉）',
   /\}, \{ prepend: true \}\); \/\/ ⚠️ 必须 prepend/.test(host),
   '未 prepend ⇒ 官方内层会 delete 我们写入的 effort 再套回旧档（换档静默失效）');
 ok('pending 持久（每轮覆盖，不一次性消费）',
-  /pendingEffortBySid\.set\(sidE, \{ effort: want/.test(host) &&
+  /pendingEffortBySid\.set\(sid, \{ effort: want/.test(host) &&
   !/const out = \{ \.\.\.config, reasoningEffort: pend\.effort \};\s*\n\s*delete out\.maxTokens;\s*\n\s*pendingEffortBySid\.delete/.test(host),
   'pending 被一次性删除 ⇒ 只有第一轮生效，之后被内层打回旧档');
 ok('换档计数只在档位真变化时自增（否则变成请求次数）',
   /const changed = config\?\.reasoningEffort !== pend\.effort;/.test(host) && /effortReasserts/.test(host),
   '无条件自增 ⇒ effortSwitches 失去取证意义');
-ok('冷却基准只在真变化时更新（否则后续标记全被挡）',
+ok('冷却基准只在真变化时更新（否则后续换档全被挡）',
   /if \(changed\) \{\s*\n\s*effortSwitchAtBySid\.set\(sidKey, Date\.now\(\)\);/.test(host),
-  '每轮刷新冷却基准 ⇒ 冷却永远处于「刚换过」，模型后续标记全被跳过');
-ok('同值标记幂等短路（不消耗冷却）',
-  /cur && cur\.effort === want/.test(host) && /effortSkips\.sameValue/.test(host),
-  '同值标记未短路 ⇒ 重复写同值会白耗冷却');
+  '每轮刷新冷却基准 ⇒ 冷却永远处于「刚换过」，模型后续换档全被跳过');
 ok('应用时删除 maxTokens（不把上个 adapter 的 cap 钉住）',
   /const out = \{ \.\.\.config, reasoningEffort: pend\.effort \};\s*\n\s*delete out\.maxTokens;/.test(host),
   '未删 maxTokens ⇒ 换档后沿用旧 adapter 的输出上限（router-laya applyRoute 同款教训）');
 ok('换档异常原样放行（绝不影响请求）', /catch \(e\) \{\s*\n\s*log\('warn', `R1 换档应用异常（吞，原样放行）/.test(host),
   '异常未吞 ⇒ 新功能可打崩模型请求');
 
-/* ═══════════ 6.13 换档标记必须独占一行（防散文误触发）═══════════ */
-console.log('\n== 6.13 换档标记正则（防「散文提及」误触发）==');
-// E2E 前自查发现的真风险：本插件注入的教学文本本身就含「[cp:effort <档>]」字样，
-// 模型引用/复述它时（「你可以写 [cp:effort high] 来换档」）宽松正则会误判为指令。
-// 压缩标记用 endsWith 天然规避（要求结尾），effort 标记位置自由才暴露该问题。
-const markerReSrc = /const EFFORT_MARKER_RE = \/(.+?)\/([a-z]*);/.exec(host);
-ok('解析出 EFFORT_MARKER_RE', !!markerReSrc, '未找到换档标记正则');
-ok('换档标记正则要求独占一行（含 ^ 与 $）',
-  !!markerReSrc && /^\^/.test(markerReSrc[1]) && /\$$/.test(markerReSrc[1]),
-  '正则未锚定行首行尾 ⇒ 散文里提及 [cp:effort x] 会被误当成指令（模型复述教学文本即触发）');
-ok('换档标记正则带 m 标志（多行匹配）', !!markerReSrc && /m/.test(markerReSrc[2]),
-  '缺 m 标志 ⇒ ^$ 只匹配整串首尾，正文里的独立行匹配不到');
-// 行为验证：用真实正则跑误触发用例
-if (markerReSrc) {
-  const re = new RegExp(markerReSrc[1], markerReSrc[2].includes('g') ? markerReSrc[2] : markerReSrc[2] + 'g');
-  const hits = (t) => [...t.matchAll(new RegExp(re.source, 'gm'))].map((m) => m[1]);
-  ok('散文提及不触发（「你可以写 [cp:effort high] 来换档」）',
-    hits('你可以写 [cp:effort high] 来换档。').length === 0,
-    '散文提及被误判为指令 ⇒ 模型复述教学文本就会意外换档');
-  ok('独占一行正常触发', hits('需要更深的推理。\n[cp:effort high]').join(',') === 'high',
-    '独占一行的标记未被识别 ⇒ 换档永不生效');
-  ok('与压缩标记共存时只识别 effort',
-    hits('[cp:effort high]\n[cp:compact]').join(',') === 'high',
-    '与 [cp:compact] 共存时解析异常');
-  ok('行首行尾空白容错', hits('  [cp:effort max]  ').join(',') === 'max',
-    '带空格的独立行未识别（模型可能缩进）');
-}
+/* ═══════════ 6.13 R2 换档工具（取代文本标记）═══════════ */
+console.log('\n== 6.13 换档工具 set_reasoning_effort（R2，取代文本标记）==');
+// 用户 2026-10-08 决策：① 不保留文本标记；② 工具名 set_reasoning_effort。
+// 工具方案为什么对（源码实证）：dsh-agent-loop L1152-1155 有 toolCalls ⇒ step() 返回 null
+// ⇒ turnEnds 保持 null ⇒ L1005 不 break ⇒ target="next-step" ⇒ **本轮继续**；
+// 每步重走 agent/request ⇒ 下一步即带新档位。零用户输入、零伪造消息。
+ok('文本标记已移除（用户要求不保留）',
+  !/EFFORT_MARKER_RE/.test(host) && !/\[cp:effort/.test(stripComments(host)),
+  '仍残留 [cp:effort] 标记解析 ⇒ 与「不保留文本标记」的决定矛盾');
+ok('session/event 不再解析换档标记',
+  !/matchAll\(EFFORT_MARKER_RE\)/.test(host),
+  'session/event 仍在解析标记');
+ok('工具名 = set_reasoning_effort（用户指定）',
+  /const EFFORT_TOOL_NAME = 'set_reasoning_effort';/.test(host),
+  '工具名不符用户指定');
+ok('用官方 defineTool 定义（非自造 API）',
+  /defineToolFn\(\{[\s\S]{0,200}?name: EFFORT_TOOL_NAME/.test(host),
+  '未走官方 defineTool ⇒ 注册可能被拒');
+ok('走官方 ctx.tools.register 注册',
+  /tools\.register\(def\)/.test(host) && /svc\('tools'\)/.test(host),
+  '未用 tools.register ⇒ 工具不生效');
+ok('defineTool 走候选链加载（bare→env→resourcesPath→硬编码）',
+  /async function loadDefineTool\(\)/.test(host) && /dshToolsCandidates/.test(host),
+  '未走候选链 ⇒ 第三方目录下 bare import 必失败（本项目已有教训）');
+ok('effortEnabled 关闭时不注册工具（完全不介入）',
+  /if \(M3\.effortEnabled === true\) registerEffortTool\(\);/.test(host),
+  '关闭时仍注册 ⇒ 与「关=完全不介入」的用户定义矛盾');
+ok('会话中途打开开关会补注册（懒注册）',
+  /registerEffortTool\(\); \/\/ R2：确保工具已注册/.test(host),
+  '只在加载时注册一次 ⇒ 中途打开开关后工具不可用');
+// 工具必须**不抛错**（抛错会中断本轮；这里只想"告知 + 不换"）
+ok('工具非法档返回结构化错误而非抛错（抛错会中断本轮）',
+  /return \{ ok: false, error: `档位 "\$\{want\}" 不在当前模型的可选集内。`, options: opts \};/.test(host),
+  '非法档抛错 ⇒ 中断模型本轮（应当返回错误让模型自行纠正）');
+ok('工具冷却中返回 remainSec（模型能知道等多久）',
+  /return \{\s*\n\s*ok: false, cooling: true, remainSec/.test(host),
+  '冷却仅静默忽略 ⇒ 模型不知为何没生效');
+ok('工具写的是持久 pending（复用 R1 的 prepend 应用链）',
+  /pendingEffortBySid\.set\(sid, \{ effort: want, at: Date\.now\(\), source: 'tool' \}\)/.test(host),
+  '工具未写 pending ⇒ agent/request 拿不到目标档位');
+ok('工具有参数 schema（effort 必填）',
+  /effort: \{[\s\S]{0,120}?required: true/.test(host),
+  '缺参数 schema ⇒ defineTool 校验失败/模型不知道传什么');
+ok('工具有 output schema + render',
+  /output: \{[\s\S]{0,80}?schema: \{[\s\S]{0,900}?render: \(_args, value\) => \[\{ type: 'text', text: JSON\.stringify\(value\) \}\]/.test(host),
+  '缺 output.render ⇒ 工具结果无法渲染给模型');
+ok('工具执行异常被吞并返回错误（不影响会话）',
+  /R2 换档工具执行异常（吞）/.test(host),
+  '异常未吞 ⇒ 可打崩工具调用');
+ok('工具注册结果有取证字段（effortTool / effortToolLoader）',
+  /effortTool: null/.test(host) && /effortToolLoader: null/.test(host),
+  '缺取证 ⇒ 工具没生效时无法定位断点');
+/* R1 的「标记必须独占一行（防散文误触发）」断言已随文本标记一并移除——
+ * 工具方案参数结构化，**不存在**正则误判面（这正是换工具的理由之一）。
+ * 历史记录见 docs/milestones.md（R1 那节仍保留该坑的描述，供后来者参考）。 */
 
 /* ═══════════ 7. mergeConfig 读取集 ⊆ schema 键 ═══════════ */
 console.log('\n== 7. mergeConfig 读取集 ⊆ schema 键 ==');
