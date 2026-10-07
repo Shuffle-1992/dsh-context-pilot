@@ -91,13 +91,15 @@ DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`：**让长�
 - **配置面**：7 个字段，面板按秒/比率显示；成本阈值计算器（8 个模型预设，一键算推荐值并写入）
 - **只读审查落地**：外部审查 23 条，批次 1/2/3 全部实施（含心跳泄漏、`ctx.effect` 语义误用等真 bug）
 
-**未实施（明确挂起）**：D1 模块切分（动骨架，**已有测试护栏，可以做了**）、D2 wire 样板共享、
+**未实施（明确挂起）**：D1 模块切分（动骨架，**已有测试护栏 + 任务书，可以做了**）、
 C2 无界 Map 上限（当前规模无实际风险）、A6 恢复计数清零、
 **A5 pre-step 强制压缩真机 E2E**（唯一「已实现但成功率未验」的路径——需占用冲到强制压缩线
 才有条件测，当前设为 80%，等接近了再做）、A2/A6 的真机 E2E。
 
-> ✅ **2026-10-07 清偿**：C3② 报告稳态瘦身（3.77MB → 预计 ~600KB）、B5 取证工具收敛
-> （18 个散落脚本 → 2 个统一工具）、**测试骨架**（3 套件 127 项断言）+ **通道 A 验收**。
+> ✅ **2026-10-06/07 清偿**：C3② 报告稳态瘦身（3.77MB → 预计 ~600KB）、B5 取证工具收敛
+> （18 个散落脚本 → 2 个统一工具）、**测试骨架**（3 套件 128 断言）、**通道 A 验收**、
+> **D2 两仓同步清单**（[`docs/cross-repo-sync.md`](docs/cross-repo-sync.md)，含 7 强同步点 +
+> 有意差异标注）、**弹窗阈值行加「距触发距离」**。
 > 详见 [`docs/milestones.md`](docs/milestones.md)。
 
 ---
@@ -208,6 +210,8 @@ npm run asar -- grep --pattern compactIfNeeded --ext js --ctx 3
 | [`docs/setup.md`](docs/setup.md) | 环境事实、composition 真相（not-bundle 坑）、部署与热换矩阵 |
 | [`docs/api-notes.md`](docs/api-notes.md) | 已验证的官方 API + **修正记录**（探索期写法 → 最终实现） |
 | [`docs/milestones.md`](docs/milestones.md) | 完整里程碑档案（M1 → 现在，含踩坑与实测数值） |
+| [`docs/cross-repo-sync.md`](docs/cross-repo-sync.md) | 与 `dsh-browser-kit` 的**同构点与同步清单**（7 个强同步点 / 5 个弱同步点 / 有意差异 / 漂移检测） |
+| [`docs/d1-module-split-brief.md`](docs/d1-module-split-brief.md) | D1 模块切分任务书（目标结构 / 硬规则 / 7 步顺序 / 回滚） |
 | [`docs/reference/README.md`](docs/reference/README.md) | 第三方（DSH 官方）抽取材料的来源与许可 |
 | [`review-brief.md`](review-brief.md) / [`review-findings.md`](review-findings.md) | 只读审查的任务书与报告 |
 
