@@ -129,14 +129,16 @@ window.__ModuleLoader__.load({
 			".dcp-summary{color:var(--dsw-alias-label-secondary,currentColor);opacity:.85}",
 			".dcp-grid{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l1,rgba(128,128,128,.35));border-radius:8px;background:var(--dsw-alias-bg-layer-1,transparent)}",
 			".dcp-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}",
-			/* 开关滑块（bool 字段）：总开关等 */
-			".dcp-switch{position:relative;display:inline-block;width:34px;height:18px;flex:none;cursor:pointer}",
-			".dcp-switch input{position:absolute;opacity:0;width:0;height:0}",
-			".dcp-switch .dcp-slider{position:absolute;inset:0;border-radius:999px;background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.35));border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.45));transition:background .15s}",
-			".dcp-switch .dcp-slider::before{content:\"\";position:absolute;width:12px;height:12px;left:2px;top:2px;border-radius:50%;background:var(--dsw-alias-label-primary,#fff);transition:transform .15s}",
-			".dcp-switch input:checked + .dcp-slider{background:var(--dsw-alias-brand-primary,rgba(76,125,255,.9));border-color:var(--dsw-alias-brand-primary,rgba(76,125,255,.9))}",
-			".dcp-switch input:checked + .dcp-slider::before{transform:translateX(16px)}",
-			".dcp-switch input:disabled + .dcp-slider{opacity:.5;cursor:not-allowed}",
+			/* 开关滑块（bool 字段）：**复刻 DSH 原生 Switch**（dsh-client-ui-primitives Switch.module.css，
+			 * 已存 docs/reference 溯源；36×20 轨道 padding2 + 16px 旋钮 translateX16）。
+			 * 全部用主题 token ⇒ 深浅主题自动适配（暗色下 ON=白轨道黑旋钮，与原生插件开关一致）。 */
+			".dcp-switch{position:relative;display:inline-block;width:36px;height:20px;flex:none;padding:2px;border:0;border-radius:999px;background:var(--dsw-alias-border-l3,rgba(128,128,128,.4));cursor:pointer;box-sizing:border-box;transition:background 120ms ease}",
+			".dcp-switch input{position:absolute;opacity:0;width:0;height:0;margin:0}",
+			".dcp-switch:has(input:checked){background:var(--dsw-alias-brand-primary,rgba(76,125,255,.9))}",
+			".dcp-switch:has(input:disabled){opacity:.5;cursor:default}",
+			".dcp-switch .dcp-slider{display:block;width:16px;height:16px;border-radius:50%;background:var(--dsw-alias-switch-thumb,rgba(128,128,128,.85));transition:transform 120ms ease;pointer-events:none}",
+			".dcp-switch input:checked + .dcp-slider{transform:translateX(16px);background:var(--dsw-alias-label-primary-foreground,#fff)}",
+			".dcp-switch input:focus-visible + .dcp-slider{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary,#4c7dff));outline-offset:2px}",
 			".dcp-label{width:170px;color:var(--dsw-alias-label-secondary,currentColor);flex:none}",
 			".dcp-input{border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.45));border-radius:6px;background:transparent;color:var(--dsw-alias-label-primary,currentColor);padding:3px 8px;font-size:12px;min-width:110px}",
 			".dcp-hint{color:var(--dsw-alias-label-secondary,currentColor);opacity:.75;font-size:11px}",
@@ -625,25 +627,6 @@ window.__ModuleLoader__.load({
 					}
 				};
 				let scheduled = false;
-				/** 主题判定：沿祖先找第一个不透明背景按亮度判暗/亮；兜底按 body 文字色反推（亮字=暗主题）。 */
-				const isDarkBg = (el) => {
-					try {
-						let node = el;
-						for (let i = 0; node && i < 8; i++) {
-							const bg = String(getComputedStyle(node).backgroundColor || "");
-							const rgb = bg.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
-							const al = bg.match(/,\s*([\d.]+)\s*\)/);
-							if (rgb && (!al || Number(al[1]) > 0.5)) {
-								return (0.2126 * Number(rgb[1]) + 0.7152 * Number(rgb[2]) + 0.0722 * Number(rgb[3])) < 128;
-							}
-							node = node.parentElement;
-						}
-						const fg = String(getComputedStyle(document.body).color || "");
-						const f = fg.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
-						if (f) return (0.2126 * Number(f[1]) + 0.7152 * Number(f[2]) + 0.0722 * Number(f[3])) > 128;
-					} catch { /* 忽略 */ }
-					return true;
-				};
 				const buildRow = (panel) => {
 					const row = document.createElement("div");
 					row.dataset.dcpToggle = "1";
@@ -656,18 +639,17 @@ window.__ModuleLoader__.load({
 					label.textContent = "上下文领航";
 					label.title = "注入 + 压缩总开关（关闭 = 恢复原生 DSH 行为）";
 					label.style.cssText = "flex:1 1 auto;opacity:.85;white-space:nowrap;";
-					/** 滑动开关：原生 checkbox 隐入底层（保点击/键盘可达），外观仿宿主 switch（主题 token 自适应深浅色）。 */
+					/** 滑动开关：与面板 .dcp-switch 同一套官方样式（PANEL_CSS 全局注入，token 双主题自适配）。 */
 					const wrap = document.createElement("label");
 					wrap.style.cssText = "display:inline-flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap;flex:none;";
 					const box = document.createElement("span");
-					box.style.cssText = "position:relative;display:inline-block;width:36px;height:20px;border-radius:10px;background:var(--dsw-alias-bg-layer-3,rgba(128,128,128,.45));transition:background .15s;cursor:pointer;";
+					box.className = "dcp-switch";
 					const input = document.createElement("input");
 					input.type = "checkbox";
 					input.setAttribute("role", "switch");
 					input.setAttribute("aria-label", "上下文领航总开关");
-					input.style.cssText = "position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer;";
 					const knob = document.createElement("span");
-					knob.style.cssText = "position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.35);transition:left .15s;pointer-events:none;";
+					knob.className = "dcp-slider";
 					box.appendChild(input);
 					box.appendChild(knob);
 					wrap.appendChild(box);
@@ -678,12 +660,6 @@ window.__ModuleLoader__.load({
 							const raw = s?.value?.enabled;
 							const value = raw !== null && typeof raw === "object" && typeof raw.get === "function" ? raw.get() : raw;
 							input.checked = value !== false;
-							/* 双主题配色：开=品牌蓝（两主题通用）；关=轨道/旋钮按面板明暗反色，两态一眼可辨 */
-							const dark = isDarkBg(panel);
-							box.style.background = input.checked ? "#4c7dff" : dark ? "rgba(255,255,255,.22)" : "rgba(0,0,0,.24)";
-							knob.style.background = input.checked ? "#ffffff" : dark ? "#d5dae2" : "#ffffff";
-							knob.style.boxShadow = input.checked ? "0 1px 2px rgba(0,0,0,.35)" : dark ? "none" : "0 1px 3px rgba(0,0,0,.25)";
-							knob.style.left = input.checked ? "18px" : "2px";
 							input.disabled = s?.writable !== true;
 							wrap.style.opacity = s?.writable === true ? "1" : ".55";
 							label.style.opacity = s?.writable === true ? ".85" : ".45";
