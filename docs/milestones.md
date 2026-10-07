@@ -889,3 +889,25 @@ progress 不收敛 / 不用完整时间 / 恢复无参回退 / 过滤退回全�
 #### 部署
 
 `host.impl.mjs` + 新模块 `compact-tool.mjs` ⇒ **plugin toggle 热换**（无 client / schema 改动）。
+
+#### 真机部署当场抓到一个真 bug（懒安装留痕的又一次回报）
+
+首次 toggle 后读报告：
+
+```
+m3.compactTool = { ok:false,
+  error:"unsupported JSON schema: parameters.reason.required must be true when present" }
+m3.compactToolDiag = { calls:2, enabled:true, installed:false }
+```
+
+⇒ 工具**从未注册成功**，而现象仅仅是「模型不会用这个工具」（完全静默）。
+根因：可选参数写成了 `required: false`，而 defineTool 的约定是
+**`required` 出现即必须为 `true`，可选参数要整个省略**。
+修复后复核：`compactTool = {ok:true, name:"compact_context", via:"tools.register"}`、
+`compactToolDiag.installed=true`，且 harness 随即把该工具 schema 下发给模型（生效实证）。
+
+**这条经验再次印证 R3 的教训**：懒安装/注册**必须留痕**——若无 `m3.compactTool` 字段，
+本次故障会与「工具接受成功却永不变档」一样无从定位。已补绊线（剥注释后不得出现
+`required: false`，变异 1/1 被抓住）。
+⇒ 教训：「未出现某字符串」类断言**必须先剥注释**——本轮**第二次**栽在这一点上
+（第一次是 `本轮先不执行任务` 被文件头描述旧机制的那句话判失败）。
