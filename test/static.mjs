@@ -12,7 +12,7 @@
  * 用法：node test/static.mjs
  * 退出码：0 = 全通过；1 = 违规
  */
-import { readFileSync, readdirSync, statSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, writeFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { dirname, join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
@@ -163,6 +163,29 @@ for (const f of targets) {
   const real = found.filter((m) => !(m === 'console.log(' && rel.includes('tools')));
   ok(`${rel} 无调试残留`, real.length === 0, real.length ? `发现：${real.join(', ')}` : '');
 }
+
+/* ═══════════ ⑦ 结构债追踪（D1 切分进度）═══════════ */
+console.log('\n== 7. 结构债（D1 切分进度，见 docs/d1-module-split-brief.md）==');
+const hostLines = readFileSync(join(PLUGIN, 'host.impl.mjs'), 'utf8').split('\n').length;
+const SPLIT_TARGET = 250;
+const SPLIT_WARN = 900;
+// 目标模块清单（切分后应存在）
+const TARGET_MODULES = ['core.mjs', 'm1.snapshot.mjs', 'm2.inject.mjs', 'm3.compact.mjs', 'm5.hud.mjs', 'm55.resume.mjs'];
+const existing = TARGET_MODULES.filter((f) => existsSync(join(PLUGIN, f)));
+const done = existing.length === TARGET_MODULES.length;
+console.log(`   host.impl.mjs = ${hostLines} 行（目标 ≤${SPLIT_TARGET}）｜ 已抽模块 ${existing.length}/${TARGET_MODULES.length}${existing.length ? '：' + existing.join(', ') : ''}`);
+if (done) {
+  ok(`D1 已完成：host.impl.mjs ≤ ${SPLIT_TARGET} 行`, hostLines <= SPLIT_TARGET,
+    `切分未彻底：${hostLines} 行`);
+} else {
+  // 未切分期间：只做「不要继续膨胀」的软提醒，不判失败（避免阻塞日常改动）
+  if (hostLines > SPLIT_WARN) {
+    console.log(`   ⚠️  host.impl.mjs 已 ${hostLines} 行（>${SPLIT_WARN}）——建议尽快安排 D1 切分`);
+  } else {
+    console.log('   ℹ️  D1 未切分（正常，方案见 docs/d1-module-split-brief.md）');
+  }
+}
+ok('（软提醒，不计失败）结构债状态已输出', true);
 
 /* ═══════════ 汇总 ═══════════ */
 console.log(`\n${'='.repeat(52)}`);

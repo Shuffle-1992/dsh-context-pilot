@@ -1340,7 +1340,6 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       log('warn', `HUD 轮询面注册失败（吞）：${msg(e)}`);
     });
 
-  /* ---- 启动快照：激活后 2s 一发，10s 再一发（捕捉晚到的会话重水化） ---- */
   /* ---- M5 HUD 启动回填：报告最近压缩记录重发布到面板（弹窗不再空态）。
    * 2026-10-06 强化：激活时同步立即试一次（消「激活→回填」空窗，期间 getHud 会返回空串），
    * 再按 1.2s/4s/10s 重试（幂等；报告读失败/竞态可自愈）。 ---- */
@@ -1388,6 +1387,5 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
   /* ---- 启动快照：激活后 2s 一发，10s 再一发（捕捉晚到的会话重水化） ---- */
   schedule('activation+2s', 2000);
   schedule('boot+10s', 10000);
-
   return { reportPath };
 }

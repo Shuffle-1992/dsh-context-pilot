@@ -34,8 +34,15 @@ for (const suite of SUITES) {
   results.push({ suite, pass, got, total, ms: Date.now() - t0 });
   console.log(`${pass ? '✅' : '❌'} ${suite.padEnd(16)} ${String(got).padStart(3)}/${String(total).padEnd(3)} 通过  (${Date.now() - t0}ms)`);
   if (!pass) {
-    // 失败时打印该套件的失败行，方便定位
-    for (const line of out.split('\n')) if (line.includes('❌')) console.log('   ' + line.trim());
+    if (!m) {
+      // 套件崩溃（未产出汇总行）：打印异常首行，避免只显示 0/? 而无从下手
+      const crash = out.split('\n').filter((l) => /Error|ReferenceError|TypeError|SyntaxError/.test(l)).slice(0, 2);
+      console.log('   ⚠️ 套件崩溃（无汇总行）：' + (crash[0]?.trim() || '未知错误'));
+      if (crash[1]) console.log('      ' + crash[1].trim());
+    } else {
+      // 失败时打印该套件的失败行，方便定位
+      for (const line of out.split('\n')) if (line.includes('❌')) console.log('   ' + line.trim());
+    }
   }
 }
 
