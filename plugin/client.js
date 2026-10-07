@@ -597,7 +597,9 @@ window.__ModuleLoader__.load({
 			/* 显示形态（2026-10-08 用户要求重做）：
 			 * ① **删除内联的档位值与冷却秒数**（原「智能思考档位 low · 冷却 23s」）——
 			 *    这两项不再占位，全部移入 title 提示（信息不丢，只是不抢视觉）。
-			 * ② 文案固定为「智能思考就绪」，**状态由样式承担**。
+			 * ② 文案两态：冷却中「智能思考冷却」、冷却完成「智能思考就绪」
+			 *    （2026-10-08 用户补充要求）——文字与样式**同源判据 `cooling`**，
+			 *    不会出现「文字说冷却、颜色说就绪」的不一致。
 			 * ③ 两个样式 + 进度条式过渡：
 			 *    底层铺满 warn 色 = 冷却态；上层 success 色按 progress 从左往右扫过
 			 *    ⇒ 冷却走完时正好扫满 = 就绪态。1s tick + CSS transition 补帧，肉眼即平滑。
@@ -662,7 +664,7 @@ window.__ModuleLoader__.load({
 							background: accent, transition: "background .3s linear",
 						},
 					}),
-					el("span", { style: { opacity: ".85" } }, "智能思考就绪"),
+					el("span", { style: { opacity: ".85" } }, cooling ? "智能思考冷却" : "智能思考就绪"),
 				),
 			);
 		}

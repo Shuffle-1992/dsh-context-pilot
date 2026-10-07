@@ -266,8 +266,12 @@ ok('解析出 EffortChip 函数体', chipBody.length > 0, '未找到 EffortChip'
 ok('chip 标签不再用「智能思考档位」',
   !/el\("span", \{ style: \{ opacity: "\.75" \} \}, "智能思考档位"\)/.test(client),
   '仍是旧的「智能思考档位」标签 span ⇒ 用户已要求改成「智能思考就绪」');
-ok('chip 文案为「智能思考就绪」', /"智能思考就绪"/.test(chipBody),
-  '未改成「智能思考就绪」');
+/* 判据必须与样式**同源**（都用 cooling）。缺少 `!` 锚定会让 `!cooling ? …` 这类
+ * 「文案与颜色相反」的回归从子串匹配漏过去（变异实测：加锚定前该变异未被抓住）。 */
+ok('chip 文案两态（冷却=「智能思考冷却」/ 就绪=「智能思考就绪」）',
+  /cooling \? "智能思考冷却" : "智能思考就绪"/.test(chipBody) &&
+  !/!\s*cooling\s*\?/.test(chipBody),
+  '未按 cooling 切换文案，或判据被取反 ⇒ 冷却时显示「就绪」（与样式相反）');
 ok('chip 不再把档位值渲染成子节点（用户要求删除）',
   !/\}, effort\)/.test(chipBody),
   '仍把 effort 值当子节点渲染 ⇒ 用户要求删除内联档位显示');
