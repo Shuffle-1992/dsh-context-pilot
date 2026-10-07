@@ -1100,19 +1100,31 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
    *  模型收不到卡 ⇒ 不知道标记 ⇒ 永远不写标记 ⇒ 该区间内标记通道完全不可达；
    *  且若 markerMinRatio > 卡门槛则反向错配（教了却不执行）。现统一为同一门槛，
    *  语义：「能收到卡 = 标记有效」，无论用户怎么填都不会出现死区或错配。 */
-  const renderPolicyCard = (ratio, effCrit) => {
+  /* R5+（2026-10-08 用户要求）：「自己算范围」必须教给 Agent——否则它不知道压缩后还剩什么。
+   * ⚠️ 两个数都是**活值**：比例读 compact-range.mjs 的常量，token 数按**当前窗口**现算。
+   *    写死「16% / 160k」会在常量或窗口变化后与真实行为自相矛盾（本项目已因此踩过坑）。
+   * 模块未加载完时返回 null ⇒ 教学退化为「按窗口固定比例」的说法，**绝不编造数字**。 */
+  const retentionTeach = (win) => {
+    const ratio = rangeApi?.RETAIN_RATIO ?? null;
+    if (!Number.isFinite(ratio) || ratio <= 0) return { retainRatio: null, retainTokens: null };
+    const w = Number(win);
+    return { retainRatio: ratio, retainTokens: Number.isFinite(w) && w > 0 ? Math.floor(w * ratio) : null };
+  };
+
+  const renderPolicyCard = (ratio, effCrit, win) => {
     /* 教学文本本体在 compact-tool.mjs（压缩域自持，与 effort 同构）——此处只做出口。
      * 门槛仍是 markerMinRatio（2026-10-07 用户决定：决策卡门槛 = 该值，消除「教了却不执行」的死区）。
      * ⚠️ 文本已随 R4 改写为**工具版**：旧卡教的是「本轮先不执行任务 + 写标记」，
      *    那正是会被伪造恢复消息拉起的那套；新卡要求「调用后直接继续，不要停下」。
      * ⚠️ 2026-10-08 真 bug：这里原先传 `M3.criticalRatio`（**配置值**），于是卡面写「占用达 80%」
      *    而实际生效线是 75%（= min(配置, 引擎阈值 − 5pp)）⇒ 教了个不会触发的数。
-     *    现由调用方传入**生效值** effCrit。 */
+     *    现由调用方传入**生效值** effCrit。
+     * ⚠️ R5+：同时传入「保留多少」的活值（见 retentionTeach）。 */
     try {
       const api = compactToolApi;
       if (!api) return null;
       const crit = Number.isFinite(effCrit) ? effCrit : M3.criticalRatio;
-      return api.renderCard({ ratio, minRatio: M3.markerMinRatio, criticalRatio: crit });
+      return api.renderCard({ ratio, minRatio: M3.markerMinRatio, criticalRatio: crit, ...retentionTeach(win) });
     } catch { return null; }
   };
 
@@ -1358,13 +1370,14 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
    * ⚠️ R4（2026-10-08）：文本已改为**工具版**，且本体搬进 plugin/compact-tool.mjs（压缩域自持，
    *    与 effort.mjs 同构）。旧文本教的是「本轮挂起 + 写标记 + 压缩后自动拉起」——那条链路已被
    *    用户否决（伪造用户消息）；此处只做出口，漏改会导致模型**等一个永远不来的恢复**。 */
-  const renderBrief = (effCrit) => {
+  const renderBrief = (effCrit, win) => {
     try {
       const api = compactToolApi;
       if (!api) return null;
-      /* 同 renderPolicyCard：必须传**生效值**，否则一次性说明会教一个不会触发的数字。 */
+      /* 同 renderPolicyCard：必须传**生效值**，否则一次性说明会教一个不会触发的数字；
+       * 另传「保留多少」活值（R5+）。 */
       const crit = Number.isFinite(effCrit) ? effCrit : M3.criticalRatio;
-      return api.renderBrief({ criticalRatio: crit });
+      return api.renderBrief({ criticalRatio: crit, ...retentionTeach(win) });
     } catch { return null; }
   };
 
@@ -1408,7 +1421,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         /* 强制压缩线的**生效值**（= min(配置, 引擎阈值 − 5pp)）——教学与决策卡都必须教这个数，
          * 教配置值会让模型以为 80% 才触发（实际 75%）。与 pre-step/idle 门控同源。 */
         const effCrit = Math.min(M3.criticalRatio, criticalCapOf(agent));
-        const card = renderPolicyCard(r.ratio, effCrit); // M3.5 通道2：政策卡（相关占用以上才出现）
+        const card = renderPolicyCard(r.ratio, effCrit, r.window); // M3.5 通道2：政策卡（相关占用以上才出现）
         const sid = String(pick(agent.session.id, agent.sessionId, 'unknown'));
         /* 智能思考：**独立门控**（effortEnabled），与压缩的 markerMinRatio 完全解耦——
          * 用户明确要求「全程允许」：低占用也必须能注入/换档（压缩的卡在低占用时是不注入的）。 */
@@ -1419,7 +1432,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         const effSuffix = effortApi?.renderSuffix(eff) ?? null;
         const baseText = effSuffix ? `${r.text} ｜ ${effSuffix}` : r.text;
         if (effSuffix) state.m2.effortSuffixes = (state.m2.effortSuffixes ?? 0) + 1;
-        const brief = briefedBySid.has(sid) ? null : renderBrief(effCrit); // M2.5+A3：现拼活值（含生效强制线）
+        const brief = briefedBySid.has(sid) ? null : renderBrief(effCrit, r.window); // M2.5+A3：现拼活值（含生效强制线 + 保留范围）
         /* 思考强度教学与「插件说明」同一时机（会话首次）——合并进同一条消息，
          * 不额外增加消息结构开销（role 框架/JSON 包装各一次）。 */
         const effBrief = eff && !effBriefedBySid.has(sid) ? (effortApi?.renderBrief(eff) ?? null) : null;

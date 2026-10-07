@@ -107,6 +107,16 @@ preStepCompaction
 **实际用了哪条保留策略**记在 `rangeSource`。`rangeProbe` 留最后一次范围读数
 （窗口 / 比例 / 预算 / 起止 / 保留·影子 token / 失败原因）。
 
+### 4.3 教给 Agent（R6，2026-10-08 用户要求）
+
+保留策略只实现不告知 = 模型不知道压完还剩什么，只能靠猜（要么不敢压、要么以为会被砍光）。
+故 R6 把「自己算范围」写进教学：`compact-tool.mjs` 新增 `retentionClause(retainRatio, retainTokens)`，
+host 新增 `retentionTeach(win)` 提供**活值**（比例读本模块的 `RETAIN_RATIO`，token 数按当前窗口现算）。
+渲染结果：「压缩按『上下文窗口 × 16%』自选保留范围，当前窗口下**近端约 160k token 原样保留**……
+若整段对话还没超出这个预算，则**什么都不会压**。」
+⚠️ **拿不到活值时返回 null，教学退化为「按窗口固定比例」的说法——绝不编数字。**
+详见 [`milestones.md`](milestones.md) 的 R6 条目。
+
 ---
 
 ## 5. 验证矩阵

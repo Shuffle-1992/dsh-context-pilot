@@ -592,6 +592,68 @@ ok('强制线收口：自选范围后仍越线则追加官方 overflow（保住�
   && /rangeSource = 'own\+official';/.test(ctPreStep),
   '只自选不收口 ⇒ 保留过多时强制线可能压不下去');
 
+/* ═══════════ 6.19 「先说再调用」+「自己算范围」教学（2026-10-08 用户要求）═══════════
+ * 用户要求两件事：
+ *   ① 模型调用**压缩/换档**工具前，要在回复正文里**先说出来**再调用（工具调用对用户是静默的）；
+ *   ② 把 R5 的「自己算范围」教给 Agent（否则它不知道压完还剩什么，只能靠猜）。
+ * 本段不只查文本存在，还**真跑两个模块的渲染函数**核对活值注入与「不编数字」。 */
+console.log('\n== 6.19 先说再调用 + 自己算范围教学 ==');
+const ctApi = (await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href)).createCompactTool({
+  svc: () => null, tryOf: () => ({ value: undefined, error: null }), pick: (...a) => a.find((x) => x != null),
+  msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {}, state: { m3: {} },
+  readCfg: () => ({ enabled: true }), getDefineTool: () => null,
+});
+const effApi = (await import(pathToFileURL(join(PLUGIN, 'effort.mjs')).href)).createEffort({
+  svc: () => null, tryOf: () => ({ value: undefined, error: null }), pick: (...a) => a.find((x) => x != null),
+  msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {}, state: { m3: {} },
+  readCfg: () => ({ enabled: true }), getDefineTool: () => null,
+});
+/* 「先说，再调用」必须**分两半**钉死：显著标注 + 具体做法。
+ * ⚠️ 变异验证实测教训：最初用「或」关系的单个正则，去掉标注后同段的「不具体做法」仍能匹配
+ * ⇒ 断言照样通过（逃逸）。两者是**不同职责**：标注负责醒目，做法负责可执行。 */
+const ANN_LABEL = /\*\*先说，再调用\*\*/;
+const ANN_INSTR = /先在回复正文里用一句话说明/;
+const annCtx = { ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75 };
+const ctBriefTxt = ctApi.renderBrief({ criticalRatio: 0.75 }) ?? '';
+const effBriefTxt = effApi.renderBrief({ ok: true, current: 'high', efforts: ['low', 'high'] }) ?? '';
+const ctCardTxt = ctApi.renderCard(annCtx) ?? '';
+ok('压缩一次性说明含「先说再调用」的显著标注 + 具体做法',
+  ANN_LABEL.test(ctBriefTxt) && ANN_INSTR.test(ctBriefTxt),
+  '未要求先说理由 ⇒ 用户只看到「调用了工具」，不知道模型为什么压');
+ok('压缩决策卡含「先说再调用」的具体做法（卡片每轮出现 ⇒ 承担每轮提醒职责）',
+  ANN_INSTR.test(ctCardTxt) && /说明你要压缩的理由/.test(ctCardTxt),
+  '只在一次性说明里教 ⇒ 长会话后半段容易忘');
+ok('换档一次性说明含「先说再调用」的显著标注 + 具体做法',
+  ANN_LABEL.test(effBriefTxt) && ANN_INSTR.test(effBriefTxt),
+  '未要求先说理由 ⇒ 用户不知道模型为什么换档');
+ok('两个工具的 description 都要求「先说再调用」（description 每轮随请求下发 = 零额外 token 的每轮提醒）',
+  /\*\*调用本工具前，先在回复正文里用一句话说明/.test(ct)
+  && /\*\*调用本工具前，先在回复正文里用一句话说明/.test(effort),
+  '只在一次性说明里教 ⇒ 每轮下发的提醒位被浪费');
+ok('工具参数说明也要求把理由同时写进正文',
+  /同一句话也要写在你的回复正文里/.test(ct) && /换档理由请同时写在回复正文里/.test(effort),
+  '参数说明与正文要求脱节 ⇒ 模型可能只填参数不说理由');
+
+/* 「自己算范围」教学：活值注入 + 拿不到活值时**不编数字** */
+const cardLive = ctApi.renderCard({ ...annCtx, retainRatio: 0.16, retainTokens: 160000 }) ?? '';
+ok('决策卡把「保留多少」按**活值**写出来（16% / 160k）',
+  /窗口 × 16%/.test(cardLive) && /160k token/.test(cardLive),
+  `卡面未含活值 ⇒ 模型不知道压完还剩什么：${cardLive.slice(0, 140)}`);
+const briefLive = ctApi.renderBrief({ criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000 }) ?? '';
+ok('一次性说明把「保留多少」按活值写出来，并说明「未超预算则什么都不压」',
+  /窗口 × 16%/.test(briefLive) && /近端约 160k token 原样保留/.test(briefLive) && /什么都不会压/.test(briefLive),
+  '未教自选范围 ⇒ 模型以为压缩=砍光，于是不敢调用');
+const briefNoNum = ctApi.renderBrief({ criticalRatio: 0.75 }) ?? '';
+ok('拿不到活值时不编数字（退化为「固定比例」措辞）',
+  !/16%/.test(briefNoNum) && !/\d+k token/.test(briefNoNum) && /固定比例/.test(briefNoNum),
+  '活值缺失时仍写死数字 ⇒ 常量/窗口变化后教学自相矛盾（本项目已因此踩过坑）');
+ok('host 把「保留多少」活值传进两个教学出口（读常量 + 按当前窗口现算）',
+  /const ratio = rangeApi\?\.RETAIN_RATIO \?\? null;/.test(host)
+  && /Math\.floor\(w \* ratio\)/.test(host)
+  && /renderCard\(\{ ratio, minRatio: M3\.markerMinRatio, criticalRatio: crit, \.\.\.retentionTeach\(win\) \}\)/.test(host)
+  && /renderBrief\(\{ criticalRatio: crit, \.\.\.retentionTeach\(win\) \}\)/.test(host),
+  '活值没接上 ⇒ 教学与实际保留范围脱节（写死 16%/160k 会随常量与窗口漂移）');
+
 /* 伪造恢复必须**彻底消失**（不是「不调用」而是「不存在」——留着重接上的地雷更危险） */
 for (const gone of ['maybeResumeAfterMarker', 'resumeViaAnyChannel', 'sessionController.prompt', 'agent.followup']) {
   ok(`伪造恢复链路已整体删除：${gone}`,
@@ -610,8 +672,8 @@ ok('教学不再教「本轮先不执行任务 + 写标记」（旧机制已废�
 /* 一次性插件说明（M2.5）是最容易漏改的一处：它同样在教模型怎么用压缩。
  * 漏改的后果不是报错，而是模型**写标记后等一个永远不来的自动恢复**（静默失效）。 */
 ok('新会话一次性说明本体已搬进模块（host 只做出口）',
-  /function renderBrief\(\{ criticalRatio \} = \{\}\) \{/.test(ct)
-  && /return api\.renderBrief\(\{ criticalRatio: crit \}\);/.test(host),
+  /function renderBrief\(\{ criticalRatio, retainRatio, retainTokens \} = \{\}\) \{/.test(ct)
+  && /return api\.renderBrief\(\{ criticalRatio: crit, \.\.\.retentionTeach\(win\) \}\);/.test(host),
   '说明文本仍散在 host ⇒ 与工具名/文案两处漂移');
 ok('一次性说明不再承诺「自动拉起」（已无该机制）',
   !/自动拉起|自动恢复/.test(ct) || /没有\*\*任何自动拉起动作|不需要\*\*任何「待执行」占位/.test(ct),
@@ -709,7 +771,7 @@ ok('自动钳制仅在可写 + 上限已知 + 就绪时执行',
 /* ═══ 教学必须教**生效值**（2026-10-08 实测：卡片写「占用达 80%」而实际 75%） ═══ */
 ok('决策卡/一次性说明拿到的是**生效**强制线（不是配置值）',
   /const effCrit = Math\.min\(M3\.criticalRatio, criticalCapOf\(agent\)\);/.test(host)
-  && /renderPolicyCard\(r\.ratio, effCrit\)/.test(host) && /renderBrief\(effCrit\)/.test(host),
+  && /renderPolicyCard\(r\.ratio, effCrit, r\.window\)/.test(host) && /renderBrief\(effCrit, r\.window\)/.test(host),
   '教学仍用配置值 ⇒ 教一个不会触发的数字（与门控不同源）');
 ok('两个出口都把 effCrit 落进模块参数（不是各自再读 M3.criticalRatio）',
   /* 必须数**两处**（renderPolicyCard 与 renderBrief 各一）——只匹配到一处时，
