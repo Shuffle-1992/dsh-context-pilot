@@ -238,6 +238,74 @@ ok('mergeConfig 读取 effortEnabled', /for \(const k of \[[\s\S]{0,120}'effortE
 ok('effortEnabled 默认关闭（新功能默认不介入）', /effortEnabled:\s*false/.test(host),
   '默认开启 ⇒ 未确认就改变既有会话行为');
 
+/* ═══════════ 6.10 R1 智能思考注入（门控解耦 + 教学覆盖度）═══════════ */
+console.log('\n== 6.10 智能思考注入（门控必须与压缩解耦）==');
+// 用户要求「全程允许」——注入与换档**不得**引用压缩的 markerMinRatio 门控。
+// 现有 M2 注入三部分门控不同：用量行无门控 / 决策卡 ratio>=markerMinRatio / 一次性说明首次。
+// 思考强度必须是**第四条独立通道**：门控 = effortEnabled，与占用无关。
+const injectBody = (() => {
+  const m = /const card = renderPolicyCard\(r\.ratio\);([\s\S]*?)return \{ \.\.\.decision, messages:/.exec(host);
+  return m ? m[1] : '';
+})();
+ok('解析出 M2 注入主体', injectBody.length > 0, '未匹配到注入主体（改名了？）');
+/* 只截取 **effort 相关**的那几行（从注释「R1 智能思考」到教学标记结束）——
+ * 不能截整个注入主体：它包含 renderPolicyCard 行，而卡本身合法引用 markerMinRatio。 */
+const effInject = (() => {
+  const s = host.indexOf('/* R1 智能思考：**独立门控**');
+  if (s < 0) return '';
+  const e = host.indexOf('const fullText =', s);
+  return e > s ? host.slice(s, e) : '';
+})();
+ok('解析出 effort 注入段', effInject.length > 0, '未找到 effort 注入段');
+ok('智能思考注入用独立门控 effortEnabled（不共用 markerMinRatio）',
+  /M3\.effortEnabled === true\) eff = await readEffort\(agent\)/.test(effInject),
+  'effort 注入未走 effortEnabled 独立门控 ⇒ 低占用时被压缩门控挡掉（用户要求全程允许）');
+/* 剥注释后再查：注释里说明「与 markerMinRatio 解耦」是正常文字，代码里引用才是耦合。 */
+const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+ok('effort 注入段不引用 markerMinRatio（剥注释后）', !/markerMinRatio/.test(stripComments(effInject)),
+  'effort 注入段**代码**引用了 markerMinRatio ⇒ 与压缩门控耦合');
+ok('读档失败不阻断注入（try/catch 吞）',
+  /catch \{ \/\* 读档失败 ⇒ 不注入/.test(host) || /if \(M3\.effortEnabled === true\) eff = await readEffort/.test(injectBody),
+  '读档异常未吞 ⇒ 新功能可打崩主注入流程');
+ok('思考强度教学与插件说明同时机（会话首次）',
+  /effBriefedBySid\.has\(sid\) \? renderEffortBrief\(eff\)/.test(injectBody) ||
+  /!effBriefedBySid\.has\(sid\)/.test(injectBody),
+  '教学未按会话一次性 ⇒ 每轮重复占 token');
+ok('用量行后缀拼装（每轮告知当前实际档位）',
+  /effSuffix \? `\$\{r\.text\} ｜ \$\{effSuffix\}` : r\.text/.test(injectBody),
+  '未拼后缀 ⇒ 模型不知道当前**实际生效**档位');
+// 教学文本覆盖度 6/6（用户指出「暴露了但不会调用」——必须教）
+const effBrief = /const renderEffortBrief = \(eff\) => \{([\s\S]*?)\n  \};/.exec(host)?.[1] ?? '';
+ok('解析出 renderEffortBrief', effBrief.length > 0, '未找到教学文本函数');
+for (const [name, re] of [
+  ['① 当前值', /当前思考强度档位：' \+ eff\.current/],
+  ['② 可选档', /本模型可选 ' \+ opts/],
+  ['③ 标记语法', /\[cp:effort <档>\]/],
+  ['④ 何时该用', /更深推理|更快响应/],
+  ['⑤ 生效时机+不中断', /下一步生效，上下文与任务不中断/],
+  ['⑥ 代价提醒', /缓存失效|1-2 次/],
+]) {
+  ok(`教学覆盖 ${name}`, re.test(effBrief), `教学文本缺 ${name} ⇒ 模型无法自主调用`);
+}
+ok('无档可调时不注入（返回 null）', /if \(!eff\?\.ok \|\| !eff\.current\) return null;/.test(effBrief),
+  '模型不支持思考档时仍注入 ⇒ 打扰且误导');
+
+/* ═══════════ 6.11 一次性说明在压缩后必须重讲（真 bug 修复）═══════════ */
+console.log('\n== 6.11 压缩后一次性说明重讲（briefedBySid 永不失效的真 bug）==');
+// 原实现只有 add、无 delete/clear ⇒ 压缩把说明收进摘要后，插件认为「讲过了」永不再讲；
+// 摘要由模型生成、不保证保留该段 ⇒ 模型永久失去用法说明。
+ok('存在 clearBriefed 清除函数', /const clearBriefed = \(sid\) => \{/.test(host),
+  '无清除函数 ⇒ 压缩后不再重讲（原 bug）');
+ok('clearBriefed 同时清两个集合（压缩说明 + 智能思考教学）',
+  /briefedBySid\.delete\(sid\)[\s\S]{0,120}?effBriefedBySid\.delete\(sid\)/.test(host),
+  '只清一个 ⇒ 另一个仍永不重讲');
+const clearCalls = (host.match(/clearBriefed\(sid\)/g) || []).length;
+ok(`clearBriefed 在两条压缩路径都被调用（实际 ${clearCalls} 处）`, clearCalls >= 2,
+  '只在一条路径清除 ⇒ 另一条压缩路径后说明仍丢失');
+ok('clearBriefed 声明早于调用点（无 TDZ 风险）',
+  host.indexOf('const clearBriefed = ') < host.indexOf('clearBriefed(sid)'),
+  'clearBriefed 声明在调用之后 ⇒ const TDZ 会抛 ReferenceError');
+
 /* ═══════════ 7. mergeConfig 读取集 ⊆ schema 键 ═══════════ */
 console.log('\n== 7. mergeConfig 读取集 ⊆ schema 键 ==');
 const mergeList = /const k of \[([^\]]+)\][\s\S]{0,80}?raw\[k\] = live/.exec(host)?.[1];

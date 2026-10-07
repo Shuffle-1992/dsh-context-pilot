@@ -357,6 +357,22 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
   const pendingBySid = new Map(); // sid -> { task, at }（B3：resumes 字段写入从未读取，已随审查退役）
   const resumeTimers = new Set(); // A7（审查）：2s 恢复 setTimeout 在册，卸载时统一清（防禁用/热换窗口内旧实例投递）
   const briefedBySid = new Set(); // M2.5：新会话一次性插件说明（每激活一份，重活后重讲一次无妨）
+  /* R1：智能思考教学的一次性标记（与压缩说明分开——两者开关独立，可能只开一个）。
+   * ⚠️ 与 briefedBySid 一样，**压缩成功后必须清除**（见 clearBriefed 的注释）。 */
+  const effBriefedBySid = new Set();
+  /* R1（2026-10-07，真 bug 修复）：一次性说明的「已讲」标记必须在**压缩成功后清除**。
+   * 原实现 briefedBySid 只有 add、全文无 delete/clear ⇒ 压缩后那条说明被收进摘要，
+   * 而插件认为「讲过了」永不再讲；摘要由模型生成、**不保证保留该段** ⇒ 模型可能永久
+   * 失去用法说明（压缩标记怎么写、智能思考怎么换档都不知道）。
+   * 实测佐证：m2.briefings=2 而 m2.injections=5（本会话跨热换只讲过 2 次）。
+   * 压缩 = 新开始 ⇒ 正好重讲一次；成本仍是一次性量级（压缩是低频事件）。 */
+  const clearBriefed = (sid) => {
+    try {
+      briefedBySid.delete(sid);
+      effBriefedBySid.delete(sid);
+      state.m2.briefReissues = (state.m2.briefReissues ?? 0) + 1;
+    } catch { /* 吞 */ }
+  };
   const resumeCountBySid = new Map(); // sid -> 已自动恢复次数
   const M5_RESUME_MAX = 2;
   /** M5.5 取证：尝试记录（同时排一份报告）。 */
@@ -540,7 +556,9 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     seq: 0,
     implLoadedAt: new Date().toISOString(),
     listeners: {},
-    m2: { registered: false, injections: 0, briefings: 0, lastText: null, lastAt: null, via: null, skips: {} },
+    m2: { registered: false, injections: 0, briefings: 0, lastText: null, lastAt: null, via: null, skips: {},
+      // R1：智能思考注入取证（教学次数 / 压缩后重讲次数）
+      effortBriefings: 0, briefReissues: 0, effortSuffixes: 0 },
     m3: {
       decisions: 0,
       wouldCompact: 0,
@@ -1111,6 +1129,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         const __t = formatAct('pressure', result?.shadowedTokenCount);
         publishHud({ hudLastAct: __t, hudArmed: '' }); // M5
         recordHudAct(sid, __t);
+        clearBriefed(sid); // R1：同 idle 路径——压缩后一次性说明需重讲
       }
       log(
         'info',
@@ -1136,6 +1155,37 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     '回合结束后插件自动压缩上下文（旧对话收为摘要），并自动拉起新一轮让你继续该任务（以「(context-pilot 自动恢复)」开头），用户无需重发。',
     '若任务依赖细节则照常执行、勿写标记；占用达 ' + Math.round(M3.criticalRatio * 100) + '% 强制压缩线时系统自动压缩。标记不要连续多轮写（压缩后占用需重新累积）。',
   ].join('');
+
+  /* ---- R1（2026-10-07）智能思考：一次性教学文本 ------------------------------------
+   * 为什么必须教用法（本项目已踩过的同类坑，见 host.impl.mjs 的 policyCardMinRatio 注释）：
+   * 「暴露了能力但不教怎么用 = 功能等于不存在」——模型不知道标记语法就永远不会写。
+   * 覆盖度必须 6/6：① 当前值 ② 可选档 ③ 标记语法 ④ 何时该用 ⑤ 生效时机+不中断 ⑥ 代价提醒。
+   * 档位**现拼活值**（沿用 renderBrief 的 A3 教训：写死会在模型/config 变化后自相矛盾）。
+   * 无档可调（模型不支持思考档）时返回 null ⇒ 不注入、不打扰。 */
+  const renderEffortBrief = (eff) => {
+    try {
+      if (!eff?.ok || !eff.current) return null;
+      const opts = Array.isArray(eff.efforts) && eff.efforts.length ? eff.efforts.join('/') : null;
+      return [
+        '【智能思考（本会话仅此一次）】当前思考强度档位：' + eff.current + (opts ? '（本模型可选 ' + opts + '）' : '（可选档位未取到）') + '。',
+        '需要更深推理（复杂设计、疑难排查、长链规划）或更快响应（简单查询、机械修改）时，可在回复最后一行单独写 [cp:effort <档>] 切换：',
+        '下一步生效，上下文与任务不中断，用户无需操作。换档可能使前缀缓存失效，一次任务 1-2 次为宜。',
+      ].join('');
+    } catch {
+      return null;
+    }
+  };
+
+  /** R1：每轮用量行后缀——让模型知道**当前实际生效**档位（它只知道自己请求过什么，
+   *  不知道插件是否应用成功，例如档位非法被忽略时）。短后缀 ≈7 token/轮。 */
+  const renderEffortSuffix = (eff) => {
+    try {
+      if (!eff?.ok || !eff.current) return null;
+      return '思考强度 ' + eff.current + (eff.adapterDefault ? '(默认)' : '');
+    } catch {
+      return null;
+    }
+  };
 
   state.listeners['agent/pre-step'] = addListener(
     'agent/pre-step',
@@ -1166,12 +1216,29 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         const card = renderPolicyCard(r.ratio); // M3.5 通道2：政策卡（相关占用以上才出现）
         const sid = String(pick(agent.session.id, agent.sessionId, 'unknown'));
         noteSessionId(sid); // C-lineage
+        /* R1 智能思考：**独立门控**（effortEnabled），与压缩的 markerMinRatio 完全解耦——
+         * 用户明确要求「全程允许」：低占用也必须能注入/换档（压缩的卡在低占用时是不注入的）。 */
+        let eff = null;
+        try {
+          mergeConfig();
+          if (M3.effortEnabled === true) eff = await readEffort(agent);
+        } catch { /* 读档失败 ⇒ 不注入（绝不因新功能影响主流程） */ }
+        const effSuffix = renderEffortSuffix(eff);
+        const baseText = effSuffix ? `${r.text} ｜ ${effSuffix}` : r.text;
+        if (effSuffix) state.m2.effortSuffixes = (state.m2.effortSuffixes ?? 0) + 1;
         const brief = briefedBySid.has(sid) ? null : renderBrief(); // M2.5+A3：现拼活值
+        /* R1：思考强度教学与「插件说明」同一时机（会话首次）——合并进同一条消息，
+         * 不额外增加消息结构开销（role 框架/JSON 包装各一次）。 */
+        const effBrief = eff && !effBriefedBySid.has(sid) ? renderEffortBrief(eff) : null;
+        if (effBrief) {
+          effBriefedBySid.add(sid);
+          state.m2.effortBriefings = (state.m2.effortBriefings ?? 0) + 1;
+        }
         if (brief) {
           briefedBySid.add(sid);
           state.m2.briefings = (state.m2.briefings ?? 0) + 1;
         }
-        const fullText = [r.text, card, brief].filter(Boolean).join('\n\n');
+        const fullText = [baseText, card, brief, effBrief].filter(Boolean).join('\n\n');
         const message = createUserMessage({
           content: [{ type: 'text', text: fullText }],
           source: { kind: SOURCE_KIND, form: 'snapshot', sections: [{ name: SOURCE_KIND, text: fullText }] },
@@ -1287,6 +1354,9 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
           const __actText = formatAct(reason, result?.shadowedTokenCount);
           publishHud({ hudLastAct: __actText, hudArmed: '' }); // M5
           recordHudAct(sid, __actText);
+          /* R1：压缩成功 ⇒ 一次性说明（压缩流程 + 智能思考教学）已随旧对话被收走，
+           * 清除「已讲」标记让下一轮重讲一次（否则模型永久失去用法说明）。 */
+          clearBriefed(sid);
           maybeResumeAfterMarker(sid, reason); // M5.5：标记压缩成功 → 自动投递恢复提示
           log('info', `M3 idle 扫除完成：${result ? `shadowed ${result.shadowedSeqs?.length ?? '?'} nodes / ~${result.shadowedTokenCount ?? '?'} tokens` : 'null（无可压区间）'}`);
           schedule('m3-act', 500);
