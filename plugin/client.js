@@ -493,34 +493,51 @@ window.__ModuleLoader__.load({
 		}
 		/**
 		 * R1：输入框「智能思考档位:<当前档>」chip（conversation.input.right slot）。
-		 * 显示条件 = 智能思考开关开启（host getHud 仅在开启时返回 effort 字段）。
-		 * 数据来源：复用 NS.pullHud 之外的**独立** 5s 轮询（chip 生命周期独立于弹窗行，
-		 * 弹窗关闭时弹窗行的轮询会自停，故 chip 不能搭它的车）。
-		 * 样式：读邻居（模型选择器按钮）computedStyle 复制圆角/高度/字号——router-laya 同款做法
-		 * （.data/ref/router-laya-client.js L235 copyNeighbourShape）；拿不到就用兜底值。
+		 * 显示条件 = 智能思考开关开启（effortEnabled 经 getHud 探测）。
+		 * 数据来源（2026-10-07 用户要求「不要 5S 轮询」后重写）：
+		 *   **响应式投影 `useProjection("modelSelection")`** —— 官方 UI 同款数据源
+		 *   （dsh-client-ui-conversation client.js L17240 等，`useProjection("plan")` 同形）。
+		 *   投影由会话事件驱动更新（model/selection、request/header 两类事件，
+		 *   见 api-session-controller applyModelSelectionProjection L2072-2088）
+		 *   ⇒ 换档一落库即重渲染，**无需任何轮询**。
+		 *   - lastUsed = 已生效档位（来自 request/header 事件）
+		 *   - pending  = 已选待生效（model/selection 事件）⇒ 优先显示，让用户提前看到
+		 * 开关状态仍走一次 getHud（低频、仅挂载时一次 + 开关变化时），不轮询。
+		 * 样式：读邻居（模型选择器按钮）computedStyle 复制圆角/字号——router-laya 同款做法。
 		 * 全函数吞异常：任何失败都不渲染（绝不因 chip 打崩输入框）。
 		 */
-		function EffortChip() {
-			const [effort, setEffort] = react.useState(null);
+		function EffortChip(props) {
 			const ref = react.useRef(null);
+			/* ① 开关状态：只在挂载时问一次 host（不轮询）；开关变化由 settingsScope 订阅驱动 */
+			const [enabled, setEnabled] = react.useState(false);
 			react.useEffect(() => {
 				let alive = true;
-				let timer = null;
-				const pull = async () => {
+				const pullOnce = async () => {
 					try {
 						if (!hudRemoteSvc || typeof hudRemoteSvc.getHud !== "function") return;
 						const raw = await hudRemoteSvc.getHud(NS.sid || "");
 						const env = raw && typeof raw === "object" && "value" in raw ? (raw.ok ? raw.value : null) : raw;
 						if (!alive) return;
-						if (env && env.ok && env.effort && env.effort.ok) setEffort(env.effort);
-						else setEffort(null); // 开关关闭 / 无数据 ⇒ 不显示
-					} catch { /* 吞：轮询失败保持现状 */ }
+						setEnabled(!!(env && env.ok && env.effort && env.effort.ok));
+					} catch { /* 吞 */ }
 				};
-				pull();
-				timer = setInterval(() => { pull().catch(() => {}); }, 5000);
-				return () => { alive = false; if (timer != null) clearInterval(timer); };
+				pullOnce();
+				/* 开关被面板/弹窗改动时立即重问一次（事件驱动，非定时器） */
+				let off;
+				try { off = settingsScope.subscribe?.(() => { pullOnce(); }); } catch { /* 忽略 */ }
+				return () => { alive = false; try { off?.(); } catch { /* 忽略 */ } };
 			}, []);
-			/* 邻居形状复制（一次性，挂在 ref 上）：圆角/高度/字号跟随模型选择器 */
+			/* ② 档位：响应式投影（事件驱动，零轮询）。useProjection 由 slot 标准 props 提供。 */
+			let sel = null;
+			try {
+				const up = props && props.useProjection;
+				if (typeof up === "function") sel = up("modelSelection") || null;
+			} catch { /* 投影不可用 ⇒ 不显示 */ }
+			/* pending 优先（已选待生效，用户可提前看到「下一步生效」的结果） */
+			const shown = (sel && (sel.pending || sel.lastUsed)) || null;
+			const effort = shown && shown.reasoningEffort ? String(shown.reasoningEffort) : null;
+			const pendingNow = !!(sel && sel.pending);
+			/* 邻居形状复制（一次性，挂在 ref 上）：圆角/字号跟随模型选择器 */
 			react.useEffect(() => {
 				try {
 					const node = ref.current;
@@ -533,14 +550,13 @@ window.__ModuleLoader__.load({
 					if (cs.fontSize) node.style.fontSize = cs.fontSize;
 				} catch { /* 忽略 */ }
 			}, [effort]);
-			if (!effort || !effort.ok || !effort.current) return null;
+			if (!enabled || !effort) return null;
 			/* 显示形态（2026-10-07 用户要求）：不用冒号，改成**两个 span + 间距**——
 			 * 「智能思考档位」与档位值视觉分离（冒号在中英混排里偏挤，间距更清爽）。
 			 * 间距 6px（与弹窗内其他 label/开关的 gap 一致）。 */
 			const tip = [
-				`模型：${effort.provider}/${effort.model}`,
-				`当前档位：${effort.current}${effort.adapterDefault ? "（adapter 默认）" : ""}`,
-				effort.efforts ? `可选档位：${effort.efforts.join(" / ")}` : "可选档位：未取到",
+				`模型：${shown.provider}/${shown.model}`,
+				`当前档位：${effort}${pendingNow ? "（已选，下一步生效）" : ""}`,
 				"Agent 可写 [cp:effort <档>] 自主换档（下一步生效）",
 			].join("\n");
 			return el("div", {
@@ -557,7 +573,8 @@ window.__ModuleLoader__.load({
 				},
 			},
 				el("span", { style: { opacity: ".75" } }, "智能思考档位"),
-				el("span", { style: { fontWeight: "600" } }, effort.current),
+				el("span", { style: { fontWeight: "600" } }, effort),
+				pendingNow ? el("span", { style: { opacity: ".55", fontSize: "11px" } }, "· 下一步") : null,
 			);
 		}
 		//#endregion
