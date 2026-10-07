@@ -313,7 +313,15 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
   };
   const recordHudAct = (sid, text) => {
     try {
-      state.m5.acts.unshift({ sid: String(sid ?? ''), text: String(text ?? ''), at: new Date().toISOString() });
+      const at = new Date().toISOString();
+      /* 去重：同一会话 + 同文本 + 1 秒内视为同一次压缩的重复上报。
+       * 成因（2026-10-07 实测发现 hud-acts.json 出现 1ms 间隔的重复条目）：同一压缩成功回调可能
+       * 被两个并存实例各记一次（热换窗口），或引擎事件重放；不加防护会污染历史与悬停列表。 */
+      const dup = state.m5.acts.find(
+        (a) => a.sid === String(sid ?? '') && a.text === text && Math.abs(new Date(a.at).getTime() - Date.now()) < 1000,
+      );
+      if (dup) return;
+      state.m5.acts.unshift({ sid: String(sid ?? ''), text: String(text ?? ''), at });
       if (state.m5.acts.length > HUD_ACTS_CAP) state.m5.acts.length = HUD_ACTS_CAP;
       saveHudActs(state.m5.acts);
     } catch { /* 吞 */ }
