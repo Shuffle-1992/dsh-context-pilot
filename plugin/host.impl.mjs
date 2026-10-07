@@ -1035,9 +1035,34 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       ...(reason === 'r1-probe' && state.r1Probe ? { r1: { ...state.r1Probe } } : {}),
     };
 
-    for (const k of ['tokenMeter', 'sessions', 'agents', 'systemPrompt', 'compaction', 'llm', 'sessionProjections', 'sessionQuery', 'configEditor', 'sessionController', 'typertGateway']) {
+    for (const k of ['tokenMeter', 'sessions', 'agents', 'systemPrompt', 'compaction', 'llm', 'sessionProjections', 'sessionQuery', 'configEditor', 'sessionController', 'typertGateway',
+      // R2（2026-10-08）：换档改工具方案的前置验证——tools 服务必须可达且 register 可调用
+      'tools']) {
       const s = svc(k);
       snap.services[k] = s ? typeof s : 'absent';
+    }
+
+    /* R2 探针（2026-10-08）：换档改「工具」方案的前置验证——一次性，只读探测。
+     * 依据（docs/r2-tool-switch-design.md）：工具调用会让本轮**继续**到下一步
+     * （dsh-agent-loop L1152-1155：有 toolCalls ⇒ 返回 null ⇒ 不 break），
+     * 而每步都重走 agent/request ⇒ 同轮内换档生效、无需用户输入、无伪造消息。
+     * 本探针只查「工具注册面是否可达」，**不实际注册**（避免污染工具列表）。 */
+    if (!snap.r2Probe) {
+      try {
+        const tools = svc('tools');
+        const agentList = tryOf(() => svc('agents')?.list?.() ?? []).value ?? [];
+        const first = agentList[0] ?? null;
+        snap.r2Probe = {
+          at: new Date().toISOString(),
+          toolsService: tools ? typeof tools : 'absent',
+          hasRegister: typeof tools?.register === 'function',
+          agentCount: agentList.length,
+          agentHasCtxTools: typeof first?.ctx?.tools?.register === 'function',
+          agentCtxToolsType: first?.ctx?.tools ? typeof first.ctx.tools : 'absent',
+        };
+      } catch (e) {
+        snap.r2Probe = { at: new Date().toISOString(), error: msg(e) };
+      }
     }
 
     const tm = svc('tokenMeter');
