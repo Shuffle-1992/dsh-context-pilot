@@ -150,3 +150,35 @@
 - **🔬 A1 泄漏的野外实证（副产品）**：判别实验留下的探针实例 `muwbcv25-wjtp` 未把 interval 登记 disposer → **连续多次 toggle 都没能杀掉它**，仍以 15s 周期往报告写（P37 同族交错写）。已由 DSH 重启清除（末次写入 06:52:22；重启后无新写）。
 - **⚠️ C3 附带缺陷（由僵尸暴露，已补丁）**：C3 的「apply 期读一次缓存基线」在**多写入者共存**时会互相覆盖——僵尸用自己的旧基线整段写回，**抹掉新实例在它之后写入的条目**。补丁：`writeReport` 每次写入前做**尾部对账**（磁盘尾条目 ≠ 本实例上次写入 ⇒ 判为他人写入 ⇒ 以磁盘为准重新接续），正确性优先、仍避免无条件全量解析。
 - **重启后复验结论（2026-10-06 14:53–15:04）**：僵尸清除 ✅、B4 动态 import 生效 ✅（`hudFace='provided'`）、B3 字段退役 ✅（`keywordHits` 已消失）、`markerMinRatio=0.15` 保留 ✅、**心跳真实运行 ✅**、**A1 disposer 生效 ✅**。
+
+### C3② 报告稳态瘦身 + B5 取证工具收敛 —— ✅ 2026-10-07（挂起项清偿）
+
+**C3② 报告瘦身**（审查遗留，实测触目）：
+- **动因**：报告 **3.77MB**、history 满 120 条、**单条均值 16KB**。构成——`heartbeat` 52 条占 888KB、
+  `agent/status` 20 条占 330KB、`m3-decision` 13 条占 214KB。体积主体是 `buildSnapshot` 的
+  **全量 sessions/agents 枚举**（每会话 `keys[40]` + measure + pressureProjection + breakdownSummary）。
+- **安全性调研（关键）**：history 的全量内容**只被一处读取**——启动回填 `bfOnce`（筛 `reason==='m3-act'`
+  取 `m3.lastAct`）。其余字段纯取证、不进任何逻辑分支 ⇒ 分级瘦身安全。
+- **实现**：`SLIM_REASONS` 集合（heartbeat / agent/status / m5-publish / m2-inject / m3-decision /
+  m3.6-marker / m5.5-resume / session/created）+ `slimSnapshot()`。精简档保留：读数（用量最高 2 会话）、
+  `m2`（含 `lastText`/`injections`/`skips`）、`m3`（决策/压缩/错误/`eff`/`heartbeat`，仅丢 `eventProbe`）、
+  `m5`/`m55`、`services`、`totals`；丢：全量枚举明细、`llmProviders`、`compactionProbe`。
+  每条带 `profile: 'slim'|'full'` 标记，dump 可直接区分。
+- **实测效果**：slim 单条 **2.06KB** vs full **13.99KB** ⇒ **降 85%**（预估 -84%，吻合）。
+  history 满 120 条时预计 **1936KB → ~308KB**，报告文件 3.77MB → **约 600KB**。
+- **`m3-act` / `m4-probe` / `activation` / `boot` 等关键事件保持全量**（回填与取证不受影响），
+  已专项校验。
+
+**B5 取证工具收敛**（审查遗留）：
+- **清理前**：3 处散落共 **18 个**一次性脚本（根 `.data/` 9 个、`plugin/.data/` 4 个、
+  `docs/reference/tools/` 5 个），其中 `dump-m55-fields.cjs` **存在两份内容不同的副本**。
+- **收敛为 2 个统一工具**（`docs/reference/tools/`）：
+  - `dump-report.cjs` —— `--tail N` / `--kind` / `--field` / `--history-acts` / `--full` / `--report`，
+    取代 dump-m55-fields / dump-hud-tail / dump-report-tail / dump-m55 四个
+  - `asar-query.cjs` —— `list` / `extract` / `grep` / `pkg` 四个子命令，取代 asar-extract ×3 /
+    asar-find ×2 / asar-probe
+- **顺带修掉两个脚本 bug**：① 旧 `dump-m55-fields.cjs` 按**报告顶层**读 `m3`/`m5`（实际在
+  **每个 history 条目上**）⇒ 恒为 null；② 旧 `dump-report-tail.cjs` 仍读已删除的 `keywordHits` 字段。
+  统一工具按正确路径读，并在文档里写明该约定（防再踩）。
+- **目录语义恢复**：`plugin/.data/` 现在只剩**运行时数据**（`m1-report.json` + `hud-acts.json`），
+  取证脚本归 `docs/reference/tools/`。

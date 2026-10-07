@@ -19,17 +19,36 @@
 
 > 各包 `package.json` 声明 `license: MIT`、`private: false`（抽取时核对，2026-10-06）。
 
-## 再生成方式
+## 用工具重新抽取
 
-`tools/` 下的脚本按需重抽（改 `WANT` 列表即可抽任意源码）：
+`tools/` 下是**统一工具**（2026-10-07 收敛，此前的 7 个一次性脚本已合并删除）：
 
-- `asar-extract.cjs` —— 批量抽取（压缩/计量包源码 + README）
-- `asar-extract-dsh-session.cjs` —— dsh-session 包
-- `asar-extract-time-context.cjs` —— dsh-time-context 包（注入挂点参考实现）
-- `asar-find-createUserMessage.cjs` —— 定位 `createUserMessage` 导出位置
-- `asar-find-not-bundle.cjs` —— 排查 `not-bundle` 静默跳过问题
+### `asar-query.cjs` —— 查询 DSH 安装包
 
-用法：`node docs/reference/tools/<script>.cjs`（脚本内 `OUT` 指向本目录）。
+```bash
+node tools/asar-query.cjs list --filter dsh-compaction        # 列文件
+node tools/asar-query.cjs pkg   --path "/dsh/node_modules/@deepseek-ai/dsh-session/package.json"
+node tools/asar-query.cjs grep  --pattern compactIfNeeded --ext js --ctx 3
+node tools/asar-query.cjs extract --paths "/dsh/node_modules/@deepseek-ai/dsh-token-meter/lib/index.js" --out .
+```
+
+默认 asar 路径 `D:\DeepSeek\resources\app.asar`，可用 `--asar` 覆盖。
+
+### `dump-report.cjs` —— 读插件取证报告
+
+```bash
+node tools/dump-report.cjs                  # 概览 + 尾部条目
+node tools/dump-report.cjs --tail 20        # 尾部 N 条
+node tools/dump-report.cjs --kind m3-act    # 按 reason 过滤
+node tools/dump-report.cjs --field m3.eff   # 取最近一条的某字段
+node tools/dump-report.cjs --history-acts   # 压缩历史（含 hud-acts.json）
+```
+
+默认读 `plugin/.data/m1-report.json`，可用 `--report` 指定。
+
+> ⚠️ **路径约定（踩过坑）**：报告的 `m3`/`m5`/`m55` 块在**每个 history 条目上**，不在报告顶层。
+> 早期脚本按顶层读会拿到 null——统一工具已修正。
+
 
 ## 政策（对齐 `zcode-dispatch` 仓库惯例）
 

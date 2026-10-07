@@ -81,8 +81,12 @@ DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`：**让长�
 - **只读审查落地**：外部审查 23 条，批次 1/2/3 全部实施（含心跳泄漏、`ctx.effect` 语义误用等真 bug）
 
 **未实施（明确挂起）**：D1 模块切分（动骨架，建议单独一轮）、D2 wire 样板共享、
-B5 dump 脚本收敛、C2 无界 Map 上限、C3② 报告瘦身、A6 恢复计数清零、
-A2/A5/A6 的真机 E2E 验收。
+C2 无界 Map 上限（当前规模无实际风险）、A6 恢复计数清零、
+**A5 pre-step 强制压缩真机 E2E**（唯一「已实现但成功率未验」的路径——需占用冲到强制压缩线
+才有条件测，当前设为 80%，等接近了再做）、A2/A6 的真机 E2E。
+
+> ✅ **2026-10-07 清偿**：C3② 报告稳态瘦身（3.77MB → 预计 ~600KB，单条 16KB → 2KB）、
+> B5 取证工具收敛（18 个散落脚本 → 2 个统一工具）。详见 [`docs/milestones.md`](docs/milestones.md)。
 
 ---
 
@@ -159,7 +163,20 @@ A2/A5/A6 的真机 E2E 验收。
 
 **运行期取证**：`plugin/.data/m1-report.json`（service/injection/compaction 全字段报告）、
 `plugin/.data/hud-acts.json`（压缩历史，cap 50）。
-dump 脚本：`plugin/.data/dump-m55-fields.cjs`、`dump-hud-tail.cjs`。
+
+统一取证工具（2026-10-07 收敛，取代此前散落的一次性脚本）：
+
+```bash
+node docs/reference/tools/dump-report.cjs                  # 报告概览 + 尾部条目
+node docs/reference/tools/dump-report.cjs --tail 20        # 尾部 N 条
+node docs/reference/tools/dump-report.cjs --kind m3-act    # 按 reason 过滤
+node docs/reference/tools/dump-report.cjs --field m3.eff   # 取最近一条的某字段
+node docs/reference/tools/dump-report.cjs --history-acts   # 压缩历史（含 hud-acts.json）
+
+node docs/reference/tools/asar-query.cjs list --filter dsh-token-meter
+node docs/reference/tools/asar-query.cjs grep --pattern compactIfNeeded --ext js --ctx 3
+node docs/reference/tools/asar-query.cjs extract --paths "/dsh/node_modules/..."
+```
 
 ---
 

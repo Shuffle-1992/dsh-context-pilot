@@ -675,6 +675,64 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     }
   };
 
+  /* ---- C3② 报告稳态瘦身（2026-10-07）----
+   * 动因（本机实测）：报告文件 **3.77MB**（pretty 后），history 满 120 条、单条均值 **16KB**，
+   * 其中 heartbeat 52 条就占 888KB、agent/status 20 条占 330KB。体积主体是 buildSnapshot 的
+   * **全量 sessions/agents 枚举**（每会话 keys[40] + measure + pressureProjection + breakdownSummary）。
+   *
+   * 消费侧调研（决定瘦身安全性）：history 的全量内容**只被一处读取**——启动回填 bfOnce
+   * （筛 `reason==='m3-act'` 取 `m3.lastAct`）。其余字段纯为取证，不进任何逻辑分支。
+   *
+   * 策略：按 reason 分级——
+   *  - **SLIM**（高频、信息量低）：只留「读数 + 状态」，丢明细（keys/headerKeys/breakdown/probe 样本/LLM 拓扑）
+   *  - **FULL**（其余，含 m3-act/m4-probe/activation 等关键事件）：完整快照，取证不受影响
+   * 用 `profile` 字段显式标记，dump 时可直接区分。 */
+  const SLIM_REASONS = new Set([
+    'heartbeat',     // 每 120s 一次，纯存活性
+    'agent/status',  // 状态频繁翻转
+    'm5-publish',    // 400ms 防抖高频
+    'm2-inject',     // 每轮一次；注入文本已在 snap.m2.lastText 保留
+    'm3-decision',   // 每任务一次；决策已在 snap.m3.lastDecision 保留
+    'm3.6-marker',   // 标记命中；detail 在 m3.markerHits
+    'm5.5-resume',   // 恢复相位；detail 在 m55.attempts
+    'session/created',
+  ]);
+  /** 精简快照：保留读数与状态，丢枚举明细。 */
+  const slimSnapshot = (snap) => {
+    const num = (v) => (typeof v === 'number' ? v : null);
+    // sessions：只留用量最高的 2 条（读数），丢 keys/headerKeys/breakdown 明细
+    const topSessions = (snap.sessions || [])
+      .filter((r) => typeof r.measure?.totalTokens === 'number')
+      .sort((a, b) => b.measure.totalTokens - a.measure.totalTokens)
+      .slice(0, 2)
+      .map((r) => ({
+        id: r.id,
+        measure: { totalTokens: num(r.measure?.totalTokens), surfaceTokens: num(r.measure?.surfaceTokens) },
+        window: r.pressureProjection?.contextWindow ?? null,
+      }));
+    const topAgents = (snap.agents || []).slice(0, 2).map((r) => ({ id: r.id, sessionId: r.sessionId, status: r.status }));
+    return {
+      at: snap.at,
+      reason: snap.reason,
+      profile: 'slim',
+      services: snap.services,
+      totals: snap.totals,
+      sessions: topSessions,
+      agents: topAgents,
+      sessionsError: snap.sessionsError,
+      agentsError: snap.agentsError,
+      m2: snap.m2, // 含 lastText/injections/skips——注入取证要留
+      m3: {
+        // 只丢体积大且仅取证用的 eventProbe；其余（决策/压缩/错误/eff）全留
+        ...snap.m3,
+        eventProbe: undefined,
+      },
+      m5: snap.m5,
+      m55: snap.m55,
+      // llmProviders / compactionProbe 仅在 FULL 条目保留
+    };
+  };
+
   /* ---- 快照：服务在位 + Session/Agent 枚举与测量 + M2 状态 ---- */
   const buildSnapshot = (reason) => {
     const snap = {
@@ -801,7 +859,8 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         (top ? ` ｜ 最热会话 id=${String(top.id).slice(0, 8)}… total=${kfmt(top.measure.totalTokens)}` : '') +
         ` ｜ m2 注入=${snap.m2?.injections ?? 0}`,
     );
-    writeReport(snap);
+    // C3②：高频 reason 落精简档（体积降一个量级），关键事件保留全量
+    writeReport(SLIM_REASONS.has(reason) ? slimSnapshot(snap) : { ...snap, profile: 'full' });
   };
 
   /** 防抖刷新：同 reason 的多次触发合并为最后一次。 */
