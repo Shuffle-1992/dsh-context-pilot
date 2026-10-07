@@ -67,10 +67,11 @@ window.__ModuleLoader__.load({
 			{ key: "effortEnabled", label: "智能思考", type: "bool", def: false, hint: "开启后向 Agent 暴露思考档位并允许其自主换档；关闭则完全不介入" },
 			/* 换档冷却（R3-S7 起可配）：换档会使前缀缓存失效 ⇒ 属计费敏感参数，故开放配置。 */
 			{ key: "effortCooldownMs", label: "换档冷却(秒)", type: "int", def: 30000, scale: 1000, hint: "两次换档的最小间隔（防反复打断前缀缓存）" },
-			{ key: "markerMinRatio", label: "智能压缩线", type: "num", def: 0.2, hint: "占用达此值时，模型可自行决定压缩并自动续跑" },
+			{ key: "markerMinRatio", label: "智能压缩线", type: "num", def: 0.2, hint: "占用达此值时注入决策卡，模型可自行决定压缩" },
 			{ key: "criticalRatio", label: "强制压缩线", type: "num", def: 0.85, hint: "占用达此值无条件强制压缩（先于 DSH 引擎自动压缩触发）" },
-			{ key: "marker", label: "压缩标记", type: "text", def: "[cp:compact]", hint: "模型回复尾行标记；置空则关闭智能压缩" },
-			{ key: "armedTtlMs", label: "标记有效期(秒)", type: "int", def: 120000, scale: 1000, hint: "标记后多久内有效" },
+			/* R7：`marker`（压缩标记）与 `armedTtlMs`（标记有效期）两个面板字段随 marker 通道退役删除——
+			 * 压缩已改由工具 `compact_context` 触发，回复尾行文本标记既无教学也无执行路径。
+			 * ⚠️「智能压缩线」(`markerMinRatio`) 保留：它是决策卡注入门槛，与标记无关。 */
 			{ key: "sweepMinIntervalMs", label: "强制压缩冷却(秒)", type: "int", def: 600000, scale: 1000, hint: "两次强制压缩的最小间隔" },
 		];
 
@@ -97,7 +98,7 @@ window.__ModuleLoader__.load({
 		function parseInput(field, raw) {
 			if (field.type === "bool") return raw === true;
 			if (field.type === "text") return typeof raw === "string" ? raw : null;
-			/* C5（审查）：清空输入拦为 null——原 Number('')=0 会把 armedTtlMs/比率存成 0（armedTtl=0 即标记通道废）。
+			/* C5（审查）：清空输入拦为 null——原 `Number('')=0` 会把比率类字段存成 0（0 即该通道失效）。
 			 * null 走表单既有的「输入不合法」错误提示路径。 */
 			if (typeof raw === "string" && raw.trim() === "") return null;
 			const n = Number(raw);
@@ -309,6 +310,9 @@ window.__ModuleLoader__.load({
 				(async () => {
 					try {
 						await writeField(settingsScope, field, engineCap);
+						/* E6（审查）：异步分支必须检查 `alive`——组件卸载后 setState 虽不报错，
+						 * 但这里还会**继续写配置**（越权副作用）；同文件其他异步路径都有这道守卫。 */
+						if (!alive) return;
 						const back = Number(unwrapLiveDeep(settingsScope.getSnapshot().value)?.criticalRatio);
 						if (back !== engineCap) throw new Error(`回读不一致（读到 ${back}）`);
 						setRev((v) => v + 1);
@@ -318,6 +322,7 @@ window.__ModuleLoader__.load({
 						});
 					} catch (error) {
 						autoClamped.current = false; // 失败允许下次重试
+						if (!alive) return;
 						setMessage({ kind: "error", text: `自动钳制失败：${String(error?.message ?? error)}` });
 					}
 				})();
@@ -434,10 +439,12 @@ window.__ModuleLoader__.load({
 			};
 			if (view === "summary") {
 				if (!ready) return el("span", { className: "dcp-summary" }, "配置读取中…");
-				const crit = Math.round(valueOf(FIELDS.find((f) => f.key === "criticalRatio")) * 100);
-				const marker = valueOf(FIELDS.find((f) => f.key === "marker"));
+				/* R7：原先显示「强制压缩线 + 压缩标记」——标记已退役，改为显示**两条线**
+				 * （智能压缩线 / 强制压缩线），与弹窗阈值行同口径。 */
+				const crit = pct1(valueOf(FIELDS.find((f) => f.key === "criticalRatio")));
+				const smart = pct1(valueOf(FIELDS.find((f) => f.key === "markerMinRatio")));
 				return el("span", { className: "dcp-summary" },
-					`强制压缩线 ${crit}% ｜ 标记 ${marker ? marker : "关闭"}`);
+					`智能压缩线 ${smart} ｜ 强制压缩线 ${crit}`);
 			}
 			/* 未就绪（命名空间尚未绑定 / 快照未解析）：只显示占位，绝不渲染 field.def 冒充当前值。 */
 			if (!ready) {
@@ -583,13 +590,29 @@ window.__ModuleLoader__.load({
 					"模型说明：压缩摊销成本 ≈ 新增内容 × 未命中价，与阈值几乎无关（摘要调用 ∝ 阈值，但压缩间隔也 ∝ 阈值，两者相消）——全部收益来自上下文规模。详见 README §7。"),
 			);
 		}
-		/** 错误边界：渲染异常只留痕，绝不冒泡打崩插件详情页。 */
-		function CardBoundary(props) {
-			try {
-				return el(PilotPanelCard, props);
-			} catch (error) {
-				console.warn(`${LOG} 卡片渲染失败:`, error && error.message);
-				return null;
+		/** 错误边界：**真正的 React 错误边界**（R7 审查 D5 修）。
+		 *  原先只是 `try { return el(PilotPanelCard, props) } catch { return null }` ——
+		 *  它**只能**挡住**渲染期同步**异常；组件的 effect / 事件回调 / 异步 setState 里抛的错
+		 *  照样冒泡到宿主，把整个插件详情页打崩。本项目已经出过一次「面板整卡消失」的真事故
+		 *  （`PriceCalculator` 引用未定义标识符，见 §6.17 的护栏）——那次是渲染期异常被这个
+		 *  try/catch 救了一部分，而**回调期**异常至今没有任何拦网。
+		 *  真正的边界必须是类组件：React 把子树的渲染期/提交期异常交给 `componentDidCatch`，
+		 *  并按 `getDerivedStateFromError` 的返回值把子树摘掉，而不是让异常逃出去。
+		 *  隔离粒度 = 单张卡：卡片坏了，插件详情页其余部分与宿主 UI 都不受影响。 */
+		class CardBoundary extends react.Component {
+			constructor(props) {
+				super(props);
+				this.state = { failed: false };
+			}
+			static getDerivedStateFromError() {
+				return { failed: true };
+			}
+			componentDidCatch(error) {
+				console.warn(`${LOG} 卡片渲染失败（已隔离，面板其余部分不受影响）:`, error && error.message);
+			}
+			render() {
+				if (this.state.failed) return null;
+				return el(PilotPanelCard, this.props);
 			}
 		}
 		/**
@@ -1057,8 +1080,6 @@ window.__ModuleLoader__.load({
 					const label = document.createElement("span");
 					/* 记录文字超长时在边界内省略（此前 nowrap 会溢出弹窗右缘） */
 					label.style.cssText = "opacity:.72;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;";
-					const chips = document.createElement("span");
-					chips.style.cssText = "display:inline-flex;align-items:center;gap:4px;flex:none;";
 					const thr = document.createElement("div");
 					/* 排版（2026-10-07）：用户两轮反馈的最终形态——
 					 * ①「上限 80% 没显示完整」→ 曾用 9px + 折行 + 半角分隔符解决截断；
@@ -1066,12 +1087,6 @@ window.__ModuleLoader__.load({
 					 * 保留 word-break:normal（**不是** keep-all：keep-all 禁止汉字断行，反而更易溢出）
 					 * 与 overflow-wrap:anywhere 作为窄容器兜底；不再用 ellipsis（宁可折行不静默截断）。 */
 					thr.style.cssText = "font-size:11px;line-height:1.4;opacity:.68;letter-spacing:0;max-width:100%;white-space:normal;word-break:normal;overflow-wrap:anywhere;text-align:center;";
-					const chip = (text, color) => {
-						const c = document.createElement("span");
-						c.textContent = text;
-						c.style.cssText = `display:inline-block;padding:0 6px;border-radius:6px;font-size:11px;line-height:16px;border:1px solid ${color};color:${color};`;
-						return c;
-					};
 					let hudRemote = null; // getHud 结果（覆盖配置镜像同名字段）
 					/* 完整本地日期时间（2026-10-08 用户要求）：YYYY-MM-DD HH:MM:SS。
 					 * 解析失败时回退原文前 19 字符，绝不显示 Invalid Date。 */
@@ -1112,15 +1127,9 @@ window.__ModuleLoader__.load({
 								? detail.map((x) => `${fmtFullTime(x && x.at)} · ${stripHhmm(x && x.text)}`)
 								: (act ? [act] : []);
 							row.title = `${actLines.length ? actLines.join("\n") : "（暂无压缩记录）"}\n—— dcp: gen=${v.gen || "?"} sid=${(NS.sid || "").slice(0, 13) || "?"}`;
-							chips.replaceChildren();
-							if (v.hudArmed === "armed") chips.appendChild(chip("武装中", "#4c7dff"));
-							let pendingTask = "";
-							try { const p = JSON.parse(v.hudPending || "null"); if (p && p.task) pendingTask = String(p.task); } catch { /* 非 JSON 忽略 */ }
-							if (pendingTask) {
-								const c = chip("待执行", "#e3b341");
-								c.title = `压缩后自动恢复执行：${pendingTask}`;
-								chips.appendChild(c);
-							}
+							/* R7：原「武装中」(`v.hudArmed === "armed"`) 与「待执行」(解析 `v.hudPending`)
+							 * 两个徽章随 marker 通道退役删除——压缩已改由工具在轮内触发，
+							 * **不存在**任何「压缩后自动恢复执行」的动作，徽章文案本身已失真。 */
 							/* 底部阈值速览：智能压缩线 / 强制压缩线（配置镜像实时跟随）。
 							 * 2026-10-07 用户要求：**删除「上限 NN%」**（引擎阈值是内部钳制细节，
 							 * 用户不需要在弹窗里看到；面板备注与计算器仍会说明该约束）。
@@ -1198,14 +1207,18 @@ window.__ModuleLoader__.load({
 							if (r && r.ok) {
 								hudRemote = {
 									hudLastAct: r.hudLastAct || "",
-									hudArmed: r.hudArmed || "",
-									hudPending: r.hudPending || "",
 									gen: r.gen || "",
 									/* 本会话压缩记录明细（host 严格按 sid 过滤）：{at, text}[] */
 									actsDetail: Array.isArray(r.actsDetail) ? r.actsDetail : null,
 									/* 生效强制线上限（= 引擎阈值 − 5pp）：既给保存路径钳制用（NS.engineCap），
 									 * 也给弹窗阈值行显示**生效值**用（否则用户看到 80%、实际 75% 触发）。 */
 									criticalCap: typeof r.criticalCap === "number" && Number.isFinite(r.criticalCap) ? r.criticalCap : null,
+									/* R7（审查 E1/B1 修）：`occupancyRatio` / `occupancyWindow` 此前**漏搬** ⇒
+									 * 弹窗底部「距智能压缩线 …」分支永远拿到 undefined、永不显示，
+									 * 而 host 侧一直在算并下发（wire 签名也早就声明了这两个字段）。
+									 * 这是「host 算了 / wire 声明了 / client 不用」的三端漂移实例。 */
+									occupancyRatio: typeof r.occupancyRatio === "number" && Number.isFinite(r.occupancyRatio) ? r.occupancyRatio : null,
+									occupancyWindow: typeof r.occupancyWindow === "number" && Number.isFinite(r.occupancyWindow) ? r.occupancyWindow : null,
 								};
 								/* C-own：引擎阈值上限（host 动态探测，方案 C 钳制用）——存 NS 供保存路径读取 */
 								if (typeof r.criticalCap === "number" && Number.isFinite(r.criticalCap) && r.criticalCap > 0 && r.criticalCap <= 1) {
@@ -1228,7 +1241,6 @@ window.__ModuleLoader__.load({
 					myTimerId = setInterval(() => { try { pullHud(); } catch { /* 忽略 */ } }, 5000);
 					NS.hudTimer = myTimerId;
 					line1.appendChild(label);
-					line1.appendChild(chips);
 					row.appendChild(line1);
 					row.appendChild(thr);
 					return row;

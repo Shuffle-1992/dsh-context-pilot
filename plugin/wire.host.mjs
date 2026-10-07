@@ -7,7 +7,7 @@
  *
  * face 契约 1 方法（与 client.js REMOTE_CONTRIBUTION.descriptors 逐字对账——
  * P29 教训：两端清单漂移 = 调用静默失败）：
- *  - getHud()：读 HUD 状态（最近压缩 / 武装灯 / 待执行 chip），内存为准，空位由启动回填自报告补。
+ *  - getHud()：读 HUD 状态（最近压缩记录 + 阈值上限），内存为准，空位由启动回填自报告补。
  *
  * 形态照抄 @local/dsh-browser-kit 的 wire.host.mjs（本机已验证两条并存路径）：
  * A) dsh-typert-loader 自动发现：读包 exports["./typert"] → ctx.typert.register(TYPERT)；
@@ -25,12 +25,12 @@ const JSON_ANY = Object.freeze({ parse: (value) => value });
 
 /** face 方法面：[方法名, 参数名数组, 签名, 可选参数名数组]。 */
 const FACE_METHOD_TABLE = [
-  ['getHud', ['sid'], 'getHud(sid?): Promise<{ok:true, hudLastAct:string, hudArmed:string, hudPending:string, gen:string, actsDetail:{at:string,text:string}[], sessionMatched:number, occupancyRatio:number|null, occupancyWindow:number|null, criticalCap:number, effortEnabled:boolean, effort:{ok:boolean, provider?:string, model?:string, current:string|null, efforts:string[]|null, defaultEffort?:string|null, adapterDefault?:boolean, cooldownUntil?:number, cooldownTotalMs?:number}|null, at:string}|{ok:false, error}>（HUD 状态轮询；sid 可选=按会话过滤最近压缩，空=全局。⚠️ 2026-10-08：会话过滤改为**按 sid 精确相等**（血统链退役，见 host 注释）；`actsDetail` 带 at 供 client 渲染完整日期时间，原 `acts`/`actsGlobal`/`hudLastActGlobal` 已退役。⚠️ effortEnabled 为**开关状态**（R3-S9：与 effort 数据分离，避免用 effort.ok 同时承担「开关关闭」与「读档失败」两种语义）；effort 仅在开关开启时非 null，含换档冷却绝对时间戳）', ['sid']],
+  ['getHud', ['sid'], 'getHud(sid?): Promise<{ok:true, hudLastAct:string, gen:string, actsDetail:{at:string,text:string}[], sessionMatched:number, occupancyRatio:number|null, occupancyWindow:number|null, criticalCap:number, effortEnabled:boolean, effort:{ok:boolean, provider?:string, model?:string, current:string|null, efforts:string[]|null, defaultEffort?:string|null, adapterDefault?:boolean, cooldownUntil?:number, cooldownTotalMs?:number}|null, at:string}|{ok:false, error}>（HUD 状态轮询；sid 可选=按会话过滤最近压缩，空=全局。⚠️ 2026-10-08：会话过滤改为**按 sid 精确相等**（血统链退役，见 host 注释）；`actsDetail` 带 at 供 client 渲染完整日期时间，原 `acts`/`actsGlobal`/`hudLastActGlobal` 已退役。⚠️ R7：原「武装灯」与「待执行徽章」两个 HUD 字段已随 marker 通道退役删除（连同它们的两个字段名一起——见 schema 注释）。⚠️ effortEnabled 为**开关状态**（R3-S9：与 effort 数据分离，避免用 effort.ok 同时承担「开关关闭」与「读档失败」两种语义）；effort 仅在开关开启时非 null，含换档冷却绝对时间戳）', ['sid']],
 ];
 
 /**
  * 创建宿主 face。
- * @param {{ onGetHud: (sid?: string) => {ok: boolean, hudLastAct?: string, hudArmed?: string, hudPending?: string, gen?: string, acts?: string[], occupancyRatio?: number|null, occupancyWindow?: number|null, at?: string, error?: string} }} hooks
+ * @param {{ onGetHud: (sid?: string) => {ok: boolean, hudLastAct?: string, gen?: string, acts?: string[], occupancyRatio?: number|null, occupancyWindow?: number|null, at?: string, error?: string} }} hooks
  */
 export function createRemoteFace({ onGetHud }) {
   class RemoteFace {

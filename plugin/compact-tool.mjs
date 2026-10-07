@@ -61,14 +61,35 @@ export function createCompactTool(deps) {
 
   /* ═══════════ 意图表（宿主 pre-step 消费） ═══════════ */
 
-  /** 读取未过期的意图；顺手清掉过期项（唯一删除点之一）。返回 null 表示「无意图」。 */
+  /**
+   * 惰性清扫：**所有 sid** 的过期项一律删除。
+   * ⚠️ 2026-10-08 R7 修：原实现只在 `peekIntent(当前 sid)` 里顺带删自己那一项 ⇒
+   * **别的会话的过期意图永远不被清理**（TTL 形同虚设、Map 无界增长、
+   * `compactIntentExpired` 也只统计到「自己查自己」的那部分）。
+   * 触发点是登记/查询/消费三处，因此表规模恒为「最近 TTL 窗口内的登记数」，不需要定时器。
+   */
+  function sweepExpired(now = Date.now()) {
+    let removed = 0;
+    for (const [k, it] of bySid) {
+      if (now - (it?.at ?? 0) > INTENT_TTL_MS) {
+        bySid.delete(k);
+        removed += 1;
+      }
+    }
+    if (removed) state.m3.compactIntentExpired = (state.m3.compactIntentExpired ?? 0) + removed;
+    return removed;
+  }
+
+  /** 读取未过期的意图。返回 null 表示「无意图」。 */
   function peekIntent(sid) {
     try {
       const key = String(sid ?? '');
       if (!key) return null;
+      sweepExpired();
       const it = bySid.get(key);
       if (!it) return null;
       if (Date.now() - it.at > INTENT_TTL_MS) {
+        /* 理论不可达（刚 sweep 过）；留作防御——时钟回拨或并发写入时仍能自愈。 */
         bySid.delete(key);
         state.m3.compactIntentExpired = (state.m3.compactIntentExpired ?? 0) + 1;
         return null;
@@ -82,6 +103,20 @@ export function createCompactTool(deps) {
     const it = peekIntent(sid);
     if (it) bySid.delete(String(sid ?? ''));
     return it;
+  }
+
+  /**
+   * 未过期的意图清单（**诊断出口**）。
+   * 用途：宿主在本 sid 查不到意图、但表里还有**别的 sid** 的意图时落痕——
+   * 那正是「session id 轮转 ⇒ 意图登记在旧键 ⇒ 工具回了 scheduled 但压缩永不发生」的现场。
+   * 宿主**不得**据此跨会话执行压缩（会在错误的 agent 上动手，比不压更糟），只留痕。
+   */
+  function pending() {
+    try {
+      sweepExpired();
+      const now = Date.now();
+      return [...bySid.entries()].map(([sid, it]) => ({ sid: String(sid).slice(0, 24), ageMs: now - (it?.at ?? 0) }));
+    } catch { return []; }
   }
 
   /* ═══════════ 工具 ═══════════ */
@@ -285,11 +320,13 @@ export function createCompactTool(deps) {
     }
   }
 
-  /** 取证快照（宿主报告用；只读，不暴露内部 Map）。 */
+  /** 取证快照（宿主报告用；只读，不暴露内部 Map）。
+   *  宿主 `buildSnapshot` 会调它把**意图表**落进报告——这是「意图登记了但没被消费」的唯一现场。 */
   function diag() {
     return {
       tracked: bySid.size,
       toolRegistered,
+      pending: pending(),
       sids: [...bySid.entries()].slice(0, 8).map(([sid, it]) => ({
         sid: String(sid).slice(0, 24),
         at: new Date(it.at).toISOString(),
@@ -298,5 +335,5 @@ export function createCompactTool(deps) {
     };
   }
 
-  return { TOOL_NAME, ensure, peekIntent, takeIntent, renderBrief, renderCard, diag };
+  return { TOOL_NAME, ensure, peekIntent, takeIntent, pending, renderBrief, renderCard, diag };
 }

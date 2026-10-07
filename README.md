@@ -35,6 +35,8 @@ DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`（面板名�
 | **强制线恒低于引擎 5pp** | 生效值 = `min(配置, 引擎阈值 − 5pp)`（内置 80% ⇒ **75%**） | 两线相等时谁先命中取决于各自测量时机，插件可能「什么都没做、占用却降了」⇒ HUD 记录失真 |
 | **全程留痕** | 报告记录 `rangeProbe`（保留预算/起止/影子 token）/ `rangeSource` / `compactTool` / `preStepErrors` / `lastPreStepError` … | 链路任一环**静默失败**都能定位——已靠它当场抓出「工具从未注册成功」「面板整卡崩掉」等真 bug |
 
+| **退役零残留**（R7） | marker 触发通道 + M5.5「挂起-自动恢复」通道**整体清零**（host/client/schema/wire/tests 五层成对删除）；6 个「静默降级」真缺陷修复；无界状态有界化；`CardBoundary` 改为**真正的 React 错误边界** | 那条通道在 R6 之后已**永远不会命中**（三处教学都改工具版），却仍在四层之间成对存在；而四个真缺陷的共同形态是「**看起来成功了，其实什么都没发生**」（工具回成功但意图丢了 / 冷却扣了但没压 / 字段算了但没人读 / 教学 catch 了但没日志）。审查报告：[`docs/r7-review-and-hardening.md`](docs/r7-review-and-hardening.md) |
+
 **要解决的问题**：长会话上下文压力不可见；原生自动压缩（80%）只看占用、不看任务——
 重任务需要全上下文，轻任务其实可以先压缩腾空间。**这个判断只有模型能做**，插件的职责是
 把读数、选项、执行三件事做好。
@@ -236,7 +238,7 @@ Agent 自改档不应改掉新会话的默认档。
   tool-call/result 配对）时逐节点回退重试，仍失败或压完还在强制线之上则**沿用官方 overflow 兜底**。
   新模块 `plugin/compact-range.mjs`（纯函数叶子）；取舍与源码依据见
   [`docs/r5-retention-range-design.md`](docs/r5-retention-range-design.md)
-- **配置面**：7 个字段，面板按秒/比率显示（总开关为开关滑块）；成本阈值计算器（8 个模型预设，一键算推荐值并写入）
+- **配置面**：6 个字段，面板按秒/比率显示（总开关为开关滑块）；成本阈值计算器（8 个模型预设，一键算推荐值并写入）
 - **只读审查落地**：外部审查 23 条，批次 1/2/3 全部实施（含心跳泄漏、`ctx.effect` 语义误用等真 bug）
 
 **未实施（明确挂起）**：D1 模块切分**剩余部分**（`effort.mjs`/`compact-tool.mjs`/`compact-range.mjs`
@@ -267,11 +269,11 @@ npm run test:report   # 只跑报告形状
 
 | 套件 | 断言数 | 查什么 | 能抓到什么 |
 | --- | --- | --- | --- |
-| `contract.mjs` | 284 | face 方法表 ↔ client 描述符 ↔ TYPERT 三端对账；Config 字段在 FIELDS/schema/M3_DEFAULTS 三处齐全；退役字段未复活；`mergeConfig` 读取集 ⊆ schema；**getHud 作用域契约**（防 ReferenceError 回归）；**弹窗/阈值行排版契约**；**智能思考 UI 契约**（开关尺寸/右对齐/字段三端/chip 两态色 token）；**压缩工具化契约**（工具注册/意图 TTL/消费顺序/伪造恢复零残留）；**阈值余量契约**（引擎阈值 −5pp 三处同源 / 面板自取上限 / 输入即时钳制 / 已存超限自动钳回保存 / 教学传生效值）；**组件作用域对账**（防跨组件引用面板 state ⇒ 整卡崩掉，`node --check` 的盲区）；**R5 保留范围契约**（`RETAIN_RATIO` 与引擎 `DEFAULT_RETAIN_RATIO` 同源 / 起点跳过 `system/message` / 走 `session.eventAt` 而非猜 / **真跑纯函数**验证预算-范围-影子量-一致性拒绝-回退上限 / 引擎错误文案逐字对账 + 边界错误分类 / 官方兜底与强制线收口接线 / 留痕）；**R6 教学契约**（**实例化两个模块真跑 `renderBrief`/`renderCard`**：先说再调用的「显著标注」与「具体做法」**分两半钉死** / 两个工具 description 也要求 / 参数说明也要求 / 「自己算范围」按活值渲染 / **拿不到活值时不编数字** / host 活值接线）；**智能思考 8 条实证结论**（prepend 最外层 / pending 持久 / 冷却基准 / 计数语义 / 两侧校验 / agent.ctx / sid 现读 / 删 maxTokens） | **调用静默失败**（P29：三端漂移不报错、只是拿不到数据）；已实测抓过 7 个真 bug |
+| `contract.mjs` | 298 | face 方法表 ↔ client 描述符 ↔ TYPERT 三端对账；Config 字段在 FIELDS/schema/M3_DEFAULTS 三处齐全**且默认值值级一致**；退役字段未复活；`mergeConfig` 读取集 ↔ schema；**getHud 作用域契约**（防 ReferenceError 回归）；**弹窗/阈值行排版契约**；**智能思考 UI 契约**（开关尺寸/右对齐/字段三端/chip 两态色 token）；**压缩工具化契约**（工具注册/意图 TTL/消费顺序/伪造恢复零残留）；**阈值余量契约**（引擎阈值 −5pp 三处同源 / 面板自取上限 / 输入即时钳制 / 已存超限自动钳回保存 / 教学传生效值）；**组件作用域对账**（防跨组件引用面板 state ⇒ 整卡崩掉，`node --check` 的盲区）；**R5 保留范围契约**（`RETAIN_RATIO` 与引擎 `DEFAULT_RETAIN_RATIO` 同源 / 起点跳过 `system/message` / 走 `session.eventAt` 而非猜 / **真跑纯函数**验证预算-范围-影子量-一致性拒绝-回退上限 / 引擎错误文案逐字对账 + 边界错误分类 / 官方兜底与强制线收口接线 / 留痕）；**R6 教学契约**（**实例化两个模块真跑 `renderBrief`/`renderCard`**：先说再调用的「显著标注」与「具体做法」**分两半钉死** / 两个工具 description 也要求 / 参数说明也要求 / 「自己算范围」按活值渲染 / **拿不到活值时不编数字** / host 活值接线）；**R7 加固契约**（退役零残留 4 类 × 4 文件剥注释判定 / 保留项 `markerMinRatio` 未被误删 / 随会话增长的 Set 已**有界化** / 意图表**真跑 `runTool`**：登记→`pending()`→跨 sid 隔离→消费 / 全表 TTL 清扫 / 空可选集**不否决档位** / **顺序契约**（F1 冷却在成功分支 / F5 消费在服务确认之后 / F2 可抛语句前移）/ **真错误边界** / occupancy 搬运 / alive 守卫**计数**）；**智能思考 8 条实证结论**（prepend 最外层 / pending 持久 / 冷却基准 / 计数语义 / 两侧校验 / agent.ctx / sid 现读 / 删 maxTokens） | **调用静默失败**（P29：三端漂移不报错、只是拿不到数据）；已实测抓过 7 个真 bug |
 | `static.mjs` | 42 | 真实 `node --check`（含 `docs/reference/tools/*.cjs`）；client 自足（无外部 import，require 仅 react）；entry 薄壳（<40 行、有静态 Config、动态 import 带 `?ts=`）；模块依赖方向无环；热换纪律；**功能域叶子模块清单**（effort / compact-tool / compact-range）；调试残留扫描（tools 下的 `console.log` 属 CLI 正常输出，豁免） | 语法错误、破坏热换、client 引入依赖、循环依赖、`TODO`/`XXX`/`console.log` 残留 |
-| `report.mjs` | 57 | 产出侧字段契约；`bfOnce` 回填链依赖；C3② 关键事件必须走 full 档；**getHud 作用域与 criticalCap 实参契约**；**调查结论留档**（探针退役后结论不得丢）；真实报告结构自洽；`hud-acts.json` 去重；dump 工具可跑 | 报告形状无声破坏（本项目踩过 2 次：顶层读 m3/m5、脚本读已删字段） |
+| `report.mjs` | 56 | 产出侧字段契约；`bfOnce` 回填链依赖；C3② 关键事件必须走 full 档；**getHud 作用域与 criticalCap 实参契约**；**调查结论留档**（探针退役后结论不得丢）；真实报告结构自洽；`hud-acts.json` 去重；dump 工具可跑 | 报告形状无声破坏（本项目踩过 2 次：顶层读 m3/m5、脚本读已删字段） |
 
-合计 **383 条断言**。
+合计 **396 条断言**。
 
 **已验证有效**：注入 3 个人为 bug（`m3-act` 误入精简档 / client face 改名 / host 引用 client.js），
 三套件全部抓到且定位精准。**新增断言均实测验证过「对回归确实失败」**（两边都通过的测试等于没测）：
@@ -328,7 +330,7 @@ node docs/reference/tools/session-records.cjs --find <会话 id 片段> --from 1
 
 ### 变更记录（2026-10-07）
 
-配置面从 10 个字段精简到 7 个、术语改名、时长字段改秒显示、决策卡门槛并入智能压缩线。
+配置面从 10 个字段精简到 6 个、术语改名、时长字段改秒显示、决策卡门槛并入智能压缩线。
 **决策卡门槛合并的动因**（用户发现的设计缺陷）：原 `policyCardMinRatio`（教学）与
 `markerMinRatio`（执行）是两个独立参数，`[0.30, 0.35)` 区间模型收不到卡 ⇒ 不知道标记存在
 ⇒ 永远不写 ⇒ **死区**。现统一为「能收到卡 = 标记有效」，无论怎么填都不会出现死区或错配。
@@ -343,12 +345,14 @@ node docs/reference/tools/session-records.cjs --find <会话 id 片段> --from 1
 | 总开关 | `enabled` | true | 关闭后完全恢复原生 DSH（面板为开关滑块） |
 | **智能思考** | `effortEnabled` | false | 开=暴露思考档位 + 注册 `set_reasoning_effort` 工具；关=提示词不注入、工具也不注册 |
 | **换档冷却(秒)** | `effortCooldownMs` | 30 | 两次换档的最小间隔（存储为 ms）。**换档会使前缀缓存失效 ⇒ 计费敏感**，故可配（R3-S7） |
-| **智能压缩线** | `markerMinRatio` | 0.2 | 占用达此值时模型可自行决定压缩并自动续跑 |
+| **智能压缩线** | `markerMinRatio` | 0.2 | 占用达此值时注入决策卡，模型可自行决定压缩（**决策卡门槛**，与已退役的文本标记无关） |
 | **强制压缩线** | `criticalRatio` | 0.85 | 占用达此值无条件强制压缩；**生效值 = min(配置, 引擎阈值 − 5pp)**（内置 80% ⇒ 75%） |
-| 压缩标记 | `marker` | `[cp:compact]` | 模型回复尾行标记；置空则关闭智能压缩 |
-| 标记有效期(秒) | `armedTtlMs` | 120 | 标记后多久内有效（存储为 ms） |
 | 强制压缩冷却(秒) | `sweepMinIntervalMs` | 600 | 两次强制压缩的最小间隔（存储为 ms） |
 | （无面板字段） | — | — | **保留预算** = 窗口 × `RETAIN_RATIO`（0.16，模块常量）= 1M 窗口 ⇒ **160k token**。取代引擎 `context-overflow` 的 `retainTokens = 0`（R5）；见 [`docs/r5-retention-range-design.md`](docs/r5-retention-range-design.md) |
+
+> **R7 删除的两个字段**：`marker`（压缩标记）与 `armedTtlMs`（标记有效期）——随 marker 通道整体退役。
+> 压缩改由工具 `compact_context` 在轮内触发，回复尾行文本标记既无教学也无执行路径。
+> 旧配置里的残留键会被**静默忽略**（不报错、不迁移）。
 
 **智能思考换档工具**：`set_reasoning_effort`（参数 `effort=<档位>`）——工具名固定，
 档位取值由当前模型动态决定（插件注入时会告知可选档）。**不设独立配置键**（无需用户填）。
@@ -391,6 +395,7 @@ node docs/reference/tools/session-records.cjs --find <会话 id 片段> --from 1
 | [`docs/r2-tool-switch-design.md`](docs/r2-tool-switch-design.md) | **换档改工具方案**：文本标记的两个致命缺陷 / `agent/request` + prepend 应用链 / 压缩能否也做成工具的分析 |
 | [`docs/r3-effort-review.md`](docs/r3-effort-review.md) | **R3 审查与解耦方案**：S1–S10 十项缺陷 / 抽 `effort.mjs` / 8 步实施顺序 / 10 条必须保留的实证结论 |
 | [`docs/r4-compaction-tool-design.md`](docs/r4-compaction-tool-design.md) | **R4 压缩改工具触发**：inbox 队列/steer/system-message 三条路为何都不行 / `compactIfNeeded` 两个 trigger 的保留语义 / 落袋方案 A 的偏差 / 三处教学同步 / **§7.1 真机 E2E 逐帧时序与实测数字** |
+| [`docs/r7-review-and-hardening.md`](docs/r7-review-and-hardening.md) | **R7 全面审查与加固**：三路并行只读审计的完整发现（真缺陷 / 退役遗留 / 死代码 / 无界状态 / 重复漂移 / 耦合 / 正确性）/ 本批修复与证据 / **未实施项与建议顺序**（先抽阈值核心 → 再拆 M3 → 最后 M1/M5）/ 两次变异逃逸的教训 |
 | [`docs/r5-retention-range-design.md`](docs/r5-retention-range-design.md) | **R5 保留范围自选**：`retainTokens = 0` 的实测代价（1117→4 节点）/ 为何不复刻引擎配对算法 / 边界被拒为何可零成本重试 / 自选范围 + 官方兜底 + 强制线收口 / 验证矩阵 |
 | [`docs/compaction-failure-diagnosis.md`](docs/compaction-failure-diagnosis.md) | **压缩全线失效定位**：workbuddy provider 对摘要请求 400 的完整证据链与两条修复选项 |
 | [`docs/reference/README.md`](docs/reference/README.md) | 第三方（DSH 官方）抽取材料的来源与许可 + **三个统一取证工具**（`asar-query.cjs` / `dump-report.cjs` / `session-records.cjs`） |

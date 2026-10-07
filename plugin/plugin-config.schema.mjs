@@ -84,16 +84,16 @@ function buildWith(z) {
        * 缓存敏感参数）⇒ 这是**会实际影响计费**的参数，故开放配置；默认 30s。 */
       effortCooldownMs: z.number().default(30000).description('换档冷却（毫秒）：两次换档的最小间隔，防频繁换档反复打断前缀缓存').volatile(),
       criticalRatio: z.number().default(0.85).description('强制压缩线：占用达此值无条件强制压缩').volatile(),
-      marker: z.string().default('[cp:compact]').description('压缩标记：模型回复尾行标记（置空则关闭智能压缩）').volatile(),
-      markerMinRatio: z.number().default(0.2).description('智能压缩线：占用达此值时，模型可自行决定压缩并自动续跑').volatile(),
-      armedTtlMs: z.number().default(120000).description('标记有效期（毫秒）：标记后多久内有效').volatile(),
+      markerMinRatio: z.number().default(0.2).description('智能压缩线：占用达此值时注入决策卡，模型可自行决定压缩').volatile(),
+      /* R7（2026-10-08）：`marker`（压缩标记）与 `armedTtlMs`（标记有效期）已随 marker 通道退役删除；
+       * 压缩改由工具 `compact_context` 在下一步 pre-step 执行。`markerMinRatio` 保留（决策卡门槛）。 */
       // policyCardMinRatio / highRatio / lightTaskChars 已于 2026-10-07 退役（用户决定）：
       // 决策卡门槛 = markerMinRatio；highRatio/lightTaskChars 曾是「高风险+轻任务建议压缩」的审计参数，
       // 决策主体移交模型后已无触发作用，删除以免误导。
       sweepMinIntervalMs: z.number().default(600000).description('强制压缩冷却（毫秒）：两次强制压缩的最小间隔').volatile(),
       hudLastAct: z.string().default('').description('M5 状态：最近一次压缩摘要（host 自动写入，无需手改）').volatile(),
-      hudArmed: z.string().default('').description('M5 状态：标记武装中时为 "armed"（host 自动写入）').volatile(),
-      hudPending: z.string().default('').description('M5.5 状态：挂起待恢复的任务（JSON，host 自动写入）').volatile(),
+      /* R7：`hudArmed`（武装灯）/ `hudPending`（待执行徽章）已删除——两个徽章退役后这两条链
+       * 「host 写而无人读」。旧配置里的残留键会被**静默忽略**（schemastery 未知键不报错）。 */
     });
   } catch {
     return undefined;

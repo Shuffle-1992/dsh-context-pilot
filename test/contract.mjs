@@ -694,7 +694,7 @@ ok('生效上限抽成单一来源 criticalCapOf（= 引擎阈值 − 余量，�
   '未抽单一上限函数 ⇒ 三处门控各写一遍必然漂移');
 for (const [label, re] of [
   ['pre-step 门控', /const effCritical = Math\.min\(M3\.criticalRatio, criticalCapOf\(agent\)\);/],
-  ['idle safety-net 门控', /if \(d\.ratio < Math\.min\(M3\.criticalRatio, criticalCapOf\(agent\)\)\) return;/],
+  ['idle safety-net 门控', /if \(mr\.ratio < Math\.min\(M3\.criticalRatio, criticalCapOf\(agent\)\)\) return;/],
   ['getHud 下发', /criticalCap: criticalCapOf\(targetAgent\),/],
 ]) {
   ok(`强制线三处同源：${label}`, re.test(host), '该处未用 criticalCapOf ⇒ 与其余两处不一致');
@@ -768,6 +768,25 @@ ok('自动钳制只做一次且有回读校验（失败可重试）',
 ok('自动钳制仅在可写 + 上限已知 + 就绪时执行',
   /if \(!ready \|\| !writable \|\| engineCap === null\) return;/.test(client),
   '未就绪/只读时也写配置 ⇒ 越权或写坏值');
+/* ═══ R7 审查（D5/E1/E6）：客户端三处结构性缺陷的护栏 ═══ */
+ok('CardBoundary 是**真正的** React 错误边界（不是只 try/catch 渲染期）',
+  /class CardBoundary extends react\.Component/.test(client)
+  && /static getDerivedStateFromError\(\)/.test(client)
+  && /componentDidCatch\(error\)/.test(client)
+  && !/function CardBoundary\(props\)/.test(client),
+  '仅 try/catch ⇒ effect / 事件回调 / 异步 setState 的异常仍会把整个插件详情页打崩（已出过一次真事故）');
+ok('弹窗「距智能压缩线」的数据源真的搬进来了（E1 修）',
+  /occupancyRatio: typeof r\.occupancyRatio === "number"/.test(client)
+  && /occupancyWindow: typeof r\.occupancyWindow === "number"/.test(client)
+  && /const occ = num\(v\.occupancyRatio, null\)/.test(client),
+  'host 算了 / wire 声明了 / client 不搬 ⇒ 该 UI 分支永不显示（三端漂移）');
+/* ⚠️ 必须**计数**：块内有**两处** `if (!alive) return;`（写入后、错误分支），
+ * 只断言「存在一处」时删掉任一处仍会通过（变异验证实测逃逸一次）。 */
+const autoClampBlock = /const autoClamped = react\.useRef\(false\);[\s\S]*?\}, \[ready, writable, engineCap, stored\.criticalRatio\]\);/.exec(client)?.[0] ?? '';
+ok('autoClamped 异步分支有 alive 守卫（写入后 + 错误分支两处）',
+  (autoClampBlock.match(/if \(!alive\) return;/g) ?? []).length === 2
+  && /await writeField\([\s\S]{0,200}if \(!alive\) return;/.test(autoClampBlock),
+  '守卫缺失/只补一处 ⇒ 组件已卸载仍继续写配置或 setState（越权副作用）');
 /* ═══ 教学必须教**生效值**（2026-10-08 实测：卡片写「占用达 80%」而实际 75%） ═══ */
 ok('决策卡/一次性说明拿到的是**生效**强制线（不是配置值）',
   /const effCrit = Math\.min\(M3\.criticalRatio, criticalCapOf\(agent\)\);/.test(host)
@@ -820,9 +839,13 @@ ok('effortEnabled 默认关闭（新功能默认不介入）', /effortEnabled:\s
 ok('FIELDS 含 effortCooldownMs（冷却可配，S7）', fieldsKeys.includes('effortCooldownMs'), '面板缺该字段 ⇒ 用户改不到冷却');
 ok('schema 含 effortCooldownMs', schemaKeys.includes('effortCooldownMs'), 'schema 缺该字段 ⇒ 面板保存被拒');
 ok('M3_DEFAULTS 含 effortCooldownMs', hostDefaults.includes('effortCooldownMs'), 'host 缺该字段 ⇒ 读不到');
-ok('mergeConfig 读取后按数值校验（防 NaN 污染）',
-  /for \(const k of \['armedTtlMs', 'sweepMinIntervalMs', 'effortCooldownMs'\]\)/.test(host),
-  'effortCooldownMs 未走数值校验 ⇒ 非法值会被写进 M3');
+/* R7：`armedTtlMs` 随 marker 通道退役移出读取集。断言改为**钉住完整集合**——
+ * 只钉某一项存在的话，新增/删除字段都不会被发现（原版正是这个弱写法）。 */
+ok('mergeConfig 读取集与 M3_DEFAULTS 完全同源（防「面板改了不生效」与漂移）',
+  /for \(const k of \['enabled', 'effortEnabled', 'criticalRatio', 'markerMinRatio', 'sweepMinIntervalMs', 'effortCooldownMs'\]\) \{/.test(host)
+  && /for \(const k of \['sweepMinIntervalMs', 'effortCooldownMs'\]\)/.test(host)
+  && !/armedTtlMs/.test(hostNoComment),
+  '读取集缺项 ⇒ 面板改值不生效；多出已退役项 ⇒ 死配置；应改为集合级对账');
 ok('effort 模块从 config 现读冷却（面板改值即生效）',
   /readCfg: \(\) => \(\{ enabled: M3\.effortEnabled === true, cooldownMs: M3\.effortCooldownMs \}\)/.test(host) &&
   /const cooldownMs = \(\) => \{/.test(effort),
@@ -1128,6 +1151,147 @@ ok('解析出 mergeConfig 键列表', mergeKeys.length > 0, '未匹配到 `for (
 for (const k of mergeKeys) {
   ok(`mergeConfig 读取 ${k} 时有 schema 定义`, schemaKeys.includes(k), `schema 缺 ${k}`);
 }
+
+/* ═══════════ 6b. 默认值**值级**对账 ═══════════ */
+console.log('\n== 6b. 三处默认值值级对账（原对账只比键名）==');
+/* D2（审查）实证缺口：报告 §5 只比**键名集合**，于是「面板显示 / 表单校验 / 运行时兜底」
+ * 三处默认值各不相同也测不出来（本项目已因「默认值与已存值不同」返工过）。
+ * 这里对每个面板字段做**值级**比对；布尔按字符串比，数值按数字比（含下划线分隔）。 */
+const normDefault = (s) => {
+  const t = String(s).trim().replace(/^['"]|['"]$/g, '').replace(/[_\s]/g, '');
+  if (t === 'true' || t === 'false') return t;
+  const n = Number(t);
+  return Number.isFinite(n) ? n : t;
+};
+const fieldsDefs = new Map();
+for (const line of (/const FIELDS = \[([\s\S]*?)\n\t\t\];/.exec(client)?.[1] ?? '').split('\n')) {
+  if (!/key:\s*"/.test(line)) continue;
+  const k = /key:\s*"([^"]+)"/.exec(line)?.[1];
+  const d = /\bdef:\s*([^,}]+)/.exec(line)?.[1];
+  if (k && d !== undefined) fieldsDefs.set(k, normDefault(d));
+}
+const schemaDefaults = new Map();
+for (const m of schema.matchAll(/^\s{6}(\w+):\s*z\.\w+\(\)\.default\(([^)]+)\)/gm)) schemaDefaults.set(m[1], normDefault(m[2]));
+const hostDefValues = new Map();
+for (const m of (/const M3_DEFAULTS = \{([\s\S]*?)\n\};/.exec(host)?.[1] ?? '').matchAll(/^\s{2}(\w+):\s*([^,\n]+)/gm)) {
+  hostDefValues.set(m[1], normDefault(m[2].split('//')[0]));
+}
+ok('解析出面板字段默认值（值级对账的前提）', fieldsDefs.size >= 6, `只解析到 ${fieldsDefs.size} 项 ⇒ 对账失效`);
+const drift = [];
+for (const [k, v] of fieldsDefs) {
+  const s = schemaDefaults.get(k);
+  const h = hostDefValues.get(k);
+  if (s === undefined) drift.push(`${k}: schema 无 default`);
+  else if (s !== v) drift.push(`${k}: FIELDS ${v} ≠ schema ${s}`);
+  if (h !== undefined && h !== v) drift.push(`${k}: FIELDS ${v} ≠ host ${h}`);
+}
+ok('面板 / schema / host 三处**默认值**一致',
+  drift.length === 0,
+  `默认值漂移 ⇒ 面板显示、表单校验、运行时兜底各说一套：${drift.join('；')}`);
+
+/* ═══════════ 6c. R7 退役零残留（防复活） ═══════════ */
+console.log('\n== 6c. R7 退役通道零残留（marker / M5.5 / 死代码）==');
+/* 退役的东西**留在代码里比删掉更危险**（一行就能重新接上）。这里同时钉两类：
+ *  ① 退役通道标识符（marker / M5.5 恢复 / 被删的死代码）
+ *  ② 它们的**配置文件字段**（面板/schema）
+ * 全部在**剥注释后**的源码上判定——文件头会把旧机制当反例写出来，不剥会误判（踩过两次）。 */
+const schemaNoComment = schema.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+const wireNoComment = wire.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+const RETIRED = [
+  ['marker 触发通道', /markerArmed|M3\.marker\b|state\.m3\.markerHits|\bhudArmed\b|\bhudPending\b/],
+  ['M5.5 恢复通道', /state\.m55|m55Attempt|pendingBySid|lastUserTextBySid|resumeViaAnyChannel|maybeResumeAfterMarker/],
+  ['被删死代码', /probeService|decideCompaction|state\.m3\.probe\b/],
+  /* ⚠️ `d.ratio`/`d.ok` 是**局部变量**名，只在 host 的两个压缩路径里成立；
+   * client 的 `d.ok` 是 HUD debug 对象字段（同名的无关东西）⇒ 必须限定文件，否则误伤。 */
+  ['随退役一起死的旧局部引用', /state\.m3\.wouldCompact|state\.m3\.lastDecision/, ['host', 'client']],
+  ['被删局部变量（仅 host 两个压缩路径）', /\bd\.ratio\b|\bd\.ok\b/, ['host']],
+];
+for (const [label, re, only] of RETIRED) {
+  const hit = [['host', hostNoComment], ['client', clientNoComment], ['schema', schemaNoComment], ['wire', wireNoComment]]
+    .filter(([n]) => !only || only.includes(n))
+    .filter(([, src]) => re.test(src)).map(([n]) => n);
+  ok(`R7 退役零残留：${label}`, hit.length === 0, `仍在 ${hit.join(' / ')} 的**代码**里（注释不算）`);
+}
+ok('退役的配置字段未复活（marker / armedTtlMs / hudArmed / hudPending）',
+  !fieldsKeys.includes('marker') && !fieldsKeys.includes('armedTtlMs')
+  && !schemaKeys.includes('marker') && !schemaKeys.includes('armedTtlMs')
+  && !hostDefaults.includes('marker') && !hostDefaults.includes('armedTtlMs')
+  && !/\bhudArmed\b|\bhudPending\b/.test(schemaNoComment),
+  '退役字段仍在面板/schema/M3 —— 「能改能存但无效果」的假开关');
+ok('保留项未被误删：markerMinRatio（决策卡门槛）仍在三处且有消费者',
+  fieldsKeys.includes('markerMinRatio') && schemaKeys.includes('markerMinRatio') && hostDefaults.includes('markerMinRatio')
+  && /minRatio: M3\.markerMinRatio/.test(host),
+  'markerMinRatio 是决策卡注入门槛，与已退役的 marker 无关，不得一起删');
+/* C 类审查：无界 Set → 有界化（键是 session id，随会话数无界增长）。 */
+ok('随会话增长的 Set 已做有界化（不再无上限）',
+  /const remember = \(set, key\) => \{/.test(host) && /const SET_CAP = \d+;/.test(host)
+  && /remember\(briefedBySid, sid\)/.test(host) && /remember\(effBriefedBySid, sid\)/.test(host)
+  && /remember\(measuredFailedOnce, key\)/.test(host)
+  && !/(briefedBySid|effBriefedBySid|measuredFailedOnce)\.add\(/.test(host),
+  '仍有裸 .add() ⇒ 该集合无上限（长时间运行后随会话数增长）');
+
+/* ═══════════ 6d. 意图表行为（compact-tool 真跑） ═══════════ */
+console.log('\n== 6d. 压缩意图表：TTL 清扫与跨会话诊断（真跑模块）==');
+/* C1/C2（审查）实证缺陷：意图表原来**只在查询当前 sid 时**顺带删自己那一项 ⇒
+ * 别的会话的过期意图永不清理（TTL 形同虚设、Map 无界增长）。R7 加了全表清扫 + `pending()` 诊断出口。 */
+const mkAgent = (sid) => ({ id: sid, sessionId: sid, session: { id: sid } });
+/* 真 tryOf + 捕获注册的 tool spec（`runTool` 是工具内部实现，只能经 `execute` 触达）。 */
+let ctSpec = null;
+const ctMod2 = await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href);
+const ctFix = ctMod2.createCompactTool({
+  svc: (k) => (k === 'tools' ? { register: (t) => { ctSpec = t; } } : null),
+  tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e?.message ?? e) }; } },
+  pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+  state: { m3: { compactToolDiag: {} } }, readCfg: () => ({ enabled: true }),
+  getDefineTool: () => (spec) => spec,
+});
+const ctRun = async (sid, reason) => (await ctFix.ensure(), ctSpec.execute({ reason }, { agent: mkAgent(sid) }));
+const rA = await ctRun('sid-A', 'A 会话请求');
+ok('工具登记成功（行为）', rA && rA.ok === true && rA.scheduled === 'next-step', `实际 ${JSON.stringify(rA)}`);
+ok('未消费的意图能被 pending() 列出（跨会话诊断出口存在）',
+  Array.isArray(ctFix.pending()) && ctFix.pending().length === 1 && ctFix.pending()[0].sid === 'sid-A',
+  'pending() 缺失/为空 ⇒ 「sid 轮转导致压缩静默不发生」将无从诊断');
+ok('别的 sid 查询不会误消费（多会话并存下的隔离）',
+  ctFix.peekIntent('sid-B') === null && ctFix.peekIntent('sid-A') !== null,
+  '按错键查询会命中/丢失意图 ⇒ 会在错误的会话上执行压缩');
+ok('消费后即不可再见（takeIntent 语义）',
+  ctFix.takeIntent('sid-A') !== null && ctFix.peekIntent('sid-A') === null && ctFix.pending().length === 0,
+  '消费语义错 ⇒ 同一意图会被反复执行');
+ok('意图表有全表 TTL 清扫（不再是「只查自己才清」）',
+  /function sweepExpired\(/.test(ctNoComment) && /sweepExpired\(\);\n\s+const it = bySid\.get\(key\);/.test(ct),
+  '缺全表清扫 ⇒ 别的会话的过期意图永久驻留（无界增长）');
+
+/* ═══════════ 6e. 档位校验判据一致（D1 真缺陷） ═══════════ */
+console.log('\n== 6e. 空可选集不得一刀否决（D1 真缺陷）==');
+/* 实证缺陷：`efforts` 缺失时上游归一成 `[]`，而 `checkEffort` 原先用 `Array.isArray` 判定
+ * ⇒ 空数组为真 ⇒ 所有档位都被否决，错误文案退化成「可选 」。 */
+ok('checkEffort 把**空数组**当「取不到」而非「可选集为空」（不否决）',
+  /const options = Array\.isArray\(eff\?\.efforts\) && eff\.efforts\.length > 0 \? eff\.efforts : null;/.test(effort),
+  '空数组被当成有效可选集 ⇒ 一刀否决全部档位（真缺陷，已修）');
+ok('checkEffort 与 renderBrief 用同一判据（length 而非 isArray）',
+  /Array\.isArray\(eff\.efforts\) && eff\.efforts\.length \? eff\.efforts\.join\('\/'\) : null/.test(effort),
+  '两处判据不一致 ⇒ 教学说有可选档、校验却全否决');
+
+/* ═══════════ 6f. 压缩两条路径的**顺序**契约（F1/F5 真缺陷） ═══════════ */
+console.log('\n== 6f. pre-step / idle 顺序契约 ==');
+const idleBody = /const idleSweep = \(agent\) => \{([\s\S]*?)\n  \};/.exec(host)?.[1] ?? '';
+ok('解析出 idleSweep', idleBody.length > 0, '未找到 idleSweep ⇒ 顺序契约失效');
+/* F5：意图只能在**确认能执行**之后消费。原实现先 takeIntent 再 resolveCompactionFor，
+ * 服务解析不到就直接 return ⇒ 意图已丢、工具却回了 scheduled ⇒ 模型以为压过了、实际没压且不重试。 */
+ok('F5 意图在「确认能执行」之后才消费（不是先消费再判断）',
+  ctPreStep.indexOf('const compaction = resolveCompactionFor(agent);') < ctPreStep.indexOf('takeIntent(sid)')
+  && ctPreStep.indexOf('takeIntent(sid)') > -1,
+  '先 takeIntent 再解析服务 ⇒ 服务不可用时意图静默丢失且无重试');
+/* F1：冷却只在**成功分支**记。原实现在发车前就写 `sweeps[sid]`，一次失败即消耗 10 分钟安全网。 */
+ok('F1 idle 冷却只在成功分支记录（失败不消耗 10 分钟窗口）',
+  idleBody.indexOf('.then((result) => {') < idleBody.indexOf('state.m3.sweeps[sid] = Date.now();')
+  && !/^[\s\S]*?state\.m3\.sweeps\[sid\] = now;/.test(idleBody),
+  '冷却在发车前记录 ⇒ compactNow 失败也会压掉该会话的安全网窗口');
+/* F2：`sweepInFlight.add` 必须紧贴 promise 链（add 与 .finally 之间任何同步抛错 = 永久锁）。 */
+ok('F2 可能在 add 与 .finally 之间抛错的语句已前移',
+  idleBody.indexOf('sweepInFlight.add(sid);') < idleBody.indexOf('.compactNow(')
+  && idleBody.indexOf('log(\'info\', `M3 idle 扫除') < idleBody.indexOf('sweepInFlight.add(sid);'),
+  'add 之后仍有可抛语句 ⇒ 同步异常会让该会话永久失去 idle 安全网（无日志）');
 
 /* ═══════════ 汇总 ═══════════ */
 console.log(`\n${'='.repeat(52)}`);

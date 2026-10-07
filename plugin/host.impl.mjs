@@ -69,13 +69,15 @@ const M3_DEFAULTS = {
    * 这是**会实际影响计费**的参数，故开放配置；默认 30s 是实测「够用且不误挡」的折中。 */
   effortCooldownMs: 30_000,
   criticalRatio: 0.85, // 强制压缩线：pre-step/idle 无条件压（官方 pressure 路径）；GLM 等 1:4 档可降 0.80
-  markerMinRatio: 0.2, // 智能压缩线：模型标记生效门槛，**同时是决策卡注入门槛**（2026-10-07 起二者统一）
-  armedTtlMs: 120_000, // 标记有效期（事件→idle 之间）
-  marker: '[cp:compact]', // M3.6：模型回复尾部标记 → idle 后自动压缩（用户零输入，标记在回复里可见）
+  markerMinRatio: 0.2, // 智能压缩线：**决策卡注入门槛**（2026-10-07 起与「模型可自行决定压缩」统一）
   // policyCardMinRatio / highRatio / lightTaskChars 已于 2026-10-07 退役（用户决定）：
   //   - 决策卡门槛 = markerMinRatio（消除「卡未教/标记不可达」死区）
   //   - highRatio/lightTaskChars 是「高风险+轻任务建议压缩」的旧审计参数，决策主体移交模型后已无触发作用
-  sweepMinIntervalMs: 600_000, // 强制压缩冷却：两次兜底压缩的最小间隔（标记模式不受限）
+  /* R7（2026-10-08）**marker 通道整体退役**：`marker`（回复尾行文本标记）与 `armedTtlMs`（标记有效期）
+   * 随「工具触发压缩」（R4）一并删除——R4 起压缩由模型调用 `compact_context` 触发，
+   * 标记既无教学（三处教学已改工具版）也无执行路径，留着只是永不命中的死通道 + 无界 Map。
+   * ⚠️ `markerMinRatio` **必须保留**：它同时是决策卡注入门槛，与标记无关。 */
+  sweepMinIntervalMs: 600_000, // 强制压缩冷却：两次兜底压缩的最小间隔
 };
 // 注：关键词「先压缩」通道已按用户决定裁撤（2026-10-06）——"要写先压缩不如直接手动执行压缩指令"。
 
@@ -91,6 +93,20 @@ const kfmt = (n) =>
       : String(Math.round(n))
     : '–';
 const nfmt = (n) => (typeof n === 'number' && Number.isFinite(n) ? Math.round(n).toLocaleString('en-US') : '?');
+
+/** 错误码归一（D7 审查）：pre-step 与 idle 两条压缩路径原先各自分类，同一个失败会在
+ *  `preStepErrors` / `actErrors` 里落成不同的键 ⇒ 收敛为一个口径（`code` → `name` → 'error'）。 */
+const errCodeOf = (e) => e?.code ?? e?.name ?? 'error';
+
+/** 有界 Set（C 类审查：`briefedBySid` / `effBriefedBySid` / `measuredFailedOnce` 原先无上限，
+ *  键是 session id ⇒ 随会话数无界增长）。超限丢最旧的键；被淘汰的会话最多多讲一次说明，无害。 */
+const SET_CAP = 200;
+const remember = (set, key) => {
+  try {
+    set.add(key);
+    if (set.size > SET_CAP) set.delete(set.values().next().value);
+  } catch { /* 吞：有界化不影响主流程 */ }
+};
 
 /** measure() 快照 → 紧凑读数（官方承诺 detached / deeply immutable，可安全序列化）。 */
 function compactMeasure(m) {
@@ -267,7 +283,6 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
 
   const disposers = [];
   const pending = new Map(); // reason -> timer（防抖合并）
-  const markerArmed = new Map(); // sid -> {at}：模型回复尾部标记武装，idle 扫除消费（M3.6）
   /** M3.6 取证：session/event 全量形状探针（类型计数 + 前 N 条样本），落报告定位解析断点。 */
   const eventProbe = { counts: {}, samples: [], cap: 12 };
 
@@ -283,16 +298,20 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       const live = (v) => (v !== null && typeof v === 'object' && typeof v.get === 'function' ? v.get() : v);
       if (!config || typeof config !== 'object') return;
       const raw = {};
-      for (const k of ['enabled', 'effortEnabled', 'criticalRatio', 'marker', 'markerMinRatio', 'armedTtlMs', 'sweepMinIntervalMs', 'effortCooldownMs']) {
+      /* R7：`marker` / `armedTtlMs` 已随 marker 通道退役移出读取集——
+       * 读取集必须与 M3_DEFAULTS 保持同一集合，否则「面板改了不生效」会重演。 */
+      for (const k of ['enabled', 'effortEnabled', 'criticalRatio', 'markerMinRatio', 'sweepMinIntervalMs', 'effortCooldownMs']) {
         raw[k] = live(config[k]);
       }
       if (typeof raw.enabled === 'boolean') M3.enabled = raw.enabled;
       if (typeof raw.effortEnabled === 'boolean') M3.effortEnabled = raw.effortEnabled;
-      if (typeof raw.marker === 'string') M3.marker = raw.marker;
+      /* F10（审查）：比率必须 **> 0**（原先是 `>= 0`）。填 0 不是「关闭」而是**瘫痪**：
+       * `criticalRatio: 0` ⇒ 每个 pre-step 都判「越强制线」；`markerMinRatio: 0` ⇒ 决策卡恒注入。
+       * schema 无 `.min()`、面板只拦空串 ⇒ 这里必须挡住（非法值保持上一次的有效值）。 */
       for (const k of ['criticalRatio', 'markerMinRatio']) {
-        if (typeof raw[k] === 'number' && Number.isFinite(raw[k]) && raw[k] >= 0 && raw[k] <= 1) M3[k] = raw[k];
+        if (typeof raw[k] === 'number' && Number.isFinite(raw[k]) && raw[k] > 0 && raw[k] <= 1) M3[k] = raw[k];
       }
-      for (const k of ['armedTtlMs', 'sweepMinIntervalMs', 'effortCooldownMs']) {
+      for (const k of ['sweepMinIntervalMs', 'effortCooldownMs']) {
         if (typeof raw[k] === 'number' && Number.isFinite(raw[k]) && raw[k] >= 0) M3[k] = raw[k];
       }
     } catch (e) {
@@ -323,7 +342,13 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
    *  （面板保存能成是因为 client→remote 不经插件 apply scope）⇒ 旧推送通道结构性不可用。
    *  现改为：压缩/武装事件写 state.m5.hud，client 半经 wire.host.mjs 的 getHud() 每 5s 拉取；
    *  跨重启显示由启动回填（读报告最近一次 m3-act）补齐。 */
-  const hudReasonLabel = (reason) => (reason === 'marker' ? '智能压缩' : reason === 'safety-net' ? '兜底' : reason === 'pressure' ? '强制压缩' : String(reason ?? ''));
+  /* R7：`'marker'` 分支随 marker 通道退役删除；并把 `context-overflow`（=**模型主动请求**）单列——
+   * 原先它落进 `String(reason)` 默认分支，弹窗会直接显示内部枚举名。 */
+  const hudReasonLabel = (reason) =>
+    reason === 'context-overflow' ? '智能压缩'
+      : reason === 'safety-net' ? '兜底'
+        : reason === 'pressure' ? '强制压缩'
+          : String(reason ?? '');
   /* B1（审查）：formatAct 统一「hh:mm · 原因 · 省 xK」模板——运行期（at 缺省=现在）与启动回填（at=记录时刻）共用 */
   const formatAct = (reason, tokens, at) => {
     const d = at != null ? new Date(at) : new Date();
@@ -405,13 +430,16 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
    * 教训：用「启发式推断的关联」去补「以为丢了的记录」，会把别的对象的数据当成自己的。
    * 现在 getHud 严格按 sid 精确匹配；匹配不到就如实显示「本会话暂无压缩记录」。 */
 
-  /* ---- M5.5 任务挂起-自动恢复（用户定义的完整闭环）----
-   *  任务进来 → 模型判断需先压缩 → 本轮不执行、回复写「待执行：<任务>」+ 标记 → idle 自动压缩 →
-   *  压缩成功后 sessionController.prompt() 自动投递恢复提示（host 直发用户消息的官方通道，
-   *  "Admit one prompt after explicitly resuming its Session"）→ agent 以压缩后上下文拉起，继续执行原任务。
-   *  防循环：自动恢复最多 2 次，超限留给用户手动。 */
-  const lastUserTextBySid = new Map(); // sid -> 最近一条用户消息文本（marker 挂起任务的兜底来源）
-  const pendingBySid = new Map(); // sid -> { task, at }（marker 挂起任务；R4 起不再用于伪造恢复）
+  /* ---- M5.5「任务挂起-自动恢复」**已整体退役**（R4 删投递链，R7 删剩余残留）----
+   *  旧闭环：任务进来 → 模型判断需先压缩 → 本轮不执行、回复写「待执行：<任务>」+ 标记 →
+   *  idle 自动压缩 → host 用 `sessionController.prompt()` 直发一条**用户消息**拉起会话 →
+   *  agent 以压缩后上下文继续执行原任务。
+   *  ⚠️ 用户否决了其中「伪造一条我的信息重新拉起会话」这一步（R4）；
+   *  而**投递链一断，整个闭环就没有存在意义**——压缩不再需要「拉起」，因为工具调用
+   *  （`compact_context`）本身就保证有下一步、本轮自然继续。
+   *  ⇒ R7 把最后三块残留一并删除：`lastUserTextBySid`（挂起任务的兜底文本来源）、
+   *     `pendingBySid`（挂起任务表，R4 后**读点为零**）、`m55Attempt` / `state.m55`（只为旧
+   *     恢复相位留痕）。保留 `clearBriefed` 与 `briefedBySid`（与压缩重讲逻辑有关，与 M5.5 无关）。 */
   const briefedBySid = new Set(); // M2.5：新会话一次性插件说明（每激活一份，重活后重讲一次无妨）
   /* R1：智能思考教学的一次性标记（与压缩说明分开——两者开关独立，可能只开一个）。
    * ⚠️ 与 briefedBySid 一样，**压缩成功后必须清除**（见 clearBriefed 的注释）。 */
@@ -429,34 +457,11 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       state.m2.briefReissues = (state.m2.briefReissues ?? 0) + 1;
     } catch { /* 吞 */ }
   };
-  /* `resumeCountBySid` / `M5_RESUME_MAX` / `resumeTimers` 已随伪造恢复投递链一并删除（R4）。 */
-  /** M5.5 取证：尝试记录（同时排一份报告）。 */
-  const m55Attempt = (rec) => {
-    try {
-      state.m55.attempts.push({ at: new Date().toISOString(), ...rec });
-      if (state.m55.attempts.length > 20) state.m55.attempts.splice(0, state.m55.attempts.length - 20);
-    } catch { /* 吞 */ }
-    schedule('m5.5-resume', 400);
-  };
-  /** 服务探针：可达性 + 原型方法名（类方法不在自有键上）。全部 tryOf——属性访问本身也可能抛。 */
-  const probeService = (key) => {
-    const r = tryOf(() => svc(key));
-    if (r.error) return { found: false, error: r.error };
-    const v = r.value;
-    if (!v) return { found: false, error: 'absent' };
-    const base = {
-      found: true,
-      type: typeof v,
-      ctor: tryOf(() => (v?.constructor?.name ?? null)).value ?? null,
-      ownKeys: tryOf(() => Object.keys(v).slice(0, 24)).value ?? null,
-      protoKeys: tryOf(() => Object.getOwnPropertyNames(Object.getPrototypeOf(v) ?? Object.prototype).slice(0, 48)).value ?? null,
-      toStringTag: tryOf(() => String(Object.prototype.toString.call(v))).value ?? null,
-    };
-    const hp = tryOf(() => typeof v?.prompt);
-    base.hasPrompt = hp.value === 'function';
-    if (hp.error) base.promptAccessError = hp.error;
-    return base;
-  };
+  /* `resumeCountBySid` / `M5_RESUME_MAX` / `resumeTimers` 已随伪造恢复投递链一并删除（R4）；
+   * `m55Attempt` / `state.m55` 已随 M5.5 收官残留删除（R7，见上方说明）。 */
+  /* R7：`probeService`（服务可达性 + 原型方法名探针）已删除——**全仓库零调用点**。
+   * 它的职责先是服务在位枚举，后被 `snap.services[k] = svc(k) ? typeof svc(k) : 'absent'` 取代，
+   * 之后一直没人调用（连带 `state.m3.probe` 恒为 null，一并删除）。 */
   /* ❌❌ M5.5「压制后伪造恢复」投递链 —— **2026-10-08 R4 整体删除** ❌❌
    *
    * 删除位置：`maybeResumeAfterMarker`（2s 定时调度 + 上限计数 + 待执行徽章）
@@ -472,8 +477,9 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
    * plugin/compact-tool.mjs 文件头（inbox 只有 next-turn/next-step 两个队列且载荷类型是
    * UserMessage；system/developer 消息只写对话不唤醒 agent；steer 仍是用户消息且 idle 后不可用）。
    *
-   * 保留：`state.m55` 取证字段与 `m55Attempt`（marker 重武装路径仍在用），
-   *       `resumeTimers` 的卸载清理（空集合无害）。待 marker 通道一并退役时清除。 */
+   * R7：**marker 通道已一并退役** ⇒ `state.m55` / `m55Attempt` / `markerArmed` / `pendingBySid` /
+   *     `lastUserTextBySid` 全部删除（投递链一断，整个「挂起-恢复」闭环就没有存在意义）。
+   *     `resumeTimers` 的卸载清理（空集合无害）保留。 */
 
   /* ---- M4.5 诊断：宿主内 Config schema 解析状态（与 entry 静态导出同一模块，独立重解析）。 ---- */
   try {
@@ -503,25 +509,20 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       // 智能思考注入取证（教学次数 / 压缩后重讲次数 / 每轮后缀次数）
       effortBriefings: 0, briefReissues: 0, effortSuffixes: 0 },
     m3: {
-      decisions: 0,
-      wouldCompact: 0,
       acts: 0,
       actOk: 0,
-      lastDecision: null,
       lastAct: null,
       actErrors: {},
       /* ⚠️ 2026-10-08：压缩失败的错误**正文**（此前只记错误码，报告无法定位——
        * 实测 actErrors={summary:2} / preStepErrors={INVALID_REQUEST:17} 而两条路径成功均为 0） */
       lastActError: null,
       lastPreStepError: null,
-      probe: null,
       sweeps: {},
       // M3.5 三通道
       preStepActs: 0,
       preStepOk: 0,
       lastPreStep: null,
       preStepErrors: {},
-      markerHits: 0, // B3：keywordHits 恒 0 字段已随审查退役（历史报告条目保持原样，不受影响）
       policyCards: 0,
       engineCapProbe: null, // C-own：引擎阈值探测留痕（via/ratio/fallback），取证「钳制用的是哪个值」
       /* 智能思考（effort）取证 —— R3 收敛（原先 12 个散字段 + 两处 `?? 0` 隐式初始化）。
@@ -549,6 +550,9 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       lastCompactTool: null, // 最近一次工具登记（sid/reason/repeated）
       compactIntents: 0, // pre-step 消费意图次数
       compactIntentExpired: 0, // 意图过期作废次数（登记后未被消费）
+      /* R7/F5 诊断：本 sid 查不到意图、但表里还有**别的 sid** 的未过期意图时落痕
+       * （session id 轮转 ⇒ 意图登记在旧键 ⇒ 工具回了 scheduled 但压缩永不发生）。 */
+      compactIntentMiss: null,
       lastCompactIntent: null, // 最近一次消费详情（trigger/ratio/acted/shadowedTokens/ms + R5 rangeSource）
       /* R5：最近一次**自选范围**读数（预算/起点/终点/保留·影子 token/失败原因）。
        * 范围算错时这是唯一现场：报告里没有它就只剩「压了个奇怪的东西」这一句现象。 */
@@ -557,9 +561,9 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     // M5 HUD 发布取证（entry 查找/edit 结果全程留痕——弹窗侧空态无法区分静默失败）
     // hud.gen = 实例指纹：客户端取到的 gen 应与本实例一致；不一致 = RPC 打到了旧激活的僵尸面
     // acts = 最近压缩记录（按会话可过滤，新→旧，cap 8）：主行显示最新，悬停展开列表
-    m5: { lastPublish: null, hud: { hudLastAct: '', hudArmed: '', hudPending: '', gen: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}` }, hudFace: 'absent', acts: [] },
-    // M5.5 恢复通道取证（每次尝试逐相位落报告，杜绝 log-only 黑洞）
-    m55: { armed: null, attempts: [], channelProbe: null },
+    // R7：`hudArmed` / `hudPending` 已随 marker 通道退役——它们是「武装灯/待执行徽章」的数据源，
+    //     两个徽章删掉后这两条链**写而无人读**（host 6 处写 → client 0 处读）。
+    m5: { lastPublish: null, hud: { hudLastAct: '', gen: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}` }, hudFace: 'absent', acts: [] },
   };
   /* 激活即从 hud-acts.json 恢复压缩历史（跨重启/跨 toggle 存续）；
    * 报告回填降级为迁移/兜底源（bfOnce 内合并去重，不再覆盖式写 acts）。 */
@@ -596,21 +600,32 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
    * 于是 HUD 的压缩记录与原因都会失真（表现为「插件线到了却没记录」）。
    * 5pp 同时吸收两边测量的抖动，并留出足够提前量让插件线**确定性先行**。 */
   const ENGINE_CAP_MARGIN = 0.05;
+  /* 压缩调用的超时（pre-step 兜底信号 / idle compactNow 共用）。D6（审查）：原先两处各自硬编码
+   * `180_000`，改一处必漏另一处 ⇒ 收敛为一个常量。 */
+  const COMPACT_TIMEOUT_MS = 180_000;
   const engineThreshold = (agent) => {
     const r = resolveCompactionFor(agent);
     const t = tryOf(() => r.service?.config?.thresholdRatio);
     const v = t.value;
     const ok = typeof v === 'number' && Number.isFinite(v) && v > 0 && v <= 1;
     const raw = ok ? v : DEFAULT_ENGINE_THRESHOLD;
-    /* 取证同时记**原始引擎阈值**与**减去余量后的生效上限**，否则报告里看不出 5pp 被扣在哪。 */
-    state.m3.engineCapProbe = {
-      at: new Date().toISOString(),
-      via: r.via,
-      ratio: ok ? v : null,
-      fallback: !ok,
-      cap: +Math.max(0, raw - ENGINE_CAP_MARGIN).toFixed(4),
-      margin: ENGINE_CAP_MARGIN,
-    };
+    /* 取证同时记**原始引擎阈值**与**减去余量后的生效上限**，否则报告里看不出 5pp 被扣在哪。
+     * ⚠️ F6（R7 审查修）：这是**读路径**（`getHud` 每 5s 经 `criticalCapOf` 进来一次），
+     *    原先每次都重写 probe ⇒ RPC 面非幂等、报告字段被轮询不断刷成同一份新时间戳。
+     *    现在只在「还没有探针」或「探到的值变了」时写，读操作不再产生写。 */
+    const prev = state.m3.engineCapProbe;
+    const changed = !prev || prev.raw !== (ok ? v : null) || prev.fallback !== !ok || prev.via !== r.via;
+    if (changed) {
+      state.m3.engineCapProbe = {
+        at: new Date().toISOString(),
+        via: r.via,
+        ratio: ok ? v : null,
+        raw: ok ? v : null,
+        fallback: !ok,
+        cap: +Math.max(0, raw - ENGINE_CAP_MARGIN).toFixed(4),
+        margin: ENGINE_CAP_MARGIN,
+      };
+    }
     return raw;
   };
   /** 生效强制线上限 = 引擎阈值 − 5pp（下限 0，防引擎阈值被配成极小值后出现负数）。 */
@@ -756,7 +771,8 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     return messageText(m);
   };
 
-  /* B2（审查）：measure+pressure 读取收敛——decideCompaction / renderUsageText / preStepCompaction 三处共用 */
+  /* B2（审查）：measure+pressure 读取收敛——renderUsageText / preStepCompaction / idleSweep 三处共用
+   * （R7：原第三个调用点是 decideCompaction，该函数已删除）。 */
   const measureRatio = (session) => {
     const tm = svc('tokenMeter');
     const m = tryOf(() => tm?.measure?.(session));
@@ -773,19 +789,11 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     return { ok: true, used, surface, window, ratio, measure: m.value };
   };
 
-  /** M3 决策：仅剩强制压缩线（决策主体是模型标记，此函数供 pre-step/idle 兜底与审计）。 */
-  const decideCompaction = (agent) => {
-    const mr = measureRatio(agent?.session);
-    if (!mr.ok) return { ok: false, error: mr.error };
-    const { used, window, ratio } = mr;
-    if (ratio == null) return { ok: false, error: 'no window/ratio' };
-
-    // 2026-10-07：highRatio/lightTaskChars 审计分支已删除（决策主体移交模型后无触发作用）
-    if (ratio >= M3.criticalRatio) {
-      return { ok: true, compact: true, reason: `critical-usage(${(ratio * 100).toFixed(1)}%)`, ratio, used, window };
-    }
-    return { ok: true, compact: false, reason: 'no', ratio, used, window };
-  };
+  /* R7：`decideCompaction` 已删除。
+   * 它原本服务三个调用点（inbox 审计 / idle 兜底 / pre-step），但审计监听器与决策主体都已退役，
+   * 只剩下 idleSweep 读它的 `ok`/`ratio`——其余产物（`compact`/`reason`/`used`/`window`）全部无消费者，
+   * 且文档还停在「决策主体是模型标记」的旧语义。现在 idleSweep 直接调 `measureRatio`，
+   * **少一层间接、少一套会漂移的语义**。 */
 
   /* ---- 报告落盘（追加式 history，重启取证入口） ----
    * C3（审查）：基线 apply 期读一次缓存、后续内存追加——原实现每次写入全量 readFileSync（实测 1.2MB×每次，
@@ -861,9 +869,6 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     'agent/status',  // 状态频繁翻转
     'm5-publish',    // 400ms 防抖高频
     'm2-inject',     // 每轮一次；注入文本已在 snap.m2.lastText 保留
-    'm3-decision',   // 每任务一次；决策已在 snap.m3.lastDecision 保留
-    'm3.6-marker',   // 标记命中；detail 在 m3.markerHits
-    'm5.5-resume',   // 恢复相位；detail 在 m55.attempts
     'session/created',
   ]);
   /** 精简快照：保留读数与状态，丢枚举明细。 */
@@ -897,7 +902,6 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         eventProbe: undefined,
       },
       m5: snap.m5,
-      m55: snap.m55,
       // llmProviders / compactionProbe 仅在 FULL 条目保留
     };
   };
@@ -914,9 +918,9 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       m2: { ...state.m2, skips: { ...state.m2.skips } },
       m3: {
         ...state.m3,
-        lastDecision: state.m3.lastDecision ? { ...state.m3.lastDecision } : null,
         lastAct: state.m3.lastAct ? { ...state.m3.lastAct } : null,
         lastPreStep: state.m3.lastPreStep ? { ...state.m3.lastPreStep } : null,
+        compactIntentMiss: state.m3.compactIntentMiss ? { ...state.m3.compactIntentMiss } : null,
         actErrors: { ...state.m3.actErrors },
         preStepErrors: { ...state.m3.preStepErrors },
         sweeps: { ...state.m3.sweeps },
@@ -932,11 +936,6 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         hud: { ...(state.m5.hud ?? {}) },
         hudFace: state.m5.hudFace ?? 'absent',
         hudPollReq: state.m5.hudPollReq ? { ...state.m5.hudPollReq } : null, // getHud 最近一次请求/响应摘要（取证）
-      },
-      m55: {
-        armed: state.m55.armed ? { ...state.m55.armed } : null,
-        attempts: state.m55.attempts.slice(-10).map((a) => ({ ...a })),
-        channelProbe: state.m55.channelProbe ? { ...state.m55.channelProbe } : null,
       },
     };
 
@@ -1100,6 +1099,15 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
    *  模型收不到卡 ⇒ 不知道标记 ⇒ 永远不写标记 ⇒ 该区间内标记通道完全不可达；
    *  且若 markerMinRatio > 卡门槛则反向错配（教了却不执行）。现统一为同一门槛，
    *  语义：「能收到卡 = 标记有效」，无论用户怎么填都不会出现死区或错配。 */
+  /* F7（审查）：教学出口的异常**必须有痕**——`renderCard`/`renderBrief` 静默返回 null 等价于
+   * 「模型永远不知道有 compact_context 这个工具」，是本机制最怕的静默降级。只报一次防刷屏。 */
+  let teachWarned = false;
+  const warnTeachOnce = (what) => {
+    if (teachWarned) return;
+    teachWarned = true;
+    log('warn', `${what}（同类问题仅报一次）`);
+  };
+
   /* R5+（2026-10-08 用户要求）：「自己算范围」必须教给 Agent——否则它不知道压缩后还剩什么。
    * ⚠️ 两个数都是**活值**：比例读 compact-range.mjs 的常量，token 数按**当前窗口**现算。
    *    写死「16% / 160k」会在常量或窗口变化后与真实行为自相矛盾（本项目已因此踩过坑）。
@@ -1122,10 +1130,12 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
      * ⚠️ R5+：同时传入「保留多少」的活值（见 retentionTeach）。 */
     try {
       const api = compactToolApi;
-      if (!api) return null;
+      /* F7（审查）：教学/卡片静默为 null = 模型**永远不知道有工具**——这正是 R4 机制最怕的
+       * 静默降级。模块未就绪时留一条痕（只报一次，防刷屏）。 */
+      if (!api) { warnTeachOnce('压缩教学模块未就绪：决策卡与一次性说明本次为空（模型将看不到压缩工具的用法）'); return null; }
       const crit = Number.isFinite(effCrit) ? effCrit : M3.criticalRatio;
       return api.renderCard({ ratio, minRatio: M3.markerMinRatio, criticalRatio: crit, ...retentionTeach(win) });
-    } catch { return null; }
+    } catch (e) { warnTeachOnce(`决策卡渲染异常：${msg(e)}`); return null; }
   };
 
   /* 官方工厂异步解析；就绪前监听器直接放行（不注入、不阻塞）。 */
@@ -1246,7 +1256,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       if (!agent?.session) return;
       /* A5（审查）：signal 缺失守卫——compactIfNeeded 契约首行 throwIfAborted(signal)，undefined 放行=首跑即败
        * （M5.5 通道 A 已实证同款）。payload 未带 signal 时兜底 180s 超时信号（与 idle compactNow 同参）。 */
-      const sig = signal && typeof signal === 'object' ? signal : AbortSignal.timeout(180_000);
+      const sig = signal && typeof signal === 'object' ? signal : AbortSignal.timeout(COMPACT_TIMEOUT_MS);
       if (sig.aborted) return;
       const sid = String(pick(agent.session.id, agent.sessionId, agent.id, 'unknown'));
       const mr = measureRatio(agent.session); // B2：读取收敛
@@ -1255,19 +1265,29 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       /* ═══ R4（2026-10-08）：模型主动登记「下一步压缩」意图 ⇒ 轮内执行，本轮无缝继续 ═══
        * 这是替代「marker + 伪造恢复消息」的核心：工具调用必然产生下一步 ⇒ 下一步的 pre-step
        * 就在这里执行压缩 ⇒ 之后的步骤都在压缩后的上下文上继续，**不需要任何消息**。
-       * 意图无论成败都**先消费掉**（避免每个 step 反复尝试一次，污染报告也浪费额度）。 */
+       * ⚠️ F5（R7 审查修）：意图**只能在「确实能执行」时才消费**。原实现在 `resolveCompactionFor`
+       *    之前就 takeIntent，服务解析不到就直接 return ⇒ 意图已丢、工具却早已回 `scheduled:'next-step'`
+       *    ⇒ **模型以为压过了、实际没压，而且不会重试**（最典型的静默降级）。
+       *    现在：服务不可用 ⇒ 意图保留（下一步会再试；TTL 到期由模块清扫）。 */
       const intent = compactToolApi ? compactToolApi.peekIntent(sid) : null;
       const wanted = !!intent;
-      if (wanted) compactToolApi.takeIntent(sid);
+      /* 诊断：本 sid 无意图、但表里还有**别的 sid** 的未过期意图 ⇒ 很可能是 session id 轮转导致
+       * 意图登记在旧键上（工具已回 scheduled，压缩却不会发生）。只留痕，**不跨会话执行**——
+       * 在别的 agent 上执行压缩比不压更糟。 */
+      if (!intent && compactToolApi?.pending) {
+        const others = compactToolApi.pending();
+        if (others.length) state.m3.compactIntentMiss = { at: new Date().toISOString(), sessionId: sid, pending: others };
+      }
       /* C-own：生效强制线 = min(用户配置, 引擎阈值 − 5pp)——插件线必须**确定性地先行**，
        * 引擎只是插件关闭/卸载后的安全网。 */
       const effCritical = Math.min(M3.criticalRatio, criticalCapOf(agent));
       if (!wanted && ratio < effCritical) return;
       const compaction = resolveCompactionFor(agent);
       if (!compaction.service) {
-        log('warn', `M3.5 pre-step 先压：解析不到作用域 compaction，跳过`);
+        log('warn', `M3.5 pre-step 先压：解析不到作用域 compaction，跳过（意图保留待下次）`);
         return;
       }
+      if (wanted) compactToolApi.takeIntent(sid); // F5：确能执行才消费
       state.m3.preStepActs += 1;
       const t0 = Date.now();
       /* R5：trigger 现在只表达**触发原因**；实际执行策略（自选范围/官方兜底）记在 rangeSource。
@@ -1335,8 +1355,11 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         ...rangeInfo,
       };
       if (result) {
-        const __t = formatAct('pressure', result?.shadowedTokenCount);
-        publishHud({ hudLastAct: __t, hudArmed: '' }); // M5
+        /* D8/F13（R7 审查修）：HUD 文案必须用**真实触发原因**——原先写死 `'pressure'`，
+         * 于是「模型主动请求压缩」在弹窗与 hud-acts 里被标成「强制压缩」，与实际动机不符
+         * （而 `lastPreStep.trigger` 记的是真值 ⇒ 同一件事两个说法）。 */
+        const __t = formatAct(trigger, result?.shadowedTokenCount);
+        publishHud({ hudLastAct: __t }); // M5
         recordHudAct(sid, __t);
         clearBriefed(sid); // R1：同 idle 路径——压缩后一次性说明需重讲
       }
@@ -1348,7 +1371,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       );
       schedule('m3.5-prestep', 500);
     } catch (e) {
-      const code = e?.code ?? e?.name ?? 'error';
+      const code = errCodeOf(e);
       state.m3.preStepErrors[code] = (state.m3.preStepErrors[code] ?? 0) + 1;
       /* ⚠️ 2026-10-08：此前**只记错误码、错误正文只进 log**——压缩全线失败（preStepOk=0）
        * 时报告里看不到原因，无法定位。现保留最近一次失败的完整信息。 */
@@ -1373,12 +1396,12 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
   const renderBrief = (effCrit, win) => {
     try {
       const api = compactToolApi;
-      if (!api) return null;
+      if (!api) { warnTeachOnce('压缩教学模块未就绪：一次性说明本次为空'); return null; }
       /* 同 renderPolicyCard：必须传**生效值**，否则一次性说明会教一个不会触发的数字；
        * 另传「保留多少」活值（R5+）。 */
       const crit = Number.isFinite(effCrit) ? effCrit : M3.criticalRatio;
       return api.renderBrief({ criticalRatio: crit, ...retentionTeach(win) });
-    } catch { return null; }
+    } catch (e) { warnTeachOnce(`一次性说明渲染异常：${msg(e)}`); return null; }
   };
 
   /* 智能思考的**注入文本**（一次性教学 / 每轮后缀）已随功能域搬入 plugin/effort.mjs：
@@ -1412,7 +1435,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         if (r.error || !r.text) {
           const key = 'measure:' + String(pick(agent.session.id, agent.sessionId, 'unknown'));
           if (!measuredFailedOnce.has(key)) {
-            measuredFailedOnce.add(key);
+            remember(measuredFailedOnce, key);
             log('warn', `M2 measure 失败跳过注入（${key}）：${r.error}`);
           }
           state.m2.skips.measureFail = (state.m2.skips.measureFail ?? 0) + 1;
@@ -1437,11 +1460,11 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
          * 不额外增加消息结构开销（role 框架/JSON 包装各一次）。 */
         const effBrief = eff && !effBriefedBySid.has(sid) ? (effortApi?.renderBrief(eff) ?? null) : null;
         if (effBrief) {
-          effBriefedBySid.add(sid);
+          remember(effBriefedBySid, sid); // C 类审查：有界化（原先无上限）
           state.m2.effortBriefings = (state.m2.effortBriefings ?? 0) + 1;
         }
         if (brief) {
-          briefedBySid.add(sid);
+          remember(briefedBySid, sid); // C 类审查：有界化（原先无上限）
           state.m2.briefings = (state.m2.briefings ?? 0) + 1;
         }
         const fullText = [baseText, card, brief, effBrief].filter(Boolean).join('\n\n');
@@ -1473,81 +1496,56 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     ensureEffort().catch(() => {});
     schedule('session/created', 1500);
   });
-  /* ═══════════ M3-a：turn 前审计 + 关键词武装（inbox/inserted） ═══════════
-   * v1 实弹结论（2026-10-06）：此处 agent 已是 waking 状态，compactNow 必 busy（actErrors.busy=2）——此处不执行压缩。
-   * M3.5 职责：① 决策审计（记录"该任务场景是否会想压"）；② 关键词「先压缩」武装——
-   * 消息文本以此开头时置 armed 标记，由 pre-step（M3.5 通道1）在轮内合法执行。 */
-  state.listeners['agent/inbox/inserted'] = addListener('agent/inbox/inserted', (payload) => {
-    try {
-      if (!effEnabled()) return; // 总开关活读
-      const { agent, message } = payload ?? {};
-      if (!agent?.session) return;
-      const text = messageText(message);
-      const sid0 = String(pick(agent.session.id, agent.sessionId, 'unknown'));
-      if (text) lastUserTextBySid.set(sid0, text.slice(0, 500)); // M5.5：记住最近任务文本（恢复兜底）
-      const taskChars = text.length;
-      const d = decideCompaction(agent);
-      state.m3.decisions += 1;
-      state.m3.lastDecision = {
-        at: new Date().toISOString(),
-        sessionId: pick(agent.session.id, agent.sessionId),
-        taskChars,
-        ratio: d.ratio != null ? +(d.ratio * 100).toFixed(1) + '%' : null,
-        compact: d.ok ? d.compact : null,
-        reason: d.error ?? d.reason,
-      };
-      if (d.ok && d.compact) {
-        state.m3.wouldCompact += 1;
-        log('info', `M3 [审计] 该任务场景会想先压缩（${d.reason}）；由 idle 扫除器负责执行`);
-      } else if (d.ok) {
-        log('info', `M3 决策：不压缩（${d.reason}）`);
-      }
-      schedule('m3-decision', 500);
-    } catch (e) {
-      log('warn', `M3 决策异常（吞）：${msg(e)}`);
-    }
-  });
+  /* ═══════════ M3-a：turn 前审计 —— **已于 R7 整体删除** ═══════════
+   * 这块挂的是 `agent/inbox/inserted`，只做两件事：
+   *   ① 「该任务场景是否会想压」的**纯审计**（decisions / wouldCompact / lastDecision）——
+   *      v1 实弹结论（2026-10-06）已证明此处 agent 是 waking 状态、compactNow 必 busy，
+   *      所以它**从不执行压缩**，只写报告；决策主体移交模型后这些计数再无消费者；
+   *   ② 关键词「先压缩」武装 —— 该通道已于 2026-10-06 按用户决定裁撤。
+   * ⇒ 监听器连同 `decideCompaction` 的审计出口一起删除。**压缩触发只剩两条**：
+   *   pre-step 轮内（工具意图 / 越强制线）与 idle 安全网（sweepBelow）。 */
 
-  /* ═══════════ M3-b：idle 扫除器（双模式：safety-net 兜底 + M3.6 marker 模型建议通道） ═══════════
-   * safety-net：会话被撂在危险占用（≥critical）→ 兜底清场，受 10min 冷却。
-   * marker（M3.6）：模型回复尾部写了 M3.marker → idle 后立即压缩（≥markerMinRatio 即可，
-   *   不受 critical 限制、不受 10min 冷却——显式请求不设防）。用户无需任何输入。 */
+  /* ═══════════ M3-b：idle 安全网（R7 起**只剩一种模式**） ═══════════
+   * 会话被撂在高占用（≥ 生效强制线）→ idle 时兜底清场，受 sweepMinIntervalMs 冷却。
+   * ⚠️ 原来的第二模式 `marker`（模型回复尾行标记 → idle 立即压缩）已随 marker 通道整体退役：
+   *    压缩现在由模型调用工具 `compact_context` 在**轮内**完成，idle 路径不再承担「模型请求」职责。 */
   const sweepInFlight = new Set();
   const idleSweep = (agent) => {
     try {
       if (!effEnabled()) return; // 总开关活读（演习模式已随 2026-10-07 面板精简退役：压缩路径无影子模式）
       const sid = String(pick(agent?.session?.id, agent?.id, 'unknown'));
-      /* A2（审查）：TTL 清灯前移到一切早退之前——measure 失败/in-flight 早退也要熄过期武装灯，防 hudArmed 永亮 */
-      const armedMark = markerArmed.get(sid);
-      if (armedMark && Date.now() - armedMark.at > M3.armedTtlMs) {
-        markerArmed.delete(sid);
-        publishHud({ hudArmed: '' }); // M5：武装过期即熄灯
-      }
       if (sweepInFlight.has(sid)) return;
-      const d = decideCompaction(agent); // idle，无任务文本
-      if (!d.ok || d.ratio == null) return;
-      const armedAt = armedMark?.at ?? null; // A2：失败重武装保原始时刻（TTL 自然封顶重试窗口）
-      const markerShot = !!(armedMark && d.ratio >= M3.markerMinRatio); // 过期项已被上面清除，无需再比 TTL
-      if (markerShot) markerArmed.delete(sid);
+      const mr = measureRatio(agent?.session); // idle：只看占用比，任务文本无关
+      if (!mr.ok || mr.ratio == null) return;
       const now = Date.now();
-      if (!markerShot) {
-        /* C-own：safety-net 同样钳到「引擎阈值 − 5pp」之下（同 pre-step，理由见 ENGINE_CAP_MARGIN） */
-        if (d.ratio < Math.min(M3.criticalRatio, criticalCapOf(agent))) return; // safety-net：仅 critical
-        if (now - (state.m3.sweeps[sid] ?? 0) < M3.sweepMinIntervalMs) return; // 兜底受冷却限制
-      }
-      const reason = markerShot ? 'marker' : 'safety-net';
+      /* C-own：safety-net 同样钳到「引擎阈值 − 5pp」之下（同 pre-step，理由见 ENGINE_CAP_MARGIN） */
+      if (mr.ratio < Math.min(M3.criticalRatio, criticalCapOf(agent))) return; // 仅越强制线才兜底
+      if (now - (state.m3.sweeps[sid] ?? 0) < M3.sweepMinIntervalMs) return; // 兜底受冷却限制
+      const reason = 'safety-net';
       const compaction = resolveCompactionFor(agent);
       if (!compaction.service) {
         log('warn', `M3 idle 扫除：解析不到作用域 compaction（${JSON.stringify(compaction.probe)}）`);
         return;
       }
-      sweepInFlight.add(sid);
-      state.m3.sweeps[sid] = now;
       state.m3.acts += 1;
-      log('info', `M3 idle 扫除（${reason}）：compactNow（ratio ${(d.ratio * 100).toFixed(1)}%，via ${compaction.via}）`);
+      log('info', `M3 idle 扫除（${reason}）：compactNow（ratio ${(mr.ratio * 100).toFixed(1)}%，via ${compaction.via}）`);
+      /* ⚠️ F2（R7 审查修）：`add` 必须**紧贴** promise 链。原顺序是 add → 取冷却 → log → compactNow，
+       * 这段同步代码里任何抛错（审计窗口内真的发生过：日志模板引用了已删变量）都会让 sid 永久驻留
+       * `sweepInFlight` ⇒ 该会话**永久失去 idle 安全网**，而且没有任何显式日志。
+       * 现在：「可能抛的语句」全在 add 之前，add 之后立即注册 `.finally` ⇒ 结构上不存在这个窗口。
+       * ⚠️ F1（同批修）：冷却 `state.m3.sweeps[sid]` 改为**只在成功分支**记录——原实现发起前就记，
+       * 一次失败即消耗掉 `sweepMinIntervalMs`（默认 10 分钟）安全网。 */
+      sweepInFlight.add(sid);
       compaction.service
-        .compactNow(agent, AbortSignal.timeout(180_000), 'context-pilot')
+        .compactNow(agent, AbortSignal.timeout(COMPACT_TIMEOUT_MS), 'context-pilot')
         .then((result) => {
+          state.m3.sweeps[sid] = Date.now(); // F1：成功才记冷却
+          /* C4（审查）：`sweeps` 以 sid 为键且从不清理 ⇒ 有界化（只用于冷却判定，淘汰无害）。 */
+          const sweepKeys = Object.keys(state.m3.sweeps);
+          if (sweepKeys.length > SET_CAP) {
+            const oldest = sweepKeys.reduce((a, b) => (state.m3.sweeps[a] <= state.m3.sweeps[b] ? a : b));
+            if (oldest !== sid) delete state.m3.sweeps[oldest];
+          }
           state.m3.actOk += 1;
           state.m3.lastAct = {
             at: new Date().toISOString(),
@@ -1559,7 +1557,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
             range: result?.shadowedRange ?? null,
           };
           const __actText = formatAct(reason, result?.shadowedTokenCount);
-          publishHud({ hudLastAct: __actText, hudArmed: '' }); // M5
+          publishHud({ hudLastAct: __actText }); // M5
           recordHudAct(sid, __actText);
           /* R1：压缩成功 ⇒ 一次性说明（压缩流程 + 智能思考教学）已随旧对话被收走，
            * 清除「已讲」标记让下一轮重讲一次（否则模型永久失去用法说明）。 */
@@ -1576,7 +1574,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
           schedule('m3-act', 500);
         })
         .catch((e) => {
-          const code = e?.code ?? (e?.name === 'ManualCompactionError' ? 'ManualCompactionError' : 'error');
+          const code = errCodeOf(e);
           state.m3.actErrors[code] = (state.m3.actErrors[code] ?? 0) + 1;
           /* ⚠️ 2026-10-08：同 pre-step——错误正文此前只进 log，报告只见错误码
            * （实测 actErrors={summary:2} 而 actOk=0，无从定位）。现保留最近一次失败详情。 */
@@ -1589,14 +1587,6 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
             stack: String(e?.stack ?? '').split('\n').slice(0, 3).join(' | ').slice(0, 400),
           };
           log('warn', `M3 idle 扫除失败（${code}）：${msg(e)}`);
-          /* A2（审查）：marker 压缩失败不能吞掉武装——原始 TTL 窗口内重武装（armedAt 保原时刻，重试自然封顶），
-           * 下次 idle 自动重试；hudArmed 保持亮灯，任务徽章不熄，用户看得到还有事没做完。 */
-          if (reason === 'marker' && armedAt && Date.now() - armedAt < M3.armedTtlMs) {
-            markerArmed.set(sid, { at: armedAt });
-            publishHud({ hudArmed: 'armed' });
-            m55Attempt({ phase: 'act-failed-rearm', code, sid: sid.slice(0, 8), msLeft: M3.armedTtlMs - (Date.now() - armedAt) });
-            log('info', `M3.6 压缩失败（${code}）→ 武装保留（TTL 内），下次 idle 重试`);
-          }
           schedule('m3-act', 500);
         })
         .finally(() => sweepInFlight.delete(sid));
@@ -1617,18 +1607,15 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     schedule('agent/status', 1500);
   });
 
-  /* ---- M3.6：模型回复尾部标记 → idle 自动压缩 ═══════════
-   * 事件通道 compaction-basic 官方同款（ctx.on("session/event")，event.type==='assistant/message'）。
-   * 解析到标记即武装；竞态处理：消息事件可能晚于 status→idle，武装时查 agent.status，
-   * 已 idle 则直接触发扫除。用户零输入——标记本身在回复里可见（透明）。 */
+  /* ---- 事件形状探针（**唯一职责**：记录到达的 session/event，供协议取证）----
+   * R7 起本监听器**不再有任何业务逻辑**：它原来还负责「模型回复尾部标记 → idle 自动压缩」，
+   * 那条通道已随 marker 整体退役（压缩改由工具在轮内完成）。
+   * 保留探针的理由：本插件依赖多个**未文档化**的内部事件（`session/event` 的形状、
+   * `agent/inbox/*`、`step/*`），M1 阶段正是靠它一次性摸清了事件形状；
+   * 成本仅为一次类型计数 + 至多 12 条样本（slim 报告档位会丢弃），换的是下次 API 变动时能立刻看见。
+   * ⚠️ 探针**纯只读**：不得在此监听器里加入任何会改状态或触发压缩的逻辑（那正是 R7 删掉的东西）。 */
   state.listeners['session/event'] = addListener('session/event', (session, event) => {
     try {
-      /* 此处**不再**解析任何换档文本标记——换档已改为工具 set_reasoning_effort
-       * （实现见 plugin/effort.mjs，设计见 docs/r2-tool-switch-design.md）。
-       * 移除标记方案的理由（用户 2026-10-08 决定）：① 标记写在回复末尾 ⇒ 本轮已结束
-       * ⇒ 档位要等用户下次说话才生效（「需要我再发起才能触发，这个就失去意义了」）；
-       * ② 工具方案同轮生效，且参数结构化、无「散文提及误触发」风险。 */
-      /* 形状探针先行：无论后续逻辑如何，先记录到达的事件（类型计数 + 前 N 条样本） */
       const probeType = event?.type ?? '(no-type)';
       eventProbe.counts[probeType] = (eventProbe.counts[probeType] ?? 0) + 1;
       if (eventProbe.samples.length < eventProbe.cap) {
@@ -1641,37 +1628,6 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
           session: String(pick(session?.id, session?.header?.id, '?')).slice(0, 8),
         });
       }
-      if (!M3.enabled || !M3.marker) return;
-      if (event?.type !== 'assistant/message') return;
-      const text = extractEventText(event);
-      if (!text || !text.trimEnd().endsWith(M3.marker)) return;
-      const sid = String(pick(session?.id, session?.header?.id, 'unknown'));
-      markerArmed.set(sid, { at: Date.now() });
-      state.m3.markerHits += 1;
-      publishHud({ hudArmed: 'armed' }); // M5：标记武装，弹窗亮「武装中」
-      /* M5.5：捕获挂起任务——优先回复里的「待执行：<任务>」行，兜底最近一条用户消息 */
-      const deferMatch = [...text.matchAll(/待执行[：:]\s*(.+)/g)].pop();
-      const pendingTask = (deferMatch ? deferMatch[1] : lastUserTextBySid.get(sid) ?? '').trim().slice(0, 400);
-      pendingBySid.set(sid, {
-        task: pendingTask || '(未捕获任务文本，恢复时请从上方摘要自查)',
-        at: Date.now(),
-      });
-      publishHud({ hudPending: JSON.stringify({ task: (pendingTask || '…').slice(0, 120) }) });
-      state.m55.armed = {
-        at: new Date().toISOString(),
-        sid: sid.slice(0, 8),
-        via: deferMatch ? 'reply-defer-line' : 'last-user-text',
-        taskLen: pendingTask.length,
-        taskHead: (pendingTask || '').slice(0, 60),
-      };
-      log('info', `M3.6 标记 ${M3.marker} 命中（session ${sid.slice(0, 8)}…）→ 武装；idle 后自动压缩`);
-      const aList = tryOf(() => svc('agents')?.list?.() ?? []);
-      const agent = (aList.value ?? []).find((a) => String(pick(a?.session?.id, a?.sessionId, a?.id)) === sid);
-      if (agent && agent.status === 'idle') {
-        log('info', `M3.6 agent 已 idle（消息事件晚于状态翻转）→ 立即触发扫除`);
-        idleSweep(agent);
-      }
-      schedule('m3.6-marker', 500);
     } catch (e) {
       log('warn', `M3.6 标记处理异常（吞）：${msg(e)}`);
     }
@@ -1858,7 +1814,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         }
         const newest = state.m5.acts[0];
         if (newest) {
-          publishHud({ hudLastAct: newest.text, hudArmed: '' }); // 内存写入，无 HMR 问题；跨激活显示靠这里回填
+          publishHud({ hudLastAct: newest.text }); // 内存写入，无 HMR 问题；跨激活显示靠这里回填
           log('info', `M5 HUD 启动回填：${newest.at}（历史 ${state.m5.acts.length} 条，持久化 hud-acts.json）`);
         }
       } catch (e) {

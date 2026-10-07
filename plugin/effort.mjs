@@ -107,9 +107,13 @@ export function createEffort(deps) {
 
   /** 档位合法性校验（原先钩子与工具各写一遍）。
    *  ⚠️ 可选集取不到（null）时**不否决**：部分 provider 不暴露 efforts，但档位值仍可能有效；
-   *     真正的兜底是 llm 侧的 UNSUPPORTED_REASONING_EFFORT（故仍需 try/catch 吞）。 */
+   *     真正的兜底是 llm 侧的 UNSUPPORTED_REASONING_EFFORT（故仍需 try/catch 吞）。
+   *  ⚠️⚠️ R7 修一个**真缺陷**：`efforts` 缺失时上游归一成 `[]`（而非 null），而这里原先用
+   *     `Array.isArray` 判定 ⇒ 空数组为真 ⇒ `options.includes(want)` **恒假** ⇒ **一刀否决所有档位**，
+   *     错误文案还退化成「可选 」。判据必须与 `renderBrief` 的 `eff.efforts.length` 口径一致：
+   *     **空数组 = 取不到 = 不否决**。 */
   const checkEffort = (eff, want) => {
-    const options = Array.isArray(eff?.efforts) ? eff.efforts : null;
+    const options = Array.isArray(eff?.efforts) && eff.efforts.length > 0 ? eff.efforts : null;
     if (options && !options.includes(want)) {
       return { ok: false, options, reason: `档位不在当前模型的可选集内（可选 ${options.join('/')}）` };
     }

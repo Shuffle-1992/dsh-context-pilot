@@ -46,16 +46,22 @@ const requiredBlocks = [
   ['m3 块含 heartbeat（心跳取证）', /heartbeat:\s*state\.heartbeat/],
   ['m3 块含 m4Probe（schema 解析）', /m4Probe:\s*state\.m4Probe/],
   ['m3 块含 lastAct（压缩结果）', /lastAct:\s*state\.m3\.lastAct/],
-  ['m3 块含 lastDecision（决策审计）', /lastDecision:\s*state\.m3\.lastDecision/],
+  /* R7：`lastDecision`（决策审计）随 `agent/inbox/inserted` 审计监听器一起删除；
+   * 新增 `compactIntentMiss` —— 「本 sid 无意图但表里有别的意图」的现场留痕
+   * （session id 轮转 ⇒ 工具回了 scheduled 但压缩永不发生，这是唯一可诊断点）。 */
+  ['m3 块含 compactIntentMiss（意图未命中的现场）', /compactIntentMiss:\s*state\.m3\.compactIntentMiss/],
   ['m5 块含 hud（HUD 状态）', /hud:\s*\{\s*\.\.\.\(state\.m5\.hud/],
   ['m5 块含 hudFace（face 注册状态）', /hudFace:\s*state\.m5\.hudFace/],
   ['m5 块含 lastPublish（发布留痕）', /lastPublish:\s*state\.m5\.lastPublish/],
-  ['m55 块含 attempts（恢复尝试）', /attempts:\s*state\.m55\.attempts\.slice/],
-  ['m55 块含 channelProbe（通道探测）', /channelProbe:\s*state\.m55\.channelProbe/],
   ['services 枚举（服务可达性）', /for \(const k of \['tokenMeter'/],
   ['m2 块含 skips（注入跳过统计）', /skips:\s*\{\s*\.\.\.state\.m2\.skips\s*\}/],
+  /* R7：`m55` 块（armed/attempts/channelProbe）随 M5.5 收官残留整体删除 —— 旧断言在此退役。
+   * 反向断言：报告里不得再出现 m55（防复活）。 */
 ];
 for (const [name, re] of requiredBlocks) ok(name, re.test(host));
+ok('报告不再含 m55 块（M5.5 恢复通道已整体退役）',
+  !/state\.m55/.test(host.replace(/\/\*[\s\S]*?\*\//g, '')),
+  'm55 残留 ⇒ 旧恢复通道有复活路径');
 
 /* ═══════════ ② bfOnce 依赖项（回填链不能断）═══════════ */
 console.log('\n== 2. 回填链依赖（bfOnce 读取的字段必须存在）==');

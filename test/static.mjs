@@ -170,7 +170,9 @@ const hostLines = readFileSync(join(PLUGIN, 'host.impl.mjs'), 'utf8').split('\n'
 const SPLIT_TARGET = 250;
 const SPLIT_WARN = 900;
 // 目标模块清单（切分后应存在）
-const TARGET_MODULES = ['core.mjs', 'm1.snapshot.mjs', 'm2.inject.mjs', 'm3.compact.mjs', 'm5.hud.mjs', 'm55.resume.mjs'];
+/* D1 目标模块。R7（2026-10-08）：`m55.resume.mjs` 已从计划中移除——
+ * M5.5「挂起-自动恢复」通道（含 marker 触发）已**整体退役**，不再需要该模块。 */
+const TARGET_MODULES = ['core.mjs', 'm1.snapshot.mjs', 'm2.inject.mjs', 'm3.compact.mjs', 'm5.hud.mjs'];
 const existing = TARGET_MODULES.filter((f) => existsSync(join(PLUGIN, f)));
 const done = existing.length === TARGET_MODULES.length;
 /* R3（2026-10-08）：effort.mjs 是**计划外的第一刀**（智能思考功能域，不在 D1 的 6 个目标模块内）。
