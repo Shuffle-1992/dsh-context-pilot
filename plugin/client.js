@@ -610,7 +610,10 @@ window.__ModuleLoader__.load({
 			const progress = cooling ? Math.min(1, Math.max(0, (totalMs - remainMs) / totalMs)) : 1;
 			const coolLeft = Math.ceil(remainMs / 1000);
 			const C_WARN = "var(--dsw-alias-state-warn-primary, #ff9f0a)";
-			const C_OK = "var(--dsw-alias-state-success-primary, #34c759)";
+			/* 2026-10-08 用户要求：就绪态由**绿色**改为**品牌蓝**（「参考输入框的发送按钮」）——
+			 * 发送按钮是主操作色，用的就是 --dsw-alias-brand-primary；回退值与弹窗行色块 #4c7dff 同源，
+			 * 保证「行内色块 ↔ chip 就绪色」在 token 缺失时仍一致。 */
+			const C_OK = "var(--dsw-alias-brand-primary, #4c7dff)";
 			const accent = cooling ? C_WARN : C_OK;
 			const tip = [
 				`模型：${shown.provider}/${shown.model}`,
@@ -907,7 +910,13 @@ window.__ModuleLoader__.load({
 					const labE = document.createElement("span");
 					labE.textContent = "智能思考";
 					labE.style.cssText = "opacity:.85;white-space:nowrap;font-size:12px;";
+					/* 2026-10-08 用户要求：智能思考前面**也加一个方块色块**，与「智能压缩」行同款
+					 * （8px / 圆角 2px / 同色 #4c7dff）——两行视觉成对，一眼看出都是本插件的开关。
+					 * 若想区分两个开关的色相，改这一处即可（当前与智能压缩同色，是刻意的「插件强调色」）。 */
+					const iconE = document.createElement("span");
+					iconE.style.cssText = "display:inline-block;width:8px;height:8px;border-radius:2px;background:#4c7dff;flex:none;";
 					const sw2 = mkSwitch("智能思考开关");
+					wrapE.appendChild(iconE);
 					wrapE.appendChild(labE);
 					wrapE.appendChild(sw2.box);
 					const syncE = () => {

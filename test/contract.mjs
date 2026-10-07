@@ -153,6 +153,13 @@ ok('弹窗开关写 settingsScope.set("enabled")（与面板同存储）', /sett
   '弹窗开关未写 enabled 配置 ⇒ 与面板开关不同源');
 ok('面板写路径走 writeField(settingsScope)（同一 settingsScope）', /await writeField\(settingsScope,\s*field,\s*parsed\)/.test(client),
   '面板写路径改道 ⇒ 与弹窗开关可能不同源');
+/* 用户要求（2026-10-08）：「智能思考前面也添加一个方块色块」——与「智能压缩」行同款
+ * （8px / 圆角 2px / #4c7dff），两行视觉成对。缺色块不会报错，只是两行看起来不成对。 */
+ok('弹窗「智能思考」行也有色块（与「智能压缩」同款）',
+  /const iconE = document\.createElement\("span"\);/.test(client)
+  && /iconE\.style\.cssText = "display:inline-block;width:8px;height:8px;border-radius:2px;background:#4c7dff;flex:none;"/.test(client)
+  && /wrapE\.appendChild\(iconE\);/.test(client),
+  '智能思考行缺色块（或尺寸/颜色与智能压缩行不一致）⇒ 两行视觉不成对');
 
 /* ═══════════ 6.6 阈值速览行排版（防截断回归）═══════════ */
 console.log('\n== 6.6 阈值速览行排版（排版不截断 + 已删「上限」+ 字号 11px）==');
@@ -294,9 +301,15 @@ ok('chip 不再内联显示冷却秒数（用户要求删除）',
 ok('chip 两态用 data-state 标记（cooling / ready）',
   /"data-state": cooling \? "cooling" : "ready"/.test(chipBody),
   '缺 data-state ⇒ 两态不可区分（也失去可测锚点）');
-ok('chip 用主题状态色（warn=冷却 / success=就绪）',
-  /--dsw-alias-state-warn-primary/.test(chipBody) && /--dsw-alias-state-success-primary/.test(chipBody),
+ok('chip 两态用主题 token（冷却=warn / 就绪=品牌蓝）',
+  /--dsw-alias-state-warn-primary/.test(chipBody) && /--dsw-alias-brand-primary/.test(chipBody),
   '未用主题状态 token ⇒ 两态颜色不跟随主题');
+/* 用户要求（2026-10-08）：「智能思考就绪的绿色改成蓝色，参考输入框的发送按钮」。
+ * 发送按钮是主操作色 = --dsw-alias-brand-primary；本仓既有回退值 rgba(76,125,255,.9)=#4c7dff
+ * 正好与弹窗行内色块同源（见 client.css 的 .dcp-switch:has(input:checked)），故回退取同值。 */
+ok('chip 就绪色是品牌蓝而非绿色（用户要求对齐发送按钮）',
+  !/--dsw-alias-state-success-primary/.test(chipBody) && !/#34c759/.test(chipBody),
+  '仍是绿色 success token ⇒ 用户要求改成输入框发送按钮的蓝色');
 ok('chip 进度条宽度由冷却进度驱动',
   /const progress = cooling \? Math\.min\(1, Math\.max\(0, \(totalMs - remainMs\) \/ totalMs\)\) : 1;/.test(chipBody) &&
   /width: `\$\{progress \* 100\}%`/.test(chipBody),
