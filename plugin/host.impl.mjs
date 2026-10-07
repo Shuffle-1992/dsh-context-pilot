@@ -619,6 +619,10 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       lastDecision: null,
       lastAct: null,
       actErrors: {},
+      /* ⚠️ 2026-10-08：压缩失败的错误**正文**（此前只记错误码，报告无法定位——
+       * 实测 actErrors={summary:2} / preStepErrors={INVALID_REQUEST:17} 而两条路径成功均为 0） */
+      lastActError: null,
+      lastPreStepError: null,
       probe: null,
       sweeps: {},
       // M3.5 三通道
@@ -773,7 +777,18 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
   const effortHookInstalled = new WeakSet();
   const installEffortRequestHook = (agent) => {
     try {
-      if (!agent?.ctx || typeof agent.ctx.on !== 'function') return false;
+      if (!agent?.ctx || typeof agent.ctx.on !== 'function') {
+        /* R2 取证（2026-10-08）：工具链路已通但 apply 未执行——此处曾静默 return false，
+         * 导致「工具接受成功却永不变档」。改为留痕，便于定位。 */
+        state.m3.effortHookError = {
+          at: new Date().toISOString(),
+          reason: !agent?.ctx ? 'agent.ctx 缺失' : 'agent.ctx.on 非函数',
+          ctxType: typeof agent?.ctx,
+          onType: typeof agent?.ctx?.on,
+          agentKeys: tryOf(() => Object.keys(agent ?? {}).slice(0, 20)).value ?? null,
+        };
+        return false;
+      }
       if (effortHookInstalled.has(agent)) return true;
       /* 安装时捕获一次（兜底），但**请求时重读**（见下）——本项目实测 session id 会轮转
        * （压缩后 / 多会话交错），安装期捕获的 id 可能与标记解析路径写入的 sid 不一致，
@@ -869,13 +884,24 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       return false;
     }
   };
-  /** 懒安装：每次 pre-step / 快照时对可见 agent 补装（新会话自动覆盖）。 */
+  /** 懒安装：每次 pre-step / 快照时对可见 agent 补装（新会话自动覆盖）。
+   * R2 取证（2026-10-08）：此前该函数**全静默**——工具链路通但 apply 从不执行时无处可查。
+   * 现留痕：enabled 状态 / agent 列表长度 / 每个 agent 的安装结果。 */
   const ensureEffortHooks = () => {
     try {
+      state.m3.effortEnsure = state.m3.effortEnsure ?? { calls: 0, lastAgents: null, lastResults: null };
+      state.m3.effortEnsure.calls += 1;
+      state.m3.effortEnsure.enabled = M3.effortEnabled === true;
       if (M3.effortEnabled !== true) return;
       const list = svc('agents')?.list?.() ?? [];
-      for (const a of list) installEffortRequestHook(a);
-    } catch { /* 吞 */ }
+      state.m3.effortEnsure.lastAgents = Array.isArray(list) ? list.length : 'not-array';
+      const results = [];
+      for (const a of list) results.push(installEffortRequestHook(a));
+      state.m3.effortEnsure.lastResults = results;
+      state.m3.effortEnsure.at = new Date().toISOString();
+    } catch (e) {
+      state.m3.effortEnsure = { ...(state.m3.effortEnsure ?? {}), error: msg(e), at: new Date().toISOString() };
+    }
   };
 
   /* ═══════════ R2：换档工具 `set_reasoning_effort` ═══════════
@@ -1347,6 +1373,75 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
           )
         : undefined;
 
+    /* R2 探针（2026-10-08）：工具是否真的**对模型可见**（不只是注册成功）。
+     * 背景：tools.register 只让工具进调度表；能否被模型看见取决于 wireSchemas→view(scope)。
+     * 实测：global view 含 set_reasoning_effort（count=3），但模型看不到它且无 tool-addition 事件。
+     * 最强证据 = **会话 requestHeader().tools 的名字列表**（模型实际收到的工具表）。 */
+    /* R3 探针（2026-10-08）：压缩摘要 400「模型不支持该思考强度」的**根因定位**。
+     * 现象：preStepOk=0 / actOk=0（两条压缩路径全败），错误码 INVALID_REQUEST，
+     * 正文「workbuddy upstream client (http 400): 模型不支持该思考强度，请调整」。
+     * 假设：compaction-basic 的 summarizeWithLlm **完全不传 reasoningEffort**（源码无该词），
+     * 故摘要请求的档位来自 llm 侧的补全（agent.options / 持久化 header）——
+     * 而 workbuddy 声明可选 off/low/high/max，upstream 却可能拒绝其中某值（声明≠实现）。
+     * 本探针读 agent.options 与 requestHeader，确认摘要请求会拿到哪个档位。 */
+    if (!snap.r3Probe) {
+      try {
+        const agentList = tryOf(() => svc('agents')?.list?.() ?? []).value ?? [];
+        const a = agentList[0] ?? null;
+        const hdr = tryOf(() => a?.session?.requestHeader?.()).value ?? null;
+        snap.r3Probe = {
+          at: new Date().toISOString(),
+          optionsProvider: a?.options?.provider ?? null,
+          optionsModel: a?.options?.model ?? null,
+          /** ⚠️ 关键：agent.options.reasoningEffort —— compaction 的 agentTarget 只取 provider/model，
+           *  但 llm 层可能从 options 补全档位；若它仍是旧值，摘要就会用错档 */
+          optionsReasoningEffort: a?.options?.reasoningEffort ?? null,
+          headerConfig: hdr?.config ?? null,
+          headerAdapterDefaults: hdr?.adapterDefaults ?? null,
+        };
+      } catch (e) {
+        snap.r3Probe = { at: new Date().toISOString(), error: msg(e) };
+      }
+    }
+
+    if (!snap.r2Probe2) {
+      try {
+        const tools = svc('tools');
+        const agentList = tryOf(() => svc('agents')?.list?.() ?? []).value ?? [];
+        const first = agentList[0] ?? null;
+        const namesOf = (v) => {
+          try {
+            if (!v || !v.visible) return null;
+            return [...v.visible.keys()];
+          } catch { return null; }
+        };
+        const globalView = tryOf(() => tools?.view?.(undefined));
+        const gNames = namesOf(globalView.value);
+        /* 模型实际收到的：会话最近一次 request header 的 tools */
+        const hdr = tryOf(() => first?.session?.requestHeader?.());
+        const hdrTools = (() => {
+          try {
+            const t = hdr.value?.header?.tools ?? hdr.value?.tools;
+            return Array.isArray(t) ? t.map((x) => x?.name).filter(Boolean) : null;
+          } catch { return null; }
+        })();
+        snap.r2Probe2 = {
+          at: new Date().toISOString(),
+          globalViewError: globalView.error ?? null,
+          globalCount: gNames ? gNames.length : null,
+          globalHas: gNames ? gNames.includes('set_reasoning_effort') : null,
+          globalSample: gNames ? gNames.slice(0, 20) : null,
+          /** 模型实际看到的工具表（requestHeader.tools）——这是判定「可见与否」的唯一权威 */
+          headerToolCount: hdrTools ? hdrTools.length : null,
+          headerHasMine: hdrTools ? hdrTools.includes('set_reasoning_effort') : null,
+          headerSample: hdrTools ? hdrTools.slice(0, 20) : null,
+          headerKeys: tryOf(() => Object.keys(hdr.value ?? {})).value ?? null,
+        };
+      } catch (e) {
+        snap.r2Probe2 = { at: new Date().toISOString(), error: msg(e) };
+      }
+    }
+
     return snap;
   };
 
@@ -1525,6 +1620,15 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     } catch (e) {
       const code = e?.code ?? e?.name ?? 'error';
       state.m3.preStepErrors[code] = (state.m3.preStepErrors[code] ?? 0) + 1;
+      /* ⚠️ 2026-10-08：此前**只记错误码、错误正文只进 log**——压缩全线失败（preStepOk=0）
+       * 时报告里看不到原因，无法定位。现保留最近一次失败的完整信息。 */
+      state.m3.lastPreStepError = {
+        at: new Date().toISOString(),
+        code,
+        message: String(msg(e)).slice(0, 400),
+        name: e?.name ?? null,
+        stack: String(e?.stack ?? '').split('\n').slice(0, 3).join(' | ').slice(0, 400),
+      };
       log('warn', `M3.5 pre-step 先压失败（吞掉，本轮照常继续）：${msg(e)}`);
       schedule('m3.5-prestep', 500);
     }
@@ -1585,7 +1689,21 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       try {
         const { agent, turn, step, signal } = payload ?? {};
         if (signal?.aborted) return decision;
-        if (step !== 1) return decision; // 每轮只注一次（轮首快照）
+        /* ⚠️ R2 修复（2026-10-08，实测真 bug）：**懒安装必须早于 `step !== 1` 早退**。
+         * 原实现把 ensureEffortHooks/registerEffortTool 放在注入分支内部 ⇒
+         * 一轮里只有 step 1 会执行到；而本轮若首步就有工具调用（模型调了别的工具），
+         * 后续 pre-step 的 step 恒 > 1 ⇒ 钩子永远装不上 ⇒ **工具接受成功却永不变档**
+         * （实测：effortToolCalls=1 而 effortSwitches=0、effortHooks 从未赋值）。
+         * 注意：`registerEffortTool` 的**加载期**路径不依赖此处（故 effortTool.ok 曾为 true），
+         * 但「会话中途打开开关」与「agent 作用域钩子」都只能在这里装。 */
+        try {
+          mergeConfig();
+          if (M3.effortEnabled === true) {
+            ensureEffortHooks(); // R1：懒安装 agent/request 钩子（每次 pre-step 都补装，幂等）
+            registerEffortTool(); // R2：确保工具已注册（幂等；覆盖「会话中途打开开关」）
+          }
+        } catch { /* 懒安装失败不影响注入与主流程 */ }
+        if (step !== 1) return decision; // 每轮只注一次（轮首快照）※注入本身仍受此门控
         if (!createUserMessage || !agent?.session) {
           const key = !createUserMessage ? 'noFactory' : 'noSession';
           state.m2.skips[key] = (state.m2.skips[key] ?? 0) + 1;
@@ -1605,15 +1723,11 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         const sid = String(pick(agent.session.id, agent.sessionId, 'unknown'));
         noteSessionId(sid); // C-lineage
         /* R1 智能思考：**独立门控**（effortEnabled），与压缩的 markerMinRatio 完全解耦——
-         * 用户明确要求「全程允许」：低占用也必须能注入/换档（压缩的卡在低占用时是不注入的）。 */
+         * 用户明确要求「全程允许」：低占用也必须能注入/换档（压缩的卡在低占用时是不注入的）。
+         * 注：钩子与工具的懒安装已上移到 `step !== 1` 早退**之前**（见上方 R2 修复注释）。 */
         let eff = null;
         try {
-          mergeConfig();
-          if (M3.effortEnabled === true) {
-            ensureEffortHooks(); // R1：懒安装 agent/request 钩子（新会话自动覆盖）
-            registerEffortTool(); // R2：确保工具已注册（用户可能在会话中途才打开开关）
-            eff = await readEffort(agent);
-          }
+          if (M3.effortEnabled === true) eff = await readEffort(agent);
         } catch { /* 读档失败 ⇒ 不注入（绝不因新功能影响主流程） */ }
         const effSuffix = renderEffortSuffix(eff);
         const baseText = effSuffix ? `${r.text} ｜ ${effSuffix}` : r.text;
@@ -1756,6 +1870,16 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         .catch((e) => {
           const code = e?.code ?? (e?.name === 'ManualCompactionError' ? 'ManualCompactionError' : 'error');
           state.m3.actErrors[code] = (state.m3.actErrors[code] ?? 0) + 1;
+          /* ⚠️ 2026-10-08：同 pre-step——错误正文此前只进 log，报告只见错误码
+           * （实测 actErrors={summary:2} 而 actOk=0，无从定位）。现保留最近一次失败详情。 */
+          state.m3.lastActError = {
+            at: new Date().toISOString(),
+            code,
+            reason,
+            message: String(msg(e)).slice(0, 400),
+            name: e?.name ?? null,
+            stack: String(e?.stack ?? '').split('\n').slice(0, 3).join(' | ').slice(0, 400),
+          };
           log('warn', `M3 idle 扫除失败（${code}）：${msg(e)}`);
           /* A2（审查）：marker 压缩失败不能吞掉武装——原始 TTL 窗口内重武装（armedAt 保原时刻，重试自然封顶），
            * 下次 idle 自动重试；hudArmed 保持亮灯，任务徽章不熄，用户看得到还有事没做完。 */

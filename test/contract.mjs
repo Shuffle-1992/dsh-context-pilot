@@ -285,11 +285,26 @@ const effInject = (() => {
 })();
 ok('解析出 effort 注入段', effInject.length > 0, '未找到 effort 注入段');
 ok('智能思考注入用独立门控 effortEnabled（不共用 markerMinRatio）',
-  /if \(M3\.effortEnabled === true\) \{[\s\S]{0,200}?eff = await readEffort\(agent\)/.test(effInject),
+  /if \(M3\.effortEnabled === true\) eff = await readEffort\(agent\)/.test(effInject),
   'effort 注入未走 effortEnabled 独立门控 ⇒ 低占用时被压缩门控挡掉（用户要求全程允许）');
-ok('注入段同时确保钩子与工具就绪（懒安装）',
-  /ensureEffortHooks\(\);/.test(effInject) && /registerEffortTool\(\);/.test(effInject),
-  '未懒安装 ⇒ 会话中途打开开关后钩子/工具不生效');
+/* ⚠️ R2 真 bug 修复（2026-10-08 实测）：懒安装必须**早于 `step !== 1` 早退**。
+ * 原实现塞在注入分支内 ⇒ 一轮里只有 step 1 能执行到；若首步就有工具调用，
+ * 后续 pre-step 的 step 恒 >1 ⇒ 钩子永远装不上 ⇒ **工具接受成功却永不变档**
+ * （实测：effortToolCalls=1、effortSwitches=0、effortHooks 从未赋值）。 */
+ok('懒安装早于 step!==1 早退（防「工具接受但永不变档」）',
+  (() => {
+    const s = host.indexOf('ensureEffortHooks(); // R1：懒安装');
+    const g = host.indexOf('if (step !== 1) return decision;');
+    return s > 0 && g > 0 && s < g;
+  })(),
+  '懒安装仍在 step!==1 早退之后 ⇒ 首步即调工具时钩子永不安装');
+ok('registerEffortTool 懒注册同样早于早退',
+  (() => {
+    const s = host.indexOf('registerEffortTool(); // R2：确保工具已注册');
+    const g = host.indexOf('if (step !== 1) return decision;');
+    return s > 0 && g > 0 && s < g;
+  })(),
+  '工具懒注册在早退之后 ⇒ 会话中途打开开关时不生效');
 /* 剥注释后再查：注释里说明「与 markerMinRatio 解耦」是正常文字，代码里引用才是耦合。 */
 const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 ok('effort 注入段不引用 markerMinRatio（剥注释后）', !/markerMinRatio/.test(stripComments(effInject)),
@@ -355,8 +370,17 @@ ok('未使用插件级 global agent/request（payload 无 agent 会失效）',
 ok('钩子按 agent 去重（WeakSet，防重复安装）',
   /const effortHookInstalled = new WeakSet\(\)/.test(host) && /effortHookInstalled\.has\(agent\)/.test(host),
   '未去重 ⇒ 每次 pre-step 重复注册，waterfall 回调叠加');
-ok('钩子懒安装（新会话自动覆盖）', /const ensureEffortHooks = \(\) => \{/.test(host) && /for \(const a of list\) installEffortRequestHook\(a\)/.test(host),
+ok('钩子懒安装（新会话自动覆盖）', /const ensureEffortHooks = \(\) => \{/.test(host) && /results\.push\(installEffortRequestHook\(a\)\)/.test(host),
   '无懒安装 ⇒ 新会话拿不到钩子');
+/* R2 取证要求（2026-10-08）：ensureEffortHooks 曾**全静默**——工具链路已通但 apply 从不执行时
+ * 无法定位断点（实测踩到：effortToolCalls=1 而 effortSwitches=0）。
+ * 现必须留痕：调用次数 / enabled / agent 数 / 每个 agent 的安装结果 / 异常。 */
+ok('懒安装有取证留痕（防静默失败）',
+  /state\.m3\.effortEnsure/.test(host) && /lastResults/.test(host) && /lastAgents/.test(host),
+  '懒安装无留痕 ⇒ 工具接受但不变档时无法定位');
+ok('钩子安装失败有留痕（agent.ctx 不可用时）',
+  /state\.m3\.effortHookError = \{/.test(host),
+  '安装失败静默 return false ⇒ 无法区分「没调用」与「调用了但失败」');
 ok('pre-step 会触发懒安装', /if \(M3\.effortEnabled === true\) \{[\s\S]{0,120}?ensureEffortHooks\(\)/.test(host),
   'pre-step 未调用 ensureEffortHooks ⇒ 钩子永不安装');
 /* 实测风险（2026-10-07 E2E 排查中发现）：sid 若只在**安装期**捕获一次，而本项目实测
