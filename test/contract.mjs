@@ -184,17 +184,20 @@ ok('智能思考开关写后有回读校验', /set\("effortEnabled"[\s\S]{0,200}
 // 小号开关：独立类，不改 .dcp-switch 本体（配置面板仍在用大号）
 const smCss = /\.dcp-switch-sm\{([^}]*)\}/.exec(client)?.[1] ?? '';
 ok('小号开关类 .dcp-switch-sm 存在', smCss.length > 0, '缺小号变体 ⇒ 无法满足「开关缩小」');
-ok('小号轨道尺寸 ≤ 28×16', /width:28px/.test(smCss) && /height:16px/.test(smCss), `实际：${smCss}`);
-ok('小号滑块 12×12 且位移 12px（比例与官方一致）',
-  /\.dcp-switch-sm \.dcp-slider\{width:12px;height:12px\}/.test(client) &&
-  /\.dcp-switch-sm input:checked \+ \.dcp-slider\{transform:translateX\(12px\)\}/.test(client),
-  '小号滑块尺寸/位移不匹配 ⇒ 视觉错位');
+// 用户二次反馈「高度还是有点高」⇒ 24×14（第一版 28×16 被否）
+ok('小号轨道尺寸 24×14（用户二次要求再小）', /width:24px/.test(smCss) && /height:14px/.test(smCss), `实际：${smCss}`);
+ok('小号滑块 10×10 且位移 10px（比例与官方一致：轨道高-4）',
+  /\.dcp-switch-sm \.dcp-slider\{width:10px;height:10px\}/.test(client) &&
+  /\.dcp-switch-sm input:checked \+ \.dcp-slider\{transform:translateX\(10px\)\}/.test(client),
+  '小号滑块尺寸/位移不匹配 ⇒ 视觉错位（滑块须 = 轨道高 - padding×2）');
 ok('大号 .dcp-switch 本体未被改小（面板仍用大号）',
   /\.dcp-switch\{position:relative;display:inline-block;width:36px;height:20px/.test(client),
   '.dcp-switch 本体被改 ⇒ 配置面板开关尺寸受影响');
 ok('「智能压缩」标签去掉 flex:1（开关才能挨着它）', /label\.textContent = "智能压缩"/.test(client) &&
   /label\.style\.cssText = "opacity:\.85;white-space:nowrap;flex:none;"/.test(client),
   'label 仍有 flex:1 ⇒ 开关被顶到行最右，与「挨着」矛盾');
+ok('智能思考组右对齐（margin-left:auto）', /wrapE\.style\.cssText = "[^"]*margin-left:auto/.test(client),
+  '智能思考组未右对齐 ⇒ 用户要求「智能思考+开关右对齐」未满足');
 ok('智能思考标签文本存在', /labE\.textContent = "智能思考"/.test(client));
 
 /* ═══════════ 6.8 R1 智能思考字段三端对账 ═══════════ */

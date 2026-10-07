@@ -608,6 +608,48 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     return ok ? v : DEFAULT_ENGINE_THRESHOLD;
   };
 
+  /* ---- R1（2026-10-07）：思考强度（reasoning effort）读取 —— 供注入与输入框 chip 使用 ----
+   * 读档唯一可靠路径 = `agent.session.requestHeader().config.reasoningEffort`（**已生效值**）。
+   * 负面结论（实测）：`sessionController.selectionFor(agent)` 是内部类方法，命令门面上不存在
+   * （hasSelectionFor=false）⇒ 不可用。详见 docs/r1-reasoning-effort-investigation.md。
+   * 可选档 = `llm.resolveModelInfo(provider, model).reasoning.efforts`（**动态取，绝不硬编码**：
+   * 同一 model id 在不同 provider 档位不同，实测 trae/deepseek-v4.1-flash=low/high/xhigh，
+   * workbuddy 同名模型=off/low/high/max）。
+   * 全函数吞异常：拿不到就返回 { ok:false }，调用方跳过（绝不因读档失败影响主流程）。 */
+  const readEffort = (agent) => {
+    try {
+      const hdr = agent?.session?.requestHeader?.();
+      const cfg = hdr?.config ?? null;
+      if (!cfg?.provider || !cfg?.model) return { ok: false, error: 'no-route' };
+      const isAdapterDefault = hdr?.adapterDefaults?.reasoningEffort === true;
+      /* 当前档：adapter 默认时 reasoningEffort 可能仍存在，但语义是「不是会话选择」——标注出来 */
+      const current = typeof cfg.reasoningEffort === 'string' && cfg.reasoningEffort ? cfg.reasoningEffort : null;
+      /* 可选档：异步取，拿不到就只给当前值（UI 仍可显示，只是没有可选列表） */
+      const llm = svc('llm');
+      const p = tryOf(() => llm?.resolveModelInfo?.(cfg.provider, cfg.model));
+      const base = {
+        ok: true,
+        provider: cfg.provider,
+        model: cfg.model,
+        current,
+        adapterDefault: isAdapterDefault,
+        efforts: null,
+        defaultEffort: null,
+      };
+      if (p.error || !p.value) return base;
+      return Promise.resolve(p.value).then(
+        (mi) => ({
+          ...base,
+          efforts: mi?.reasoning ? (mi.reasoning.efforts ?? []).map((e) => e.id) : null,
+          defaultEffort: mi?.reasoning?.defaultEffort ?? null,
+        }),
+        () => base,
+      );
+    } catch (e) {
+      return { ok: false, error: msg(e) };
+    }
+  };
+
   /** 提取一条消息的可见文本（复杂度启发 + 关键词检测共用）。 */
   const messageText = (message) => {
     const content = message?.content;
@@ -1389,7 +1431,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         /** sid 可选：传会话 id 则返回该会话（含血统链）的最近压缩；空=全局。
          *  **同时**返回全局最近记录（actsGlobal/hudLastActGlobal）作兜底——实测多会话交错/ id 摆动时
          *  按 id 过滤会空（用户「记录经常丢失」的最终根因），client 侧按「本会话优先、全局兜底」显示并标注。 */
-        onGetHud: (sid) => {
+        onGetHud: async (sid) => {
           const list = Array.isArray(state.m5.acts) ? state.m5.acts : [];
           /* C-lineage：按会话血统链匹配——当前 sid + 沿 lineage 回溯的全部历史前身 id。
            * 仅按当前 id 过滤会在压缩轮转后误判「无记录」。 */
@@ -1404,6 +1446,9 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
            * 弹窗恒「本会话暂无压缩记录」。此前追的会话 id/血统链理论都在修一条走不到的路径。 */
           const agents = svc('agents')?.list?.() ?? [];
           const sess = svc('sessions')?.list?.() ?? [];
+          /* R1：思考强度的目标 Agent（有 sid 用该会话，否则首个）+ 开关活读（关闭则不返回，UI 不显示） */
+          const targetAgent = (sid && agents.find((x) => String(pick(x?.session?.id, x?.sessionId, x?.id)) === sid)) || agents[0] || null;
+          const effOn = (() => { try { mergeConfig(); return M3.effortEnabled === true; } catch { return false; } })();
           /* 占用读数：让弹窗能显示「距智能压缩线还差多少」（client 侧可选消费，缺省不影响）。
            * 取目标会话的实时 measure —— sid 传了就测该会话，否则测最热的那个。 */
           const occ = (() => {
@@ -1443,9 +1488,11 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
              * （时间戳与 hudPollReq 逐次吻合），而 pre-step/快照（传 Agent）全部
              * `via:agentPresets.serviceFor, ratio:0.8, fallback:false`。当前引擎阈值恰为 0.8
              * 故无可见差异，但引擎阈值被改时 client 会拿到错误的 cap。 */
-            criticalCap: engineThreshold(
-              (sid && agents.find((x) => String(pick(x?.session?.id, x?.sessionId, x?.id)) === sid)) || agents[0] || null,
-            ),
+            criticalCap: engineThreshold(targetAgent),
+            /* R1（2026-10-07）：思考强度快照——供输入框 chip 显示「智能思考档位:<当前档>」。
+             * 只在 effortEnabled 开启时返回（关闭 = 不介入，UI 也不显示）。
+             * 异步解析可选档 ⇒ 整个 onGetHud 需为 async（见下方 return Promise.resolve）。 */
+            effort: effOn ? await readEffort(targetAgent) : null,
             at: new Date().toISOString(),
           };
           /* getHud 取证（2026-10-07）：记录不显示时从报告直接看「client 传了什么 sid、host 回了什么」——

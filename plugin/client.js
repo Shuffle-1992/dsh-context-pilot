@@ -142,12 +142,12 @@ window.__ModuleLoader__.load({
 			".dcp-switch .dcp-slider{display:block;width:16px;height:16px;border-radius:50%;corner-shape:round;background:var(--dsw-alias-switch-thumb,rgba(128,128,128,.85));transition:transform 120ms ease;pointer-events:none}",
 			".dcp-switch input:checked + .dcp-slider{transform:translateX(16px);background:var(--dsw-alias-label-primary-foreground,#fff)}",
 			".dcp-switch input:focus-visible + .dcp-slider{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary,#4c7dff));outline-offset:2px}",
-			/* R1（2026-10-07）：弹窗开关**小号**变体——用户要求「高度与『启用』字体一致」。
-			 * 12px 字号 ⇒ 轨道 28×16、滑块 12×12、位移 12px（比例与官方 36×20/16/16 一致）。
-			 * 只覆盖尺寸，配色/过渡/corner-shape 全部继承 .dcp-switch（含 DSH 全局 superellipse 的 opt-out）。 */
-			".dcp-switch-sm{width:28px;height:16px;padding:2px}",
-			".dcp-switch-sm .dcp-slider{width:12px;height:12px}",
-			".dcp-switch-sm input:checked + .dcp-slider{transform:translateX(12px)}",
+			/* R1（2026-10-07）：弹窗开关**小号**变体——用户要求「高度与『启用』字体一致」，且实测后要求再小。
+			 * 第二版（用户反馈「高度还是有点高」）：轨道 28×16 → **24×14**、滑块 12→10、位移 10px。
+			 * 比例与官方 36×20/16/16 一致（padding 2、滑块 = 轨道高 - 4）。 */
+			".dcp-switch-sm{width:24px;height:14px;padding:2px}",
+			".dcp-switch-sm .dcp-slider{width:10px;height:10px}",
+			".dcp-switch-sm input:checked + .dcp-slider{transform:translateX(10px)}",
 			".dcp-label{width:170px;color:var(--dsw-alias-label-secondary,currentColor);flex:none}",
 			".dcp-input{border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.45));border-radius:6px;background:transparent;color:var(--dsw-alias-label-primary,currentColor);padding:3px 8px;font-size:12px;min-width:110px}",
 			".dcp-hint{color:var(--dsw-alias-label-secondary,currentColor);opacity:.75;font-size:11px}",
@@ -387,7 +387,8 @@ window.__ModuleLoader__.load({
 					message !== void 0 ? el("span", { className: message.kind === "ok" ? "dcp-msg-ok" : "dcp-msg-error", role: "status" }, message.text) : null,
 				),
 				el("div", { className: "dcp-hint" },
-					"保存写入插件配置并触发重载；标记通道：模型回复尾行写标记 → 本轮结束自动压缩（详见政策卡）。"),
+					"保存写入插件配置并触发重载。压缩标记通道：模型回复尾行写标记 → 本轮结束自动压缩（详见政策卡）。"
+					+ "智能思考：开启后向 Agent 暴露当前思考档位（可选档由模型动态决定）并允许其写 [cp:effort <档>] 自主换档，下一步生效、任务不中断；关闭则提示词不注入、标记也不生效。"),
 				el(PriceCalculator, { writable, saving, onApply: applyRecommendation }),
 			);
 		}
@@ -490,6 +491,70 @@ window.__ModuleLoader__.load({
 				return null;
 			}
 		}
+		/**
+		 * R1：输入框「智能思考档位:<当前档>」chip（conversation.input.right slot）。
+		 * 显示条件 = 智能思考开关开启（host getHud 仅在开启时返回 effort 字段）。
+		 * 数据来源：复用 NS.pullHud 之外的**独立** 5s 轮询（chip 生命周期独立于弹窗行，
+		 * 弹窗关闭时弹窗行的轮询会自停，故 chip 不能搭它的车）。
+		 * 样式：读邻居（模型选择器按钮）computedStyle 复制圆角/高度/字号——router-laya 同款做法
+		 * （.data/ref/router-laya-client.js L235 copyNeighbourShape）；拿不到就用兜底值。
+		 * 全函数吞异常：任何失败都不渲染（绝不因 chip 打崩输入框）。
+		 */
+		function EffortChip() {
+			const [effort, setEffort] = react.useState(null);
+			const ref = react.useRef(null);
+			react.useEffect(() => {
+				let alive = true;
+				let timer = null;
+				const pull = async () => {
+					try {
+						if (!hudRemoteSvc || typeof hudRemoteSvc.getHud !== "function") return;
+						const raw = await hudRemoteSvc.getHud(NS.sid || "");
+						const env = raw && typeof raw === "object" && "value" in raw ? (raw.ok ? raw.value : null) : raw;
+						if (!alive) return;
+						if (env && env.ok && env.effort && env.effort.ok) setEffort(env.effort);
+						else setEffort(null); // 开关关闭 / 无数据 ⇒ 不显示
+					} catch { /* 吞：轮询失败保持现状 */ }
+				};
+				pull();
+				timer = setInterval(() => { pull().catch(() => {}); }, 5000);
+				return () => { alive = false; if (timer != null) clearInterval(timer); };
+			}, []);
+			/* 邻居形状复制（一次性，挂在 ref 上）：圆角/高度/字号跟随模型选择器 */
+			react.useEffect(() => {
+				try {
+					const node = ref.current;
+					if (!node) return;
+					const neighbour = document.querySelector('[class*="triggerEffort"]') || document.querySelector('[class*="modelTrigger"]');
+					const trigger = neighbour ? (neighbour.closest("button") || neighbour.parentElement) : null;
+					if (!trigger) return;
+					const cs = getComputedStyle(trigger);
+					if (cs.borderRadius && cs.borderRadius !== "0px") node.style.borderRadius = cs.borderRadius;
+					if (cs.fontSize) node.style.fontSize = cs.fontSize;
+				} catch { /* 忽略 */ }
+			}, [effort]);
+			if (!effort || !effort.ok || !effort.current) return null;
+			const label = `智能思考档位:${effort.current}`;
+			const tip = [
+				`模型：${effort.provider}/${effort.model}`,
+				`当前档位：${effort.current}${effort.adapterDefault ? "（adapter 默认）" : ""}`,
+				effort.efforts ? `可选档位：${effort.efforts.join(" / ")}` : "可选档位：未取到",
+				"Agent 可写 [cp:effort <档>] 自主换档（下一步生效）",
+			].join("\n");
+			return el("div", {
+				ref,
+				className: "dcp-effort-chip",
+				title: tip,
+				style: {
+					display: "inline-flex", alignItems: "center", flex: "none",
+					marginRight: "8px", padding: "0 8px", height: "24px",
+					borderRadius: "6px", fontSize: "12px", lineHeight: 1,
+					background: "var(--dsw-alias-bg-layer-2, rgba(128,128,128,.14))",
+					color: "var(--dsw-alias-label-secondary, rgba(200,200,200,.9))",
+					whiteSpace: "nowrap", userSelect: "none",
+				},
+			}, label);
+		}
 		//#endregion
 		//#region apply
 		const name = "dsh-context-pilot-client";
@@ -541,6 +606,24 @@ window.__ModuleLoader__.load({
 					CardBoundary,
 				));
 				console.info(`${LOG} 配置卡片已注册（plugins.bundle.config）`);
+				/* ═══ R1（2026-10-07）：输入框「智能思考档位」chip ═══
+				 * 位置（源码实证）：`conversation.input.right` 是 session 作用域 list slot，
+				 * 渲染点 dsh-client-ui-conversation/lib/client.js L17532 —— **紧邻**
+				 * renderSlot("conversation.input.model")，即模型选择器左侧（用户截图指定位置）。
+				 * 注册方式照 HapyRain/dsh-router-laya（.data/ref/router-laya-client.js L423）。
+				 * 显示条件：智能思考开关开启（host getHud 只在开启时返回 effort）。
+				 * 数据源：复用现有 getHud 5s 轮询（无需新通道）。 */
+				try {
+					if (ctx.slots && typeof ctx.slots.inject === "function") {
+						ctx.slots.inject("conversation.input.right", () => ctx.slots.register(
+							{ name: "conversation.input.right", id: "context-pilot-effort", order: 5 },
+							EffortChip,
+						));
+						console.info(`${LOG} 输入框档位 chip 已注册（conversation.input.right）`);
+					}
+				} catch (e) {
+					console.warn(`${LOG} 输入框 chip 注册失败（不影响其他功能）:`, e && e.message);
+				}
 				/* M5 HUD：client→host 轮询面挂载（configEditor 推送通道已判死，见 §6 M5）。 */
 				try {
 					const mount = ctx?.remote && ctx.remote.$mount;
@@ -704,8 +787,10 @@ window.__ModuleLoader__.load({
 					/* ② 智能思考开关（R1 新增）：独立配置字段 effortEnabled，与总开关解耦。
 					 * 语义（用户定义）：开 = 注入思考强度提示词 + 允许 Agent 写 [cp:effort] 改档；关 = 两者都不做。 */
 					const wrapE = document.createElement("label");
-					/* margin 6px + row gap 6px = 与压缩开关间距 12px（两组视觉分离，但整体仍紧凑） */
-					wrapE.style.cssText = "display:inline-flex;align-items:center;gap:6px;cursor:pointer;flex:none;margin-left:6px;";
+					/* 右对齐（用户要求「智能思考+开关右对齐」）：margin-left:auto 吃掉中间全部剩余空间，
+					 * 把本组推到行最右缘 —— 与上方数值列（如 ~282K）右对齐，也与弹窗右边界一致。
+					 * 左组（智能压缩 + 开关）保持紧邻，两组分居行两端。 */
+					wrapE.style.cssText = "display:inline-flex;align-items:center;gap:6px;cursor:pointer;flex:none;margin-left:auto;";
 					const labE = document.createElement("span");
 					labE.textContent = "智能思考";
 					labE.style.cssText = "opacity:.85;white-space:nowrap;font-size:12px;";

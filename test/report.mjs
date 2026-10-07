@@ -82,8 +82,11 @@ console.log('\n== 3.5 getHud 作用域契约（2026-10-07 真根因）==');
 // 实测事故：agents 声明在 occ IIFE 内部，criticalCap 却在 IIFE 外引用它 ⇒ 每次 getHud 抛
 // ReferenceError("agents is not defined") ⇒ client 永远拿不到数据、弹窗恒「暂无压缩记录」。
 const getHudBody = (() => {
-  const s = host.indexOf('onGetHud: (sid) =>');
-  if (s < 0) return '';
+  // R1（2026-10-07）：签名由 `onGetHud: (sid) =>` 变为 `onGetHud: async (sid) =>`
+  // （effort 需要 await resolveModelInfo）——两种形态都接受，避免为签名变更误报。
+  const m = /onGetHud:\s*(?:async\s*)?\(sid\)\s*=>/.exec(host);
+  if (!m) return '';
+  const s = m.index;
   const e = host.indexOf('state.m5.hudPollReq', s);
   return e > s ? host.slice(s, e) : host.slice(s, s + 4000);
 })();
@@ -95,20 +98,20 @@ const occStart = getHudBody.indexOf('const occ = (()');
 const occBody = occStart >= 0 ? getHudBody.slice(occStart, getHudBody.indexOf('})();', occStart)) : '';
 ok('occ IIFE 内不再重复声明 agents', !/const agents\s*=/.test(occBody),
   'occ IIFE 内仍声明 agents ⇒ 外层 criticalCap 引用会 ReferenceError');
-ok('criticalCap 引用的 agents 在作用域内',
-  /criticalCap:[\s\S]{0,240}agents\.find/.test(getHudBody) && /const agents = svc\('agents'\)/.test(getHudBody),
-  'criticalCap 引用 agents 但作用域内无声明');
+ok('criticalCap 的 Agent 在作用域内解析（targetAgent 由 agents 选出）',
+  /const targetAgent = [\s\S]{0,200}agents\.find/.test(getHudBody) && /criticalCap:\s*engineThreshold\(targetAgent\)/.test(getHudBody),
+  'criticalCap 未用作用域内解析出的 Agent ⇒ 可能又传 Session/未定义变量');
 ok('getHud 有常驻取证字段 hudPollReq', /state\.m5\.hudPollReq = \{/.test(host),
   '缺 hudPollReq ⇒ 下次同类问题无法从报告判断 host 是否被调用');
 /* 实测缺陷（2026-10-07）：getHud 给 engineThreshold 传了 `?.session`（Session 本体），
  * 而 resolveCompactionFor 要的是 Agent（走 agent.ctx / agentPresets.serviceFor(agent,...)）
  * ⇒ 每次 5s 轮询都写 via:unresolved/fallback:true，criticalCap 恒为兜底 0.8。
  * 证据：getHud 的 engineCapProbe 时间戳与 hudPollReq 逐次吻合，而 pre-step 全部解析成功。 */
-const capArg = /criticalCap:\s*engineThreshold\(([\s\S]{0,260}?)\),\n/.exec(getHudBody)?.[1] ?? '';
+const capArg = /criticalCap:\s*engineThreshold\(([^)]*)\)/.exec(getHudBody)?.[1] ?? '';
 ok('解析出 criticalCap 的 engineThreshold 实参', capArg.length > 0, '未匹配到 criticalCap 实参');
 ok('criticalCap 传 Agent 本体（不得传 .session）',
-  capArg.length > 0 && !/\.session\s*\)/.test(capArg) && !/\)\?\.session/.test(capArg),
-  'criticalCap 传了 Session 而非 Agent ⇒ resolveCompactionFor 返回 unresolved，cap 恒为兜底值');
+  capArg.length > 0 && !/\.session/.test(capArg),
+  `criticalCap 传了 Session 而非 Agent（实参：${capArg}）⇒ resolveCompactionFor 返回 unresolved，cap 恒为兜底值`);
 
 /* ═══════════ ④ 真实报告结构自洽（有报告才跑）═══════════ */
 console.log('\n== 4. 真实报告结构自洽 ==');

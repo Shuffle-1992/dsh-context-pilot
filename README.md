@@ -1,7 +1,8 @@
-# dsh-context-pilot — DSH 上下文智能压缩插件
+# dsh-context-pilot — DSH 上下文智能压缩 + 智能思考插件
 
-DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`（面板名「上下文智能压缩」，曾用名「上下文领航」）：**让长会话的上下文压力可见、可控，
-并把「何时压缩」的决策权交给模型**——压缩后自动拉起续跑任务，用户零重发。
+DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`（面板名「上下文智能压缩」，曾用名「上下文领航」）：
+**让长会话的上下文压力可见、可控，并把「何时压缩」的决策权交给模型**——压缩后自动拉起续跑任务，用户零重发。
+另含可选的**智能思考**：把当前模型的思考强度档位告知 Agent，由它按任务难度自主换档。
 
 > **交接说明**：本文是入口，读完 §1–§3 即可上手；深入内容在 [`docs/`](docs/)。
 > 创建 2026-10-05 · 最后更新 2026-10-07
@@ -15,14 +16,22 @@ DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`（面板名�
           → 占用达「智能压缩线」时附决策卡，模型自行判断是否压缩
           → 模型写标记 → 回合结束自动压缩 → 自动拉起新一轮继续原任务
           → 占用达「强制压缩线」时无条件压缩（兜底）
+
+可选（智能思考开关）：
+          读当前模型的思考强度档位 → 注入给 Agent → Agent 按任务难度自行换档
+          （写 [cp:effort <档>]，下一步生效，任务不中断）
 ```
 
 **要解决的问题**：长会话上下文压力不可见；原生自动压缩（80%）只看占用、不看任务——
 重任务需要全上下文，轻任务其实可以先压缩腾空间。**这个判断只有模型能做**，插件的职责是
 把读数、选项、执行三件事做好。
 
-**产出**：弹窗 HUD（最近压缩记录 + 阈值速览）、配置面板（两线阈值 + 成本计算器）、
-报告的完整取证字段。
+**智能思考解决的问题**：同一个模型的不同思考档位（low/high/max…）成本与质量差异显著，
+但用户很难预判每个任务该用哪档；而模型自己看得到任务复杂度。插件把「当前档位 + 可选档」
+告知模型，**由它自己决定升档/降档**——简单任务省钱、难题给足推理预算。
+
+**产出**：弹窗 HUD（最近压缩记录 + 阈值速览 + 两个开关）、输入框档位 chip、
+配置面板（两线阈值 + 成本计算器）、报告的完整取证字段。
 
 ---
 
@@ -52,6 +61,34 @@ DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`（面板名�
 3. 压缩成功后自动投递恢复提示 → 模型以干净上下文继续原任务
 
 用户全程零操作。模型也可在回复里写「待执行：<任务>」显式记录要续跑的任务。
+
+### 2.2b 智能思考（可选，默认关闭）
+
+**开关语义**（一个开关管两件事）：开 = 注入思考强度信息 + 允许 Agent 换档；关 = 两者都不做。
+
+| 项 | 内容 |
+| --- | --- |
+| **注入** | 一次性教学（教用法）+ 每轮用量行后缀「｜ 思考强度 xhigh」 |
+| **标记** | `[cp:effort high]` —— Agent 在回复最后一行写，**下一步生效** |
+| **执行 seam** | `agent/request` waterfall（改请求配置，**无全局副作用**） |
+| **不中断** | 只改请求头一个字段：会话历史不动、不插消息、工具链不断 |
+| **显示** | 输入框模型选择器左侧 chip「智能思考档位:xhigh」，5s 刷新 |
+
+**为什么用 `agent/request` 而不是 `sessionController.selectModel`**：
+后者内部还会 `agentDefaultModel.saveSelection()`——**写全局默认模型**（实测会重写 profile）。
+Agent 自改档不应改掉新会话的默认档。
+
+**档位必须动态取**：同一个 model id 在不同 provider 档位不同
+（实测 `trae/deepseek-v4.1-flash` = `low/high/xhigh`，workbuddy 同名模型 = `off/low/high/max`），
+**绝不硬编码档位表**。应用前必须校验合法性，否则 `dsh-llm` 会抛
+`UNSUPPORTED_REASONING_EFFORT` **中断该次请求**。
+
+**成本**：一次性教学 ≈80 token + 每轮后缀 ≈7 token（20 轮共 ≈220 token ≈ $0.00003）。
+⚠️ 换档可能使前缀缓存失效（`call-config.js` 注明 effort 属 cache-affecting 状态）——
+这是换档的真实代价，建议一次任务 1–2 次为宜（已写进注入的教学文本）。
+
+> 调查与设计全文：[`docs/r1-reasoning-effort-investigation.md`](docs/r1-reasoning-effort-investigation.md)
+> ｜ [`docs/r1-effort-design.md`](docs/r1-effort-design.md)
 
 **恢复投递走三通道，当前实际生效顺序**（2026-10-07 实证）：
 
@@ -88,10 +125,15 @@ DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`（面板名�
 - **M5.5** 任务挂起-自动恢复：多通道投递（A sessionController → B remote → C direct-followup），
   **三测复现通过**，实际走通道 C
 - **M5.7** 压缩历史持久化（`hud-acts.json`，cap 50）：跨重启/跨 toggle 存续
-- **配置面**：6 个字段，面板按秒/比率显示（总开关为开关滑块）；成本阈值计算器（8 个模型预设，一键算推荐值并写入）
+- **R1 智能思考**（2026-10-07，**调查完成 + UI 落地**）：读档/枚举/写档三腿全部运行时实证；
+  弹窗开关 + 输入框档位 chip 已实现；`[cp:effort]` 标记通道**待实施**（见下）
+- **配置面**：7 个字段，面板按秒/比率显示（总开关为开关滑块）；成本阈值计算器（8 个模型预设，一键算推荐值并写入）
 - **只读审查落地**：外部审查 23 条，批次 1/2/3 全部实施（含心跳泄漏、`ctx.effect` 语义误用等真 bug）
 
-**未实施（明确挂起）**：D1 模块切分（动骨架，**已有测试护栏 + 任务书，可以做了**）、
+**未实施（明确挂起）**：**R1 剩余三步**（`[cp:effort]` 标记通道 + `agent/request` 应用 + 注入文本；
+见 [`docs/r1-effort-design.md`](docs/r1-effort-design.md) §7）、
+**`briefedBySid` 永不失效**（压缩后一次性说明不再重讲——真 bug，实施 R1 时一并修）、
+D1 模块切分（动骨架，**已有测试护栏 + 任务书，可以做了**）、
 C2 无界 Map 上限（当前规模无实际风险）、A6 恢复计数清零、
 **A5 pre-step 强制压缩真机 E2E**（唯一「已实现但成功率未验」的路径——需占用冲到强制压缩线
 才有条件测，当前设为 80%，等接近了再做）、A2/A6 的真机 E2E。
@@ -117,12 +159,12 @@ npm run test:report   # 只跑报告形状
 
 | 套件 | 断言数 | 查什么 | 能抓到什么 |
 | --- | --- | --- | --- |
-| `contract.mjs` | 55 | face 方法表 ↔ client 描述符 ↔ TYPERT 三端对账；Config 字段在 FIELDS/schema/M3_DEFAULTS 三处齐全；退役字段未复活；`mergeConfig` 读取集 ⊆ schema | **调用静默失败**（P29：三端漂移不报错、只是拿不到数据） |
-| `static.mjs` | 29 | 真实 `node --check`；client 自足（无外部 import，require 仅 react）；entry 薄壳（<40 行、有静态 Config、动态 import 带 `?ts=`）；模块依赖方向无环；热换纪律 | 语法错误、破坏热换、client 引入依赖、循环依赖 |
-| `report.mjs` | 43 | 产出侧字段契约；`bfOnce` 回填链依赖；C3② 关键事件必须走 full 档；真实报告结构自洽；`hud-acts.json` 去重；dump 工具可跑 | 报告形状无声破坏（本项目踩过 2 次：顶层读 m3/m5、脚本读已删字段） |
+| `contract.mjs` | 82 | face 方法表 ↔ client 描述符 ↔ TYPERT 三端对账；Config 字段在 FIELDS/schema/M3_DEFAULTS 三处齐全；退役字段未复活；`mergeConfig` 读取集 ⊆ schema；**getHud 作用域契约**（防 ReferenceError 回归）；**弹窗/阈值行排版契约**；**智能思考 UI 契约**（开关尺寸/右对齐/字段三端） | **调用静默失败**（P29：三端漂移不报错、只是拿不到数据）；已实测抓过 3 个真 bug |
+| `static.mjs` | 30 | 真实 `node --check`；client 自足（无外部 import，require 仅 react）；entry 薄壳（<40 行、有静态 Config、动态 import 带 `?ts=`）；模块依赖方向无环；热换纪律；调试残留扫描 | 语法错误、破坏热换、client 引入依赖、循环依赖、`TODO`/`XXX`/`console.log` 残留 |
+| `report.mjs` | 58 | 产出侧字段契约；`bfOnce` 回填链依赖；C3② 关键事件必须走 full 档；**getHud 作用域与 criticalCap 实参契约**；真实报告结构自洽；`hud-acts.json` 去重；dump 工具可跑 | 报告形状无声破坏（本项目踩过 2 次：顶层读 m3/m5、脚本读已删字段） |
 
 **已验证有效**：注入 3 个人为 bug（`m3-act` 误入精简档 / client face 改名 / host 引用 client.js），
-三套件全部抓到且定位精准。
+三套件全部抓到且定位精准。**新增断言均实测验证过「对回归确实失败」**（两边都通过的测试等于没测）。
 
 ### 4.2 取证工具
 
@@ -173,11 +215,15 @@ npm run asar -- grep --pattern compactIfNeeded --ext js --ctx 3
 | 面板字段 | 配置键 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | 总开关 | `enabled` | true | 关闭后完全恢复原生 DSH（面板为开关滑块） |
+| **智能思考** | `effortEnabled` | false | 开=向 Agent 暴露思考档位并允许其自主换档；关=提示词不注入、标记也不生效 |
 | **智能压缩线** | `markerMinRatio` | 0.2 | 占用达此值时模型可自行决定压缩并自动续跑 |
 | **强制压缩线** | `criticalRatio` | 0.85 | 占用达此值无条件强制压缩 |
 | 压缩标记 | `marker` | `[cp:compact]` | 模型回复尾行标记；置空则关闭智能压缩 |
 | 标记有效期(秒) | `armedTtlMs` | 120 | 标记后多久内有效（存储为 ms） |
 | 强制压缩冷却(秒) | `sweepMinIntervalMs` | 600 | 两次强制压缩的最小间隔（存储为 ms） |
+
+**智能思考档位标记**：`[cp:effort <档>]`（如 `[cp:effort high]`）——固定语法，档位取值由
+当前模型动态决定（插件注入时会告知可选档）。**不设独立配置键**（无需用户填）。
 
 > 历史版本曾有的 `policyCardMinRatio`（决策卡门槛）、`highRatio`（审计参考线）、
 > `lightTaskChars`（轻任务阈值）**已删除**——前者并入 `markerMinRatio`，后两者在决策主体
@@ -211,6 +257,8 @@ npm run asar -- grep --pattern compactIfNeeded --ext js --ctx 3
 | [`docs/milestones.md`](docs/milestones.md) | 完整里程碑档案（M1 → 现在，含踩坑与实测数值） |
 | [`docs/cross-repo-sync.md`](docs/cross-repo-sync.md) | 与 `dsh-browser-kit` 的**同构点与同步清单**（7 个强同步点 / 5 个弱同步点 / 有意差异 / 漂移检测） |
 | [`docs/d1-module-split-brief.md`](docs/d1-module-split-brief.md) | D1 模块切分任务书（目标结构 / 硬规则 / 7 步顺序 / 回滚） |
+| [`docs/r1-reasoning-effort-investigation.md`](docs/r1-reasoning-effort-investigation.md) | **智能思考调查**：读档/枚举/写档三腿实证 + `selectModel` 全局副作用 + dsh-router-laya 参考 |
+| [`docs/r1-effort-design.md`](docs/r1-effort-design.md) | **智能思考设计定稿**：三层门控解耦 / 数据与写通道 / 提示词文本 / UI（弹窗 + 输入框 chip）/ 实施顺序 |
 | [`docs/reference/README.md`](docs/reference/README.md) | 第三方（DSH 官方）抽取材料的来源与许可 |
 | [`review-brief.md`](review-brief.md) / [`review-findings.md`](review-findings.md) | 只读审查的任务书与报告 |
 
@@ -240,3 +288,5 @@ node docs/reference/tools/asar-query.cjs extract --paths "/dsh/node_modules/..."
 3. 占用达**强制压缩线**时，插件无条件压缩（pre-step / idle 兜底），压缩事件出现在会话日志；
 4. 两条线可经 Config 配置（面板按秒/比率显示），改后**即时生效**（活读，无需重启）；
 5. 插件任何异常不影响 DSH 主流程（激活安全零抛）。
+6. **智能思考**（开启时）：注入当前档位 + 可选档；Agent 写 `[cp:effort <档>]` 可自主换档，
+   **下一步生效、任务不中断**；关闭时提示词不注入、标记不生效。
