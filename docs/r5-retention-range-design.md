@@ -117,7 +117,7 @@ preStepCompaction
 | **行为（真跑纯函数）** | 预算 300 / 10×100 token ⇒ 保留末 3 节点、影子前 7；`retainTokens=0` **精确复现**引擎 overflow 语义（只留最后 1 节点）；节点 0 是 `system/message` ⇒ 起点后移；预算 > surface ⇒ `nothing-to-compact`；`measurement`/`surface` 不一致 ⇒ 拒绝；`prevEnd` 回退边界；预算非法输入 ⇒ 0；`isSystemHead` 异常/缺失 ⇒ false | contract 全过 |
 | 错误分类 | 引擎 5 种校验文案逐字对账 + 分类（末端可重试 / 起点与无 turn 直接兜底 / busy 与摘要失败**不算**校验错误） | contract 全过 |
 | **变异验证** | 9 个针对性回归：保留比例改错 / 起点不跳系统头 / 去一致性校验 / **去回退上限** / 分类放宽 / 去兜底分支 / 去预算守卫 / 断 `measure` 传递 / 摘掉强制线收口 | **9/9 被捕获，0 逃逸** |
-| 真机 E2E | 见 §6 | 见 §6 |
+| 真机 E2E | 收手分支（`nothing-to-compact`，零压缩记录）+ `own` 分支（自选范围被引擎原样接受）+ surface 头即 `system/message` 的载荷性事实 | **通过**（§6；未覆盖项见 §6.4） |
 
 > **变异验证抓出一条弱断言**：最初只断言 `return official('boundary-exhausted')`，
 > 于是「去掉 `MAX_WALK_BACK` 判断」的回归**逃逸**了——文本仍在，上限没了。
@@ -126,16 +126,79 @@ preStepCompaction
 
 ---
 
-## 6. 真机 E2E
+## 6. 真机 E2E（2026-10-08，session `16616c07`）
 
-### 6.1 收手分支（`nothing-to-compact`）
-见本文末尾「实测补记」。
+方法：toggle 插件加载新代码（新代码生效的判据：报告 `m3.rangeProbe` 键**存在**——旧代码没有这个键），
+然后调用 `compact_context`，再读报告 + 会话存储。每一次都从 `rangeProbe`（范围读数）
+与 `lastCompactIntent`（执行结果）两条独立通路核对。
 
-### 6.2 `own` 分支的触发条件
-保留预算 = 1M × 0.16 = **160,000 token**。只有当 surface **超过** 160k 时自选范围才非空；
-否则按 §3.3 收手（这本身是正确行为，不是失败）。
-⇒ 真机上 `rangeSource` 会随占用自然出现 `'none'`（低占用）→ `'own'`（中等占用）
-→ `'official'`（自选不可用/回退耗尽）→ `'own+official'`（压完仍越线）。
+### 6.1 收手分支：`nothing-to-compact` ⇒ **完全不压**
+
+当前占用 17.8%、surface 126,656 token < 预算 160,000 ⇒ 应当收手。实测：
+
+| 字段 | 实测值 | 说明 |
+| --- | --- | --- |
+| `window` / `retainRatio` / `budget` | 1000000 / 0.16 / **160000** | 预算计算正确 |
+| `surfaceNodes` | **260** | `session.surface.nodes` 存在，且与 `measurement.nodes` **逐位一致**（否则 `why` 会是 `surface-mismatch`） |
+| `firstIdx` | **1** | ⇒ `session.eventAt` 可用，且**节点 0 确为 `system/message`**（见 §6.3） |
+| `retainedTokens` | 126656 | 整个 surface 都装得下 ⇒ 无可压 |
+| `rangeSource` / `acted` / `skipWhy` | **none / false / nothing-to-compact** | 没有回退官方、没有 LLM 调用、没有砍上下文 |
+| `ms` | **1** | 纯读判定，零成本 |
+| `lastPreStepError` | null | 无异常 |
+
+**独立核对「确实没压」**：会话存储里 `compaction/start` 计数 **323 → 323**、
+`compaction/summary` **11 → 11**，最后一条压缩记录仍是 R4 E2E 那次（seq 18303-18306）。
+⇒ 若按旧行为（回退官方 overflow），这里会把 260 个节点砍到 ~4 个。
+
+### 6.2 `own` 分支：自选范围被引擎**原样接受**
+
+预算 160k 大于当前 surface，所以真机自然状态下走不到 `own`。为在真机验证该分支，
+**临时把 `RETAIN_RATIO` 注入为 0.10**（预算 100,000 < surface 126,656），验证后**已还原为 0.16**
+（`git status` 干净、372 断言复跑全过）。实测：
+
+| 字段 | 实测值 |
+| --- | --- |
+| `budget` / `ok` / `surfaceNodes` / `firstIdx` | 100000 / **true** / 278 / 1 |
+| `ownRange` | `{ start: 18305, end: 18397 }` |
+| `retainedTokens` / `shadowTokens`（选范围时预估） | **100317** / **28265** |
+| `rangeSource` / `acted` / `shadowedTokens` / `ms` | **own** / true / **28265** / 27666 |
+| `walkBacks` / `preStepErrors` / `lastPreStepError` | 0 / {} / null |
+
+**与会话存储的 `compaction/summary` 交叉核对**（seq 18989）：
+
+```
+shadowedRange      = { "start": 18305, "end": 18397 }   ← 与 ownRange 逐字一致
+shadowedTokenCount = 28265                              ← 与预估 shadowTokens 一致
+shadowedSeqs       = 40 条（18299…18397）
+compaction/end     = 18991，随后 step/start 正常推进 ⇒ 本轮未中断
+```
+
+⇒ **自选范围被引擎接受并原样落袋**（`walkBacks 0`，一次通过），保留约 100k 近端内容，
+而不是官方 overflow 的「只留最后一个节点」。
+
+### 6.3 顺带钉死一个**载荷性**事实：surface 节点 0 真的是 `system/message`
+
+`firstIdx` 两次都返回 **1**，意味着 `isSystemHead` 判定节点 0 是 `system/message`。
+去会话存储查证（全库仅 10 条 `system/message`）：
+
+| 事实 | 数据 |
+| --- | --- |
+| `15513`（2,161 token，与报告 `contextBreakdown` 的 `{"seq":15513,"heuristicTokens":2161,"system":true}` 吻合） | **12 次压缩的 `shadowedSeqs` 全部不含它** ⇒ 从未被阴影化 |
+| `14800`（另一条 `system/message`） | **被阴影化 = true** ⇒ **只有 surface 头受保护**，非「所有系统消息都受保护」 |
+| R4 那次 `shadowedRange{15507..18296}` | 边界**包含** 15513，但 `shadowedSeqs` 排除了它 ⇒ 引擎在范围内部也保住系统头 |
+
+⇒ `isSystemHead` **不是防御性样板**：如果起点按 index 0 取，自选范围的第一刀就会落在系统消息上。
+本项目的 `systemHead` 同款实现（`session.eventAt(seq).type`）是**必需**的，而且用的是公开 API。
+
+### 6.4 诚实说明（哪些还没被真机覆盖）
+
+1. **边界回退分支（`prevEnd` 重试）未在真机被触发**：两次真机尝试都 `walkBacks 0`
+   （token 预算边界恰好落在合法边界上）。该分支由**单测**（`prevEnd` 边界）+ **变异验证**
+   （去掉 `MAX_WALK_BACK` 上限会被抓住）覆盖，但**没有真机观测**。
+   要真机触发需要「预算边界正好切在 tool-call/result 配对中间」——不可控，只能等自然出现。
+2. **阈值触发那一支（占用 ≥ 75%）仍未真机验证**：包括 §4.2 的「强制线收口」
+   （`own` 后仍越线 ⇒ 追加官方 overflow）。需要占用真冲到 75% 才有条件测。
+3. **`idle` 安全网仍走官方 `retainTokens = 0`**（原因见 §7.2，`compactRegion` 要求有打开的 turn）。
 
 ---
 

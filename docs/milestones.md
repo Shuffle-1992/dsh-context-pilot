@@ -1143,3 +1143,31 @@ m3.compactToolDiag = { calls:2, enabled:true, installed:false }
   **又一次证明：「两边都通过的测试等于没测」。**
 - ⚠️ `retainRatio` 起初想放进 `M3_DEFAULTS`，被既有护栏「M3 字段必须在 schema 中」拦下
   ⇒ 归位为模块常量（`M3` 的语义是**用户可配项**）。要面板可调需 schema + **DSH 重启**，未做。
+
+#### 五、R5 真机 E2E（两支都过）
+
+**判据**：toggle 后报告 `m3.rangeProbe` 键**存在**（旧代码没有这个键）⇒ 新代码确实生效。
+
+**支一 · 收手**（占用 17.8%，surface 126,656 < 预算 160,000）：
+`rangeProbe` 给出 `window 1000000 / retainRatio 0.16 / budget 160000 / surfaceNodes 260 /
+firstIdx 1 / retainedTokens 126656 / ok:false / why:nothing-to-compact`；
+`rangeSource:'none'`、`acted:false`、`ms:1`。**独立核对确实没压**：会话存储
+`compaction/start 323→323`、`compaction/summary 11→11`，最后一条仍是 R4 E2E 那次。
+⇒ 旧行为在此会把 260 个节点砍到 ~4 个。
+
+**支二 · own**（预算 160k > surface，自然状态走不到 ⇒ **临时注入 `RETAIN_RATIO=0.10`**，
+验证后已还原、`git status` 干净、372 断言复跑全过）：
+`budget 100000 / ok:true / surfaceNodes 278 / ownRange{18305,18397} /
+retainedTokens 100317 / shadowTokens 28265`；`rangeSource:'own'`、`walkBacks:0`、
+`ms:27666`、`preStepErrors {}`。会话存储 `compaction/summary`(18989)
+**`shadowedRange {18305,18397}` 与 `ownRange` 逐字一致**、`shadowedTokenCount 28265`、
+随后 `step/start` 正常推进 ⇒ **自选范围被引擎原样接受，本轮未中断**。
+
+**顺带钉死一个载荷性事实**：`firstIdx` 两次都是 1 ⇒ surface 节点 0 是 `system/message`。
+查 12 次压缩的 `shadowedSeqs`：`15513`（2,161 token）**从未被阴影化**，而另一条 `14800`
+**被阴影化** ⇒ **只有 surface 头受保护**；R4 那次 `shadowedRange{15507..18296}` 边界**包含**
+15513 却仍排除了它 ⇒ 引擎在范围内部也保住系统头。
+**⇒ `isSystemHead` 不是防御性样板：按 index 0 取起点，第一刀就落在系统消息上。**
+
+⚠️ **未真机覆盖（如实记录）**：① 边界回退（`prevEnd` 重试）两次都 `walkBacks 0`，
+只由单测 + 变异覆盖，无真机观测；② 阈值触发那一支（占用 ≥75%）与「强制线收口」需冲到线上才有条件测。

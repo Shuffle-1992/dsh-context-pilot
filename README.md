@@ -247,10 +247,10 @@ npm run test:report   # 只跑报告形状
 | 套件 | 断言数 | 查什么 | 能抓到什么 |
 | --- | --- | --- | --- |
 | `contract.mjs` | 275 | face 方法表 ↔ client 描述符 ↔ TYPERT 三端对账；Config 字段在 FIELDS/schema/M3_DEFAULTS 三处齐全；退役字段未复活；`mergeConfig` 读取集 ⊆ schema；**getHud 作用域契约**（防 ReferenceError 回归）；**弹窗/阈值行排版契约**；**智能思考 UI 契约**（开关尺寸/右对齐/字段三端/chip 两态色 token）；**压缩工具化契约**（工具注册/意图 TTL/消费顺序/伪造恢复零残留）；**阈值余量契约**（引擎阈值 −5pp 三处同源 / 面板自取上限 / 输入即时钳制 / 已存超限自动钳回保存 / 教学传生效值）；**组件作用域对账**（防跨组件引用面板 state ⇒ 整卡崩掉，`node --check` 的盲区）；**R5 保留范围契约**（`RETAIN_RATIO` 与引擎 `DEFAULT_RETAIN_RATIO` 同源 / 起点跳过 `system/message` / 走 `session.eventAt` 而非猜 / **真跑纯函数**验证预算-范围-影子量-一致性拒绝-回退上限 / 引擎错误文案逐字对账 + 边界错误分类 / 官方兜底与强制线收口接线 / 留痕）；**智能思考 8 条实证结论**（prepend 最外层 / pending 持久 / 冷却基准 / 计数语义 / 两侧校验 / agent.ctx / sid 现读 / 删 maxTokens） | **调用静默失败**（P29：三端漂移不报错、只是拿不到数据）；已实测抓过 7 个真 bug |
-| `static.mjs` | 40 | 真实 `node --check`；client 自足（无外部 import，require 仅 react）；entry 薄壳（<40 行、有静态 Config、动态 import 带 `?ts=`）；模块依赖方向无环；热换纪律；**功能域叶子模块清单**（effort / compact-tool / compact-range）；调试残留扫描 | 语法错误、破坏热换、client 引入依赖、循环依赖、`TODO`/`XXX`/`console.log` 残留 |
+| `static.mjs` | 42 | 真实 `node --check`（含 `docs/reference/tools/*.cjs`）；client 自足（无外部 import，require 仅 react）；entry 薄壳（<40 行、有静态 Config、动态 import 带 `?ts=`）；模块依赖方向无环；热换纪律；**功能域叶子模块清单**（effort / compact-tool / compact-range）；调试残留扫描（tools 下的 `console.log` 属 CLI 正常输出，豁免） | 语法错误、破坏热换、client 引入依赖、循环依赖、`TODO`/`XXX`/`console.log` 残留 |
 | `report.mjs` | 57 | 产出侧字段契约；`bfOnce` 回填链依赖；C3② 关键事件必须走 full 档；**getHud 作用域与 criticalCap 实参契约**；**调查结论留档**（探针退役后结论不得丢）；真实报告结构自洽；`hud-acts.json` 去重；dump 工具可跑 | 报告形状无声破坏（本项目踩过 2 次：顶层读 m3/m5、脚本读已删字段） |
 
-合计 **372 条断言**。
+合计 **374 条断言**。
 
 **已验证有效**：注入 3 个人为 bug（`m3-act` 误入精简档 / client face 改名 / host 引用 client.js），
 三套件全部抓到且定位精准。**新增断言均实测验证过「对回归确实失败」**（两边都通过的测试等于没测）。
@@ -268,9 +268,17 @@ npm run dump -- --history-acts     # 压缩历史（含 hud-acts.json）
 
 npm run asar -- list --filter dsh-token-meter
 npm run asar -- grep --pattern compactIfNeeded --ext js --ctx 3
+
+# 会话存储逐帧取证（压缩是否真发生 / 阴影了哪些 seq / 系统头是否被保留）
+node docs/reference/tools/session-records.cjs --find <会话 id 片段> --compaction
+node docs/reference/tools/session-records.cjs --find <会话 id 片段> --shadowed 15513
+node docs/reference/tools/session-records.cjs --find <会话 id 片段> --from 18300 --type 'compaction/*'
 ```
 
 > ⚠️ **路径约定**：报告的 `m3`/`m5`/`m55` 块在每个 **history 条目**上，不在顶层（`report.mjs` 已断言此约定）。
+> ⚠️ `session-records.cjs` 读的是 DSH 的**私有存储格式**（多帧 zstd + JSONL）：直接扫魔数有假阳性，
+> 必须 try/catch 跳过；官方改格式时该工具需同步。它是本项目「不靠插件自证」的关键手段——
+> R5 就是靠它统计 12 次压缩的 `shadowedSeqs`，才证明 `system/message` 15513 从未被阴影化。
 
 ---
 
@@ -359,7 +367,7 @@ npm run asar -- grep --pattern compactIfNeeded --ext js --ctx 3
 | [`docs/r4-compaction-tool-design.md`](docs/r4-compaction-tool-design.md) | **R4 压缩改工具触发**：inbox 队列/steer/system-message 三条路为何都不行 / `compactIfNeeded` 两个 trigger 的保留语义 / 落袋方案 A 的偏差 / 三处教学同步 / **§7.1 真机 E2E 逐帧时序与实测数字** |
 | [`docs/r5-retention-range-design.md`](docs/r5-retention-range-design.md) | **R5 保留范围自选**：`retainTokens = 0` 的实测代价（1117→4 节点）/ 为何不复刻引擎配对算法 / 边界被拒为何可零成本重试 / 自选范围 + 官方兜底 + 强制线收口 / 验证矩阵 |
 | [`docs/compaction-failure-diagnosis.md`](docs/compaction-failure-diagnosis.md) | **压缩全线失效定位**：workbuddy provider 对摘要请求 400 的完整证据链与两条修复选项 |
-| [`docs/reference/README.md`](docs/reference/README.md) | 第三方（DSH 官方）抽取材料的来源与许可 |
+| [`docs/reference/README.md`](docs/reference/README.md) | 第三方（DSH 官方）抽取材料的来源与许可 + **三个统一取证工具**（`asar-query.cjs` / `dump-report.cjs` / `session-records.cjs`） |
 | [`review-brief.md`](review-brief.md) / [`review-findings.md`](review-findings.md) | 只读审查的任务书与报告 |
 
 **运行期取证**：`plugin/.data/m1-report.json`（service/injection/compaction 全字段报告）、

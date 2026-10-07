@@ -49,6 +49,28 @@ node tools/dump-report.cjs --history-acts   # 压缩历史（含 hud-acts.json�
 > ⚠️ **路径约定（踩过坑）**：报告的 `m3`/`m5`/`m55` 块在**每个 history 条目上**，不在报告顶层。
 > 早期脚本按顶层读会拿到 null——统一工具已修正。
 
+### `session-records.cjs` —— 读 DSH 会话存储（压缩取证，"不自证"）
+
+报告是**插件自己写的**，不能用来证明插件的行为。压缩是否真发生、阴影了哪些 seq、
+系统头有没有被保留，只有会话存储的逐帧记录能证明。
+
+```bash
+node tools/session-records.cjs --find 16616c07 --compaction        # 逐条 compaction/summary
+node tools/session-records.cjs --find 16616c07 --shadowed 15513    # 该 seq 是否被阴影化过
+node tools/session-records.cjs --find 16616c07 --from 18300 --type 'compaction/*'
+node tools/session-records.cjs <session.v4.jsonl.zstd> --json
+```
+
+`--find <子串>` 在 `~/.dsh/sessions` 下找**最新**一个路径含该子串的会话文件。
+
+> **格式事实**：文件是**多帧 zstd 拼接**（每帧魔数 `28 B5 2F FD`，一帧可含多行 JSON），
+> `zlib.zstdDecompressSync`（Node v24）可解；直接扫魔数**有假阳性**（压缩数据内部也可能出现），
+> 必须 try/catch 跳过。这是 DSH 的**私有格式**，官方改了本工具要同步。
+>
+> **实战价值**：R4 用它证明了「工具调用(18300) → 下一步 pre-step 的 compaction/start(18303)」的因果时序；
+> R5 用 `--shadowed 15513` 统计 12 次压缩，证明 `system/message` 从未被阴影化
+> ⇒ 引擎只保护 surface 头，`isSystemHead` 是载荷性逻辑。
+
 
 ## 政策（对齐 `zcode-dispatch` 仓库惯例）
 
