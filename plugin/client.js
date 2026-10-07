@@ -652,8 +652,9 @@ window.__ModuleLoader__.load({
 					knob.className = "dcp-slider";
 					box.appendChild(input);
 					box.appendChild(knob);
-					wrap.appendChild(box);
+					/* 顺序：文字在前、开关在后（用户要求互换）；label 的 flex:1 已把本组推到最右 ⇒ 右对齐 */
 					wrap.appendChild(document.createTextNode("启用"));
+					wrap.appendChild(box);
 					const sync = () => {
 						try {
 							const s = settingsScope.getSnapshot();
