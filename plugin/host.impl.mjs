@@ -292,9 +292,12 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       const raw = readFileSync(hudActsPath, 'utf8');
       const j = JSON.parse(raw.replace(/^\uFEFF/, '')); // 剥 BOM（外部工具写入可能带，JSON.parse 不容忍）
       if (j && Array.isArray(j.acts)) {
-        return j.acts
-          .filter((a) => a && typeof a.sid === 'string' && typeof a.text === 'string' && typeof a.at === 'string')
-          .slice(0, HUD_ACTS_CAP);
+        return {
+          acts: j.acts
+            .filter((a) => a && typeof a.sid === 'string' && typeof a.text === 'string' && typeof a.at === 'string')
+            .slice(0, HUD_ACTS_CAP),
+          lineage: j.lineage && typeof j.lineage === 'object' ? j.lineage : {}, // C-lineage：会话血统链
+        };
       }
     } catch (e) {
       if (e?.code !== 'ENOENT') log('warn', `hud-acts.json 读取失败（忽略，走报告回填）：${msg(e)}`);
@@ -304,7 +307,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
   const saveHudActs = (acts) => {
     try {
       mkdirSync(dirname(hudActsPath), { recursive: true });
-      writeFileSync(hudActsPath, JSON.stringify({ version: 1, savedAt: new Date().toISOString(), acts: acts.slice(0, HUD_ACTS_CAP) }, null, 2));
+      writeFileSync(hudActsPath, JSON.stringify({ version: 1, savedAt: new Date().toISOString(), acts: acts.slice(0, HUD_ACTS_CAP), lineage: state.m5.lineage ?? {} }, null, 2));
     } catch (e) {
       log('warn', `hud-acts.json 写入失败（吞）：${msg(e)}`);
     }
@@ -322,6 +325,21 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       state.m5.acts.unshift({ sid: String(sid ?? ''), text: String(text ?? ''), at });
       if (state.m5.acts.length > HUD_ACTS_CAP) state.m5.acts.length = HUD_ACTS_CAP;
       saveHudActs(state.m5.acts);
+    } catch { /* 吞 */ }
+  };
+  /** C-lineage（2026-10-07）：会话 id 轮转链——DSH 压缩会分叉出新 session id（实测本会话连换 3 个 id），
+   *  压缩记录按「当时的 id」存 ⇒ getHud 按当前 id 过滤永远匹配不上（用户实测「记录经常丢失」的根因）。
+   *  本助手记录 newSid ← prevSid 的血统边（随 hud-acts.json 持久化）；getHud 沿链回溯即可命中
+   *  「同一条会话」的全部历史记录。局限：多会话并发时按最近活跃推断，可能误连（单窗口使用无碍）。 */
+  const noteSessionId = (sid) => {
+    try {
+      if (!sid) return;
+      if (state.m5.lastSid && sid !== state.m5.lastSid && state.m5.lineage[sid] === undefined) {
+        state.m5.lineage[sid] = state.m5.lastSid;
+        saveHudActs(state.m5.acts);
+        log('info', `M5 会话血统：${String(sid).slice(0, 13)}… ← ${String(state.m5.lastSid).slice(0, 13)}…`);
+      }
+      state.m5.lastSid = sid;
     } catch { /* 吞 */ }
   };
 
@@ -540,13 +558,15 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     // M5 HUD 发布取证（entry 查找/edit 结果全程留痕——弹窗侧空态无法区分静默失败）
     // hud.gen = 实例指纹：客户端取到的 gen 应与本实例一致；不一致 = RPC 打到了旧激活的僵尸面
     // acts = 最近压缩记录（按会话可过滤，新→旧，cap 8）：主行显示最新，悬停展开列表
-    m5: { lastPublish: null, hud: { hudLastAct: '', hudArmed: '', hudPending: '', gen: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}` }, hudFace: 'absent', acts: [] },
+    m5: { lastPublish: null, hud: { hudLastAct: '', hudArmed: '', hudPending: '', gen: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}` }, hudFace: 'absent', acts: [], lastSid: null, lineage: {} },
     // M5.5 恢复通道取证（每次尝试逐相位落报告，杜绝 log-only 黑洞）
     m55: { armed: null, attempts: [], channelProbe: null },
   };
   /* 激活即从 hud-acts.json 恢复压缩历史（跨重启/跨 toggle 存续）；
    * 报告回填降级为迁移/兜底源（bfOnce 内合并去重，不再覆盖式写 acts）。 */
-  state.m5.acts = loadHudActs() ?? [];
+  const hudLoaded = loadHudActs();
+  state.m5.acts = hudLoaded?.acts ?? [];
+  state.m5.lineage = hudLoaded?.lineage ?? {}; // C-lineage：历史血统边随文件恢复
 
   /** 解析某 agent 作用域的 compaction 服务实例（顶层 ctx 实测 absent，必须走 agent 上下文）。 */
   const resolveCompactionFor = (agent) => {
@@ -985,6 +1005,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       const sig = signal && typeof signal === 'object' ? signal : AbortSignal.timeout(180_000);
       if (sig.aborted) return;
       const sid = String(pick(agent.session.id, agent.sessionId, agent.id, 'unknown'));
+      noteSessionId(sid); // C-lineage：轮转边记录（pre-step 每轮必经）
       const mr = measureRatio(agent.session); // B2：读取收敛
       if (!mr.ok || mr.ratio == null) return;
       const ratio = mr.ratio;
@@ -1070,6 +1091,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         }
         const card = renderPolicyCard(r.ratio); // M3.5 通道2：政策卡（相关占用以上才出现）
         const sid = String(pick(agent.session.id, agent.sessionId, 'unknown'));
+        noteSessionId(sid); // C-lineage
         const brief = briefedBySid.has(sid) ? null : renderBrief(); // M2.5+A3：现拼活值
         if (brief) {
           briefedBySid.add(sid);
@@ -1112,6 +1134,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       if (!agent?.session) return;
       const text = messageText(message);
       const sid0 = String(pick(agent.session.id, agent.sessionId, 'unknown'));
+      noteSessionId(sid0); // C-lineage
       if (text) lastUserTextBySid.set(sid0, text.slice(0, 500)); // M5.5：记住最近任务文本（恢复兜底）
       const taskChars = text.length;
       const d = decideCompaction(agent);
@@ -1145,6 +1168,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     try {
       if (!effEnabled()) return; // 总开关活读（演习模式已随 2026-10-07 面板精简退役：压缩路径无影子模式）
       const sid = String(pick(agent?.session?.id, agent?.id, 'unknown'));
+      noteSessionId(sid); // C-lineage
       /* A2（审查）：TTL 清灯前移到一切早退之前——measure 失败/in-flight 早退也要熄过期武装灯，防 hudArmed 永亮 */
       const armedMark = markerArmed.get(sid);
       if (armedMark && Date.now() - armedMark.at > M3.armedTtlMs) {
@@ -1333,7 +1357,13 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         /** sid 可选：传会话 id 则只返回该会话的最近压缩（主行=该会话最新，acts=该会话列表）；空=全局。 */
         onGetHud: (sid) => {
           const list = Array.isArray(state.m5.acts) ? state.m5.acts : [];
-          const filtered = sid ? list.filter((a) => a.sid === sid) : list;
+          /* C-lineage：按会话血统链匹配——当前 sid + 沿 lineage 回溯的全部历史前身 id。
+           * 仅按当前 id 过滤会在压缩轮转后误判「无记录」（用户实测丢失的根因）。 */
+          const chain = new Set();
+          let cur = sid;
+          let guard = 0;
+          while (cur && !chain.has(cur) && guard < 16) { chain.add(cur); cur = state.m5.lineage?.[cur]; guard++; }
+          const filtered = sid ? list.filter((a) => chain.has(a.sid)) : list;
           /* 占用读数：让弹窗能显示「距智能压缩线还差多少」（client 侧可选消费，缺省不影响）。
            * 取目标会话的实时 measure —— sid 传了就测该会话，否则测最热的那个。 */
           const occ = (() => {
