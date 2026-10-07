@@ -454,3 +454,53 @@ effort 标记因位置自由才暴露该问题。
 
 **防回归**：`contract.mjs` §6.12（15 条）+ §6.13（7 条，含**行为验证**——用真实正则跑
 误触发用例），总计 219 断言。标记正则绊线实测有效（结构检查 + 行为检查双 FIRES）。
+
+### R1 收尾：prepend 真根因 + 零轮询显示 + 冷却可见 —— ✅ 2026-10-08
+
+**① 用户一问挖出的真 bug：换档「报成功」但实际未生效**
+用户看到 chip 一直 `xhigh`，怀疑「5s 轮询不智能」。取证发现远比显示严重：
+`lastEffortApply.applied = true`（xhigh→low），但**之后每一轮注入后缀仍是 xhigh**。
+
+根因：官方 `installModelSelection` 挂在**同一个** `agent/request` waterfall 上，
+且在**外层**（`dsh-agent/lib/types/model-selection.js` L61-75）：
+```js
+const resolved = await next();
+const { reasoningEffort: _inheritedEffort, ...withoutInheritedEffort } = resolved;
+return { ...withoutInheritedEffort,        // ← 内层写的 effort 在这里被 delete
+         ...selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort } };
+                                           // ← 再套回持久化 header 的值（xhigh）
+```
+⇒ 内层写入必被剥掉。**先剥内层、再套自己的**——waterfall 组合语义。
+
+修复三点（联动，缺一不可）：
+1. **`prepend: true`** —— 本插件成为最外层，每轮最后覆盖
+2. **pending 改持久态** —— 不再「用一次就删」：既然每轮都被剥，就得每轮都覆盖回去
+3. **冷却基准只在档位真变化时更新** —— 第 2 点引入的副作用：pending 持久后每轮都跑，
+   若每轮刷新冷却，**模型后续的新标记会被全部挡掉**
+配套：让位判断补 `pend.effort` 比较；`effortSwitches` 只在真变化时自增（否则变「请求次数」）；
+同值标记幂等短路（不消耗冷却，`effortSkips.sameValue`）。
+
+**验证**：修复后注入行实测变为「｜ 思考强度 low」⇒ **端到端闭环成立**。
+
+**② 去掉 5s 轮询（用户要求「不要5S轮询」）**
+改用**官方响应式投影**：`props.useProjection("modelSelection")`
+- `useProjection` 是 `conversation.input.right` slot 的**标准 prop**（官方 contract 列表实证）
+- 官方 UI 同款：`dsh-client-ui-conversation` L17240 `useProjection("plan")`
+- 投影由**会话事件驱动**（`applyModelSelectionProjection` L2072-2088：
+  `model/selection`→pending、`request/header`→lastUsed）⇒ 换档落库即重渲染，**零轮询**
+- **pending 优先显示** + 「· 下一步」小字 ⇒ 已选待生效的状态也能提前看到
+
+**③ 冷却显示（用户要求「把 30 秒冷却加到档位后面显示」）**
+- host 返回**绝对时间戳** `cooldownUntil` + `cooldownTotalMs`（低频调用不会过时）
+- chip 显示「· 冷却 23s」，**仅冷却时占位**，结束自动消失
+- 本地 1s tick **只在 cooling 时启用**，结束即 `clearInterval`（非常驻定时器）
+- host 信息在**投影变化时重问**（依赖 `[effort, pendingNow]`）⇒ 换档即刷新冷却状态
+
+**④ 一个自我修正（断言过严）**
+上一轮加的「chip 内不得出现 setInterval」过严——倒计时需要定时器。
+改为精确判据：定时器回调**不得含 `getHud`/`pullOnce`**（那才是被禁的「定期问 host」）；
+且**必须按 `cooling` 启停**（否则是变相常驻轮询）。
+
+**防回归**：`contract.mjs` §6.9/§6.12 共 15 条相关断言，总计 **233 断言**。
+**6 条绊线均实测有效**：恢复 5s 轮询 / 倒计时不按 cooling 启停 / 冷却不显示在档位后 /
+去掉 cooling 判断 / 加回 setInterval / 去掉 useProjection → 全部 FIRES。

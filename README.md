@@ -69,10 +69,17 @@ DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`（面板名�
 | 项 | 内容 |
 | --- | --- |
 | **注入** | 一次性教学（教用法）+ 每轮用量行后缀「｜ 思考强度 xhigh」 |
-| **标记** | `[cp:effort high]` —— Agent 在回复最后一行写，**下一步生效** |
-| **执行 seam** | `agent/request` waterfall（改请求配置，**无全局副作用**） |
+| **标记** | `[cp:effort high]` —— Agent 在回复最后一行**独占一行**写，**下一步生效** |
+| **执行 seam** | `agent/request` waterfall + **`prepend: true`**（见下「为什么必须 prepend」） |
 | **不中断** | 只改请求头一个字段：会话历史不动、不插消息、工具链不断 |
-| **显示** | 输入框模型选择器左侧 chip「智能思考档位:xhigh」，5s 刷新 |
+| **显示** | 输入框模型选择器左侧 chip「智能思考档位 low · 冷却 23s」——**响应式投影，零轮询** |
+| **冷却** | 30s（防频繁换档反复打断前缀缓存）；chip 上显示剩余秒数 |
+
+**为什么必须 `prepend: true`（2026-10-08 实测踩坑）**：
+官方 `installModelSelection` 挂在**同一个** `agent/request` 上且在**外层**，
+它 `await next()` 后会 `delete reasoningEffort` 再套回持久化 header 的值
+⇒ **内层写入必被剥掉**。症状极隐蔽：`applied: true` 却完全没生效。
+故本插件必须 prepend 成为最外层，且 pending 需**持久**（每轮覆盖回去，不能一次用完就删）。
 
 **为什么用 `agent/request` 而不是 `sessionController.selectModel`**：
 后者内部还会 `agentDefaultModel.saveSelection()`——**写全局默认模型**（实测会重写 profile）。
@@ -83,9 +90,19 @@ Agent 自改档不应改掉新会话的默认档。
 **绝不硬编码档位表**。应用前必须校验合法性，否则 `dsh-llm` 会抛
 `UNSUPPORTED_REASONING_EFFORT` **中断该次请求**。
 
+**标记必须独占一行**：正则锚定 `^...$`。宽松子串匹配会被**散文提及**误触发——
+本插件注入的教学文本本身就含该语法，模型复述它（「你可以写 `[cp:effort high]` 来换档」）
+就会被当成指令。（压缩标记用 `endsWith` 天然规避；effort 因位置自由才暴露此坑。）
+
+**让位他人选择**：若当前请求的档位既不是本插件上次写的、也不是本次想写的
+（用户手动选档 / subagent 自带 `reasoning_effort`）⇒ 不覆盖。
+
 **成本**：一次性教学 ≈80 token + 每轮后缀 ≈7 token（20 轮共 ≈220 token ≈ $0.00003）。
 ⚠️ 换档可能使前缀缓存失效（`call-config.js` 注明 effort 属 cache-affecting 状态）——
-这是换档的真实代价，建议一次任务 1–2 次为宜（已写进注入的教学文本）。
+这是换档的真实代价，故设 30s 冷却并建议一次任务 1–2 次（已写进注入的教学文本）。
+
+**已实测闭环**（2026-10-08）：写 `[cp:effort low]` → 标记解析 → 档位校验 →
+prepend 应用 → **下一轮注入行变为「｜ 思考强度 low」** ✅
 
 > 调查与设计全文：[`docs/r1-reasoning-effort-investigation.md`](docs/r1-reasoning-effort-investigation.md)
 > ｜ [`docs/r1-effort-design.md`](docs/r1-effort-design.md)
@@ -125,15 +142,14 @@ Agent 自改档不应改掉新会话的默认档。
 - **M5.5** 任务挂起-自动恢复：多通道投递（A sessionController → B remote → C direct-followup），
   **三测复现通过**，实际走通道 C
 - **M5.7** 压缩历史持久化（`hud-acts.json`，cap 50）：跨重启/跨 toggle 存续
-- **R1 智能思考**（2026-10-07，**调查完成 + UI 落地**）：读档/枚举/写档三腿全部运行时实证；
-  弹窗开关 + 输入框档位 chip 已实现；`[cp:effort]` 标记通道**待实施**（见下）
+- **R1 智能思考**（2026-10-07/08，**全链路完成并真机验证**）：读档/枚举/写档三腿运行时实证；
+  注入教学 + 每轮档位后缀；弹窗开关 + 输入框档位 chip（**响应式投影，零轮询**）；
+  `[cp:effort]` 换档通道（**prepend 最外层应用** + 合法性校验 + 30s 冷却 + 让位他人选择）；
+  **实测闭环**：写标记 → 下一轮注入行变为新档位 ✅
 - **配置面**：7 个字段，面板按秒/比率显示（总开关为开关滑块）；成本阈值计算器（8 个模型预设，一键算推荐值并写入）
 - **只读审查落地**：外部审查 23 条，批次 1/2/3 全部实施（含心跳泄漏、`ctx.effect` 语义误用等真 bug）
 
-**未实施（明确挂起）**：**R1 剩余三步**（`[cp:effort]` 标记通道 + `agent/request` 应用 + 注入文本；
-见 [`docs/r1-effort-design.md`](docs/r1-effort-design.md) §7）、
-**`briefedBySid` 永不失效**（压缩后一次性说明不再重讲——真 bug，实施 R1 时一并修）、
-D1 模块切分（动骨架，**已有测试护栏 + 任务书，可以做了**）、
+**未实施（明确挂起）**：D1 模块切分（动骨架，**已有测试护栏 + 任务书，可以做了**）、
 C2 无界 Map 上限（当前规模无实际风险）、A6 恢复计数清零、
 **A5 pre-step 强制压缩真机 E2E**（唯一「已实现但成功率未验」的路径——需占用冲到强制压缩线
 才有条件测，当前设为 80%，等接近了再做）、A2/A6 的真机 E2E。
