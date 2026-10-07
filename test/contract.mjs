@@ -138,6 +138,19 @@ for (const dead of ['policyCardMinRatio', 'highRatio', 'lightTaskChars', 'dryRun
     `出现于：${[inFields && 'FIELDS', inSchema && 'schema', inDefaults && 'M3_DEFAULTS'].filter(Boolean).join(', ')}`);
 }
 
+/* ═══════════ 6.5 client 渲染契约（bool 显示回归防护）═══════════ */
+console.log('\n== 6.5 client 渲染契约（两处总开关显示一致性）==');
+// 实测回归（2026-10-07）：toUi 把布尔 Number 化（true→1），面板 `checked: valueOf() === true`
+// 恒假 ⇒ 面板总开关恒显示关、弹窗开关（读原始值）显示开——两处不一致且前者为假象。
+ok('toUi 布尔直通（不经 Number 化）',
+  /function toUi\([^)]*\)\s*\{[\s\S]{0,200}?if \(field\.type === "bool"\)\s*return base === true/.test(client),
+  'toUi 缺 bool 直通分支 ⇒ 面板 bool 字段显示恒 false（1 === true 假阴回归）');
+ok('面板 bool 选中判定用 === true（严格布尔比较）', /checked:\s*valueOf\(field\)\s*===\s*true/.test(client));
+ok('弹窗开关写 settingsScope.set("enabled")（与面板同存储）', /settingsScope\.set\("enabled",\s*next\)/.test(client),
+  '弹窗开关未写 enabled 配置 ⇒ 与面板开关不同源');
+ok('面板写路径走 writeField(settingsScope)（同一 settingsScope）', /await writeField\(settingsScope,\s*field,\s*parsed\)/.test(client),
+  '面板写路径改道 ⇒ 与弹窗开关可能不同源');
+
 /* ═══════════ 7. mergeConfig 读取集 ⊆ schema 键 ═══════════ */
 console.log('\n== 7. mergeConfig 读取集 ⊆ schema 键 ==');
 const mergeList = /const k of \[([^\]]+)\][\s\S]{0,80}?raw\[k\] = live/.exec(host)?.[1];

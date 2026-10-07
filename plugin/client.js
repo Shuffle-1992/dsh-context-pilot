@@ -103,6 +103,7 @@ window.__ModuleLoader__.load({
 		/** 存储值 → UI 显示值（scale 字段：毫秒转秒）。 */
 		function toUi(field, storedValue) {
 			const base = storedValue === void 0 || storedValue === null ? field.def : storedValue;
+			if (field.type === "bool") return base === true; // 布尔直通：Number(true)=1 会让 checked===true 判定假阴（实测回归）
 			const n = Number(base);
 			if (!Number.isFinite(n)) return base;
 			return field.scale ? n / field.scale : n;
