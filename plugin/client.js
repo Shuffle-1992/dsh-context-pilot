@@ -631,8 +631,9 @@ window.__ModuleLoader__.load({
 					const row = document.createElement("div");
 					row.dataset.dcpToggle = "1";
 					/* 结构复刻原生明细行（ContextMeter .row = [8px 色块 + 6px 间距] + 文字）：
-						行左缘即面板色块列起点（padding-left:0）→ 图标对齐色块列、文字对齐 dt 文字列，零测量天然同轴 */
-					row.style.cssText = "display:flex;align-items:center;gap:6px;padding:6px 12px 6px 0;border-top:1px solid rgba(128,128,128,.25);text-align:left;";
+						行左缘即面板色块列起点（padding-left:0）→ 图标对齐色块列、文字对齐 dt 文字列。
+						右内边距为 0：开关右缘须与上方数值列（如 ~324K）右对齐（用户实测 12px 右内缩）。 */
+					row.style.cssText = "display:flex;align-items:center;gap:6px;padding:6px 0;border-top:1px solid rgba(128,128,128,.25);text-align:left;";
 					const icon = document.createElement("span");
 					icon.style.cssText = "display:inline-block;width:8px;height:8px;border-radius:2px;background:#4c7dff;flex:none;";
 					const label = document.createElement("span");
@@ -719,9 +720,19 @@ window.__ModuleLoader__.load({
 							 * （实测「记录经常丢失」的根因）⇒ 本会话优先，空则回退全局并标注，记录永不消失。 */
 							const actGlobal = typeof v.hudLastActGlobal === "string" && v.hudLastActGlobal ? v.hudLastActGlobal : "";
 							const useGlobal = !act && !!actGlobal;
+							/* 自诊断（2026-10-07）：无数据时把轮询状态显示出来——host 侧已证 getHud 从未被调用，
+							 * 而弹窗行是渲染成功的 ⇒ 断点在 client（$mount/inject 未就绪）。这段让截图即可定位。 */
+							let diag = "";
+							if (!act && !actGlobal) {
+								const d = NS.hudDebug;
+								diag = d == null ? "（轮询未启动）"
+									: d.svc === false ? "（轮询面未就绪）"
+										: d.ok === false ? `（RPC 失败：${String(d.r || d.err || "?").slice(0, 40)}）`
+											: d.svc === true ? "（RPC 已通但无记录）" : "";
+							}
 							label.textContent = act
 								? `最近压缩 ${act}`
-								: useGlobal ? `最近压缩 ${actGlobal}（其他会话）` : "本会话暂无压缩记录";
+								: useGlobal ? `最近压缩 ${actGlobal}（其他会话）` : `本会话暂无压缩记录${diag}`;
 							/* 悬停 = 对应来源的最近压缩列表 + 取证指纹 */
 							const listSrc = act ? v.acts : useGlobal ? v.actsGlobal : null;
 							const actLines = Array.isArray(listSrc) && listSrc.length ? listSrc : (act ? [act] : (useGlobal ? [actGlobal] : []));

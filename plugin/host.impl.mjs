@@ -796,6 +796,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         lastPublish: state.m5.lastPublish ? { ...state.m5.lastPublish } : null,
         hud: { ...(state.m5.hud ?? {}) },
         hudFace: state.m5.hudFace ?? 'absent',
+        hudPollReq: state.m5.hudPollReq ? { ...state.m5.hudPollReq } : null, // getHud 最近一次请求/响应摘要（取证）
       },
       m55: {
         armed: state.m55.armed ? { ...state.m55.armed } : null,
@@ -1406,7 +1407,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
               return { ratio: r.ratio, window: r.window ?? null };
             } catch { return { ratio: null, window: null }; }
           })();
-          return {
+          const resp = {
             ok: true,
             ...state.m5.hud,
             hudLastAct: filtered[0]?.text || '',
@@ -1422,6 +1423,20 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
             criticalCap: engineThreshold((sid && agents.find((x) => String(pick(x?.session?.id, x?.sessionId, x?.id)) === sid)?.session) || agents[0]?.session || agents[0] || null),
             at: new Date().toISOString(),
           };
+          /* getHud 取证（2026-10-07）：记录不显示时从报告直接看「client 传了什么 sid、host 回了什么」——
+           * 这是本轮定位「按 id 过滤恒空」的关键手段，保留为常驻取证字段（只存摘要，不落全量）。 */
+          try {
+            state.m5.hudPollReq = {
+              at: resp.at,
+              sid: sid ? String(sid).slice(0, 24) : null,
+              chainSize: chain.size,
+              sessionMatched: filtered.length,
+              actsCount: list.length,
+              hudLastAct: resp.hudLastAct || null,
+              hudLastActGlobal: resp.hudLastActGlobal || null,
+            };
+          } catch { /* 吞 */ }
+          return resp;
         },
       });
       if (typeof ctx?.provide === 'function') {
