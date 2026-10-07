@@ -358,6 +358,98 @@ ok('m5.hudPoll 取证口径与 getHud 一致（按 sid 精确匹配）',
   /matched: state\.m5\.acts\.filter\(\(x\) => x\.sid === asid\)\.length,/.test(host),
   '取证口径仍走链 ⇒ 排查时看到的命中数与真实显示不一致');
 
+/* ═══════════ 6.15 压缩改「工具触发」（R4：不再伪造用户消息）═══════════ */
+console.log('\n== 6.15 自动压缩工具触发（替代 marker + 伪造恢复）==');
+/* 用户明确要求（2026-10-08）：「自动压缩时，**不用伪造一条我的信息**重新拉起会话」。
+ * 证据链与方案取舍见 docs/r4-compaction-tool-design.md；本段把该结论固化成绊线。 */
+const ct = read('compact-tool.mjs');
+/* 说明性文字（文件头会把旧机制当反例写出来）不能参与「未出现某字符串」的判定 ⇒ 剥注释后再查。
+ * 踩过的坑：`!/本轮先不执行任务/.test(ct)` 被**文件头里描述旧机制的那句话**判失败。 */
+const ctNoComment = ct.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+ok('compact-tool.mjs 按热换纪律动态加载（带 ?ts=）',
+  /import\(`\.\/compact-tool\.mjs\?ts=\$\{IMPL_TS\}`\)/.test(host),
+  '未带 ?ts= ⇒ 改模块后不随 toggle 生效（P16 教训）');
+ok('工具名 compact_context 单一来源（模块导出，host 不重复字面量）',
+  /export const TOOL_NAME = 'compact_context';/.test(ct) && !/compact_context/.test(hostNoComment),
+  '工具名散落多端 ⇒ 改名必漏改');
+ok('工具走官方 defineTool + tools.register',
+  /defineTool\(toolSpec\(\)\)/.test(ct) && /tools\.register\(defineTool/.test(ct),
+  '未走官方注册路径 ⇒ 模型看不到该工具');
+ok('工具门控接总开关 enabled（不是 effortEnabled）',
+  /readCfg: \(\) => \(\{ enabled: M3\.enabled === true \}\)/.test(host) && /if \(!d\.enabled\) return false;/.test(ct),
+  '门控接错开关 ⇒ 压缩工具的存在性跟随智能思考开关');
+ok('工具执行体绝不抛错（异常吞成结构化结果）',
+  /catch \(e\) \{\s*log\('warn', `智能压缩 工具执行异常（吞）[\s\S]{0,160}?return \{ ok: false, error: `内部错误/.test(ct),
+  '工具会抛错 ⇒ 中断本轮（智能思考同款教训：抛错对模型是可见失败）');
+ok('工具 output schema 三字段且 additionalProperties:false',
+  /additionalProperties: false/.test(ct) && /ok: \{ type: 'boolean', required: true/.test(ct)
+  && /scheduled: \{ type: 'string'/.test(ct) && /error: \{ type: 'string'/.test(ct),
+  'output schema 与实现漂移');
+ok('意图有 TTL（防陈旧意图在下一轮任务里突然触发）',
+  /export const INTENT_TTL_MS = 120_000;/.test(ct) && /Date\.now\(\) - it\.at > INTENT_TTL_MS/.test(ct),
+  '意图永不过期 ⇒ 登记后隔很久仍会触发压缩');
+ok('工具返回 scheduled=next-step（模型据此知道「可以继续干活」）',
+  /return \{ ok: true, scheduled: 'next-step' \};/.test(ct),
+  '未告知执行时机 ⇒ 模型会退回「停下等压缩」的旧习惯');
+
+const ctPreStep = /const preStepCompaction = async \(payload\) => \{([\s\S]*?)\n  \};/.exec(host)?.[1] ?? '';
+ok('解析出 preStepCompaction 函数体', ctPreStep.length > 0, '未找到 preStepCompaction');
+ok('pre-step 先装工具、再消费意图（与 R3 那个真 bug 同款护栏）',
+  /await ensureCompactTool\(\);\s*\n\s*await preStepCompaction\(payload\);/.test(host),
+  '懒安装排在消费之后 ⇒ 「工具接受了却没人消费意图」重演 R3 真 bug');
+ok('意图门在 critical 门之前（低占用也能按模型请求压缩）',
+  /const intent = compactToolApi \? compactToolApi\.peekIntent\(sid\) : null;/.test(ctPreStep)
+  && /const wanted = !!intent;/.test(ctPreStep)
+  && /if \(wanted\) compactToolApi\.takeIntent\(sid\);/.test(ctPreStep)
+  && /if \(!wanted && ratio < effCritical\) return;/.test(ctPreStep),
+  '顺序错 ⇒ 模型主动请求在低于强制线时被静默丢弃');
+ok('意图先消费后执行（防每个 step 反复重试）',
+  (() => {
+    /* 必须比**调用点**而非首次出现：函数体注释里也写了 compactIfNeeded（signal 守卫那条）。
+     * 踩过的坑：直接 indexOf 拿到的是注释位置，断言永远为假。 */
+    const code = ctPreStep.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    const t = code.indexOf('.takeIntent(sid)');
+    const c = code.indexOf('.compactIfNeeded(');
+    return t > -1 && c > -1 && t < c;
+  })(),
+  'takeIntent 晚于执行 ⇒ 失败后逐步重试，污染报告且浪费额度');
+ok('主动请求时先试 pressure、为 null 才退 overflow（保留策略优先）',
+  /result = await compaction\.service\.compactIfNeeded\(agent, 'pressure', sig\);/.test(ctPreStep)
+  && /result = await compaction\.service\.compactIfNeeded\(agent, 'context-overflow', sig\);/.test(ctPreStep)
+  && ctPreStep.indexOf("'pressure', sig") < ctPreStep.indexOf("'context-overflow', sig"),
+  '直接走 overflow ⇒ 丢掉引擎正常保留策略（overflow 的 retain=0 过于激进）');
+ok('意图消费全程留痕（compactIntents / lastCompactIntent）',
+  /state\.m3\.compactIntents \+= 1;/.test(ctPreStep) && /state\.m3\.lastCompactIntent = \{/.test(ctPreStep),
+  '消费无留痕 ⇒ 失败时无从定位（重演「工具接受成功却永不生效」）');
+
+/* 伪造恢复必须**彻底消失**（不是「不调用」而是「不存在」——留着重接上的地雷更危险） */
+for (const gone of ['maybeResumeAfterMarker', 'resumeViaAnyChannel', 'sessionController.prompt', 'agent.followup']) {
+  ok(`伪造恢复链路已整体删除：${gone}`,
+    !hostNoComment.includes(gone),
+    `仍存在于代码（非注释）⇒ 一行即可把它重新接上，伪造消息会复活`);
+}
+ok('恢复计数/上限机制随之退役',
+  !/resumeCountBySid|M5_RESUME_MAX/.test(hostNoComment),
+  '恢复计数仍在 ⇒ 投递链未真正退役');
+ok('教学改为工具版，且明确要求「不要为了压缩而停下」',
+  /调用后请\*\*直接继续当前任务\*\*——不要为了压缩而停下、不要结束回合/.test(ct),
+  '教学未写「不要停下」⇒ 模型会退回「停下等压缩」的旧行为');
+ok('教学不再教「本轮先不执行任务 + 写标记」（旧机制已废）',
+  !/本轮先不执行任务/.test(ctNoComment) && !/M3\.marker/.test(ctNoComment),
+  '旧教学残留 ⇒ 模型仍被引导去写标记，而标记路径已不再恢复');
+/* 一次性插件说明（M2.5）是最容易漏改的一处：它同样在教模型怎么用压缩。
+ * 漏改的后果不是报错，而是模型**写标记后等一个永远不来的自动恢复**（静默失效）。 */
+ok('新会话一次性说明本体已搬进模块（host 只做出口）',
+  /function renderBrief\(\{ criticalRatio \} = \{\}\) \{/.test(ct)
+  && /return api\.renderBrief\(\{ criticalRatio: M3\.criticalRatio \}\);/.test(host),
+  '说明文本仍散在 host ⇒ 与工具名/文案两处漂移');
+ok('一次性说明不再承诺「自动拉起」（已无该机制）',
+  !/自动拉起|自动恢复/.test(ct) || /没有\*\*任何自动拉起动作|不需要\*\*任何「待执行」占位/.test(ct),
+  '说明仍在承诺自动拉起 ⇒ 模型会等一个永远不会到来的恢复');
+ok('一次性说明明确「没有自动拉起动作」这一反向澄清',
+  /没有\*\*任何自动拉起动作/.test(ct),
+  '未做反向澄清 ⇒ 模型可能保留旧预期（写标记等恢复）');
+
 /* ═══════════ 6.8 R1 智能思考字段三端对账 ═══════════ */
 console.log('\n== 6.8 智能思考字段（FIELDS ↔ schema ↔ M3_DEFAULTS）==');
 ok('FIELDS 含 effortEnabled', fieldsKeys.includes('effortEnabled'), '面板缺该字段');

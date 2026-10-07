@@ -410,9 +410,8 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
    *  压缩成功后 sessionController.prompt() 自动投递恢复提示（host 直发用户消息的官方通道，
    *  "Admit one prompt after explicitly resuming its Session"）→ agent 以压缩后上下文拉起，继续执行原任务。
    *  防循环：自动恢复最多 2 次，超限留给用户手动。 */
-  const lastUserTextBySid = new Map(); // sid -> 最近一条用户消息文本（恢复兜底）
-  const pendingBySid = new Map(); // sid -> { task, at }（B3：resumes 字段写入从未读取，已随审查退役）
-  const resumeTimers = new Set(); // A7（审查）：2s 恢复 setTimeout 在册，卸载时统一清（防禁用/热换窗口内旧实例投递）
+  const lastUserTextBySid = new Map(); // sid -> 最近一条用户消息文本（marker 挂起任务的兜底来源）
+  const pendingBySid = new Map(); // sid -> { task, at }（marker 挂起任务；R4 起不再用于伪造恢复）
   const briefedBySid = new Set(); // M2.5：新会话一次性插件说明（每激活一份，重活后重讲一次无妨）
   /* R1：智能思考教学的一次性标记（与压缩说明分开——两者开关独立，可能只开一个）。
    * ⚠️ 与 briefedBySid 一样，**压缩成功后必须清除**（见 clearBriefed 的注释）。 */
@@ -430,8 +429,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       state.m2.briefReissues = (state.m2.briefReissues ?? 0) + 1;
     } catch { /* 吞 */ }
   };
-  const resumeCountBySid = new Map(); // sid -> 已自动恢复次数
-  const M5_RESUME_MAX = 2;
+  /* `resumeCountBySid` / `M5_RESUME_MAX` / `resumeTimers` 已随伪造恢复投递链一并删除（R4）。 */
   /** M5.5 取证：尝试记录（同时排一份报告）。 */
   const m55Attempt = (rec) => {
     try {
@@ -459,135 +457,23 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     if (hp.error) base.promptAccessError = hp.error;
     return base;
   };
-  const maybeResumeAfterMarker = (sid, reason) => {
-    try {
-      if (reason !== 'marker') return; // 仅显式标记触发恢复（兜底/强制压缩是无人值守场景，无挂起任务）
-      /* A6（审查）：上限判定前置——不先删 pending/熄灯，保留「待执行」可见性，徽章改文案请用户手动接管 */
-      const done = resumeCountBySid.get(sid) ?? 0;
-      if (done >= M5_RESUME_MAX) {
-        const pend = pendingBySid.get(sid);
-        publishHud({ hudPending: JSON.stringify({ task: `${pend?.task ? String(pend.task).slice(0, 100) + ' ' : ''}(自动恢复已达上限 ${done}/${M5_RESUME_MAX}，请手动继续)` }) });
-        m55Attempt({ phase: 'abort', detail: `已达上限 ${done}/${M5_RESUME_MAX}，请用户手动继续`, sid: sid.slice(0, 8) });
-        return;
-      }
-      const pending = pendingBySid.get(sid);
-      pendingBySid.delete(sid);
-      publishHud({ hudPending: '' });
-      if (!pending) {
-        m55Attempt({ phase: 'abort', detail: '无挂起任务（pending 缺失）', sid: sid.slice(0, 8) });
-        return;
-      }
-      const resumeText = `（context-pilot 自动恢复）上下文压缩已完成。请继续执行压缩前收到的任务：${pending.task}\n这是压缩后自动拉起的执行轮；除非占用仍然吃紧，不要再写压缩标记，直接执行任务。`;
-      const rt = setTimeout(() => {
-        resumeTimers.delete(rt);
-        try {
-          resumeViaAnyChannel(sid, resumeText, done);
-        } catch (e) {
-          m55Attempt({ phase: 'dispatch-error', error: msg(e) });
-          log('warn', `M5.5 恢复调度异常（吞）：${msg(e)}`);
-        }
-      }, 2000); // 等摘要落定/表面重建后再拉起
-      rt.unref?.();
-      resumeTimers.add(rt); // A7：在册，卸载时 clearTimeout
-      m55Attempt({ phase: 'scheduled', sid: sid.slice(0, 8), taskLen: pending.task.length, resumeInMs: 2000 });
-    } catch (e) {
-      m55Attempt({ phase: 'schedule-error', error: msg(e) });
-    }
-  };
-  /** 多通道恢复：A sessionController.prompt → B ctx.remote.session 代理 → C 直通入队（官方同原语）。 */
-  const resumeViaAnyChannel = (sid, resumeText, doneCount) => {
-    const scProbe = probeService('sessionController');
-    const remoteProbe = tryOf(() => {
-      const r = ctx?.remote?.session;
-      return r ? { present: true, hasPrompt: typeof r.prompt === 'function' } : { present: false };
-    });
-    state.m55.channelProbe = {
-      at: new Date().toISOString(),
-      sessionController: scProbe,
-      ctxRemote: remoteProbe.error ? { error: remoteProbe.error } : remoteProbe.value,
-    };
-    schedule('m5.5-resume', 100);
-
-    const requestId = `context-pilot-resume-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-    const request = {
-      requestId,
-      sessionId: sid,
-      mode: 'queue',
-      content: [{ type: 'text', text: resumeText }],
-      clientTimeZone: 'Asia/Shanghai',
-    };
-
-    /* 通道 C：与官方 prompt() 相同的原语（createUserMessage + agent.followup("next-turn")）直通入队。 */
-    const tryDirectAdmission = () => {
-      try {
-        const factoryReady = typeof createUserMessage === 'function';
-        const agent = tryOf(() => svc('agents')?.get?.(sid)).value;
-        const agentProbe = agent
-          ? {
-              status: pick(agent?.status) ?? null,
-              hasFollowup: typeof agent.followup === 'function',
-              hasSteer: typeof agent.steer === 'function',
-            }
-          : null;
-        if (!factoryReady || !agent || typeof agent.followup !== 'function') {
-          m55Attempt({ phase: 'failed', channel: 'direct-followup', detail: `factory=${factoryReady} agent=${!!agent}`, agentProbe });
-          log('warn', 'M5.5 恢复：所有通道不可达，任务保留在「待执行」中');
-          return;
-        }
-        const message = createUserMessage({
-          content: [{ type: 'text', text: resumeText }],
-          source: { kind: 'user', rpcId: requestId, clientTimeZone: 'Asia/Shanghai' },
-        });
-        agent.followup(message);
-        const queued = tryOf(() => agent.inbox?.nextTurn?.some?.((m) => m?.source?.rpcId === requestId)).value;
-        resumeCountBySid.set(sid, doneCount + 1);
-        m55Attempt({
-          phase: 'delivered',
-          channel: 'direct-followup',
-          agentProbe,
-          queued: queued === true ? 'confirmed' : queued === false ? 'not-in-inbox(可能已开跑)' : 'probe-skipped',
-        });
-        log('info', `M5.5 恢复提示已投递（direct followup，第 ${doneCount + 1} 次）→ agent 以压缩后上下文继续执行原任务`);
-      } catch (e) {
-        m55Attempt({ phase: 'failed', channel: 'direct-followup', error: msg(e) });
-        log('warn', `M5.5 恢复直通失败（吞）：${msg(e)}`);
-      }
-    };
-
-    /* 通道 A/B：远程面 prompt。Promise.resolve().then 包裹——同步抛错也走 rejection 分支。 */
-    const remoteCandidates = [];
-    if (scProbe.found && scProbe.hasPrompt) {
-      // C1 附注（审查）：官方契约 prompt(request, signal)——缺 signal 时内部 throwIfAborted 必拒（M5.5 首测实证）；30s 超时防挂
-      remoteCandidates.push({ name: 'sessionController.prompt', call: () => svc('sessionController').prompt(request, AbortSignal.timeout(30_000)) });
-    }
-    if (remoteProbe.value?.present && remoteProbe.value?.hasPrompt) {
-      remoteCandidates.push({ name: 'ctx.remote.session.prompt', call: () => ctx.remote.session.prompt(request) });
-    }
-    const tryRemote = (i) => {
-      if (i >= remoteCandidates.length) return tryDirectAdmission();
-      const c = remoteCandidates[i];
-      Promise.resolve()
-        .then(c.call)
-        .then((result) => {
-          if (result && typeof result === 'object' && result.accepted === false) {
-            throw new Error(`accepted:false ${tryOf(() => JSON.stringify(result)).value?.slice(0, 200) ?? ''}`);
-          }
-          resumeCountBySid.set(sid, doneCount + 1);
-          m55Attempt({
-            phase: 'delivered',
-            channel: c.name,
-            result: tryOf(() => JSON.stringify(result)).value?.slice(0, 200) ?? null,
-          });
-          log('info', `M5.5 恢复提示已投递（${c.name}，第 ${doneCount + 1} 次）→ agent 以压缩后上下文继续执行原任务`);
-        })
-        .catch((e) => {
-          m55Attempt({ phase: 'rejected', channel: c.name, error: msg(e) });
-          log('warn', `M5.5 恢复投递被拒（${c.name}，吞）：${msg(e)}`);
-          tryRemote(i + 1);
-        });
-    };
-    tryRemote(0);
-  };
+  /* ❌❌ M5.5「压制后伪造恢复」投递链 —— **2026-10-08 R4 整体删除** ❌❌
+   *
+   * 删除位置：`maybeResumeAfterMarker`（2s 定时调度 + 上限计数 + 待执行徽章）
+   *          `resumeViaAnyChannel`（通道 A `sessionController.prompt` → B `ctx.remote.session.prompt`
+   *           → C `createUserMessage` + `agent.followup("next-turn")`）。
+   *
+   * 删除依据（用户明确要求）：「自动压缩时，**不用伪造一条我的信息**重新拉起会话」。
+   * 三个通道的最终落点都是 `createUserMessage({ content, source: { kind: 'user', … } })`
+   * ⇒ 无论走哪条，都是**替用户发言**：UI 上表现为一条用户消息，语义上等于用户重新下了任务。
+   *
+   * 替代方案：模型主动调工具 `compact_context` ⇒ 下一步 pre-step 轮内压缩 ⇒ 本轮无缝继续，
+   * **零消息**（不注入、不投递、不恢复）。源码依据与「为什么不能只改投递方式」见
+   * plugin/compact-tool.mjs 文件头（inbox 只有 next-turn/next-step 两个队列且载荷类型是
+   * UserMessage；system/developer 消息只写对话不唤醒 agent；steer 仍是用户消息且 idle 后不可用）。
+   *
+   * 保留：`state.m55` 取证字段与 `m55Attempt`（marker 重武装路径仍在用），
+   *       `resumeTimers` 的卸载清理（空集合无害）。待 marker 通道一并退役时清除。 */
 
   /* ---- M4.5 诊断：宿主内 Config schema 解析状态（与 entry 静态导出同一模块，独立重解析）。 ---- */
   try {
@@ -654,6 +540,16 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
        *  ⚠️ 曾因该函数**全静默**导致「工具接受成功却永不变档」无从定位（effortToolCalls=1、
        *  effortSwitches=0、effortHooks 从未赋值）⇒ 必须留痕。 */
       effortDiag: { calls: 0, at: null, enabled: false, agents: null, installed: 0, failed: 0, error: null, hookError: null },
+      /* 智能压缩「工具触发」（R4）取证 —— 替代旧 marker + 伪造恢复链路。
+       * 意图登记（工具侧）与消费（pre-step 侧）都必须留痕：这条链路一旦静默，
+       * 就会重演「工具接受成功却永不生效」那类无从定位的故障。 */
+      compactTool: null, // 工具注册结果
+      compactToolDiag: { calls: 0, at: null, enabled: false, installed: false, intents: 0, error: null },
+      compactToolCalls: 0,
+      lastCompactTool: null, // 最近一次工具登记（sid/reason/repeated）
+      compactIntents: 0, // pre-step 消费意图次数
+      compactIntentExpired: 0, // 意图过期作废次数（登记后未被消费）
+      lastCompactIntent: null, // 最近一次消费详情（trigger/ratio/acted/shadowedTokens/ms）
     },
     // M5 HUD 发布取证（entry 查找/edit 结果全程留痕——弹窗侧空态无法区分静默失败）
     // hud.gen = 实例指纹：客户端取到的 gen 应与本实例一致；不一致 = RPC 打到了旧激活的僵尸面
@@ -730,19 +626,39 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       return null;
     });
 
-  /* 官方 defineTool 异步解析；就绪后若开关已开则补注册（开关关闭时不注册——完全不介入）。 */
-  loadDefineTool()
-    .then(({ defineTool: fn, via, probe }) => {
-      defineToolFn = fn;
-      state.m3.effortToolLoader = { at: new Date().toISOString(), via, ok: !!fn, probe: probe.slice(-4) };
-      if (!fn) {
-        log('warn', '智能思考 defineTool 不可达 ⇒ 换档工具不注册（主流程不受影响）');
-        return;
-      }
-      try { mergeConfig(); } catch { /* 吞 */ }
-      if (M3.effortEnabled === true) effortReady.then((api) => api?.ensure());
+  /* ═══════════ 智能压缩「工具触发」（R4，2026-10-08）═══════════
+   * 目的：**自动压缩不再伪造用户消息重新拉起会话**（用户明确要求）。
+   * 机制：模型调 compact_context ⇒ 登记「下一步压缩」意图 ⇒ 宿主 pre-step 消费并执行轮内压缩
+   *       ⇒ 本轮无缝继续。全程零消息（不注入、不投递、不恢复）。
+   * 源码依据与替代方案取舍见 plugin/compact-tool.mjs 文件头。 */
+  let compactToolApi = null;
+  const compactToolReady = import(`./compact-tool.mjs?ts=${IMPL_TS}`)
+    .then((m) => {
+      compactToolApi = m.createCompactTool({
+        svc, tryOf, pick, msg, log, state,
+        schedule: (reason, delay) => schedule(reason, delay), // 同 effort：避免 const TDZ
+        readCfg: () => ({ enabled: M3.enabled === true }),
+        getDefineTool: () => defineToolFn,
+      });
+      return compactToolApi;
     })
-    .catch((e) => log('warn', `智能思考 defineTool 解析异常（吞）：${msg(e)}`));
+    .catch((e) => {
+      log('warn', `智能压缩模块加载失败（吞，该功能不可用，主流程不受影响）：${msg(e)}`);
+      return null;
+    });
+
+  /** 智能压缩工具懒安装入口（由 pre-step 最前面调用；幂等；总开关关闭时内部直接返回）。 */
+  const ensureCompactTool = async () => {
+    try {
+      mergeConfig();
+      if (M3.enabled !== true) return false;
+      const api = await compactToolReady;
+      return api ? api.ensure() : false;
+    } catch (e) {
+      log('warn', `智能压缩懒安装异常（吞）：${msg(e)}`);
+      return false;
+    }
+  };
 
   /**
    * 智能思考懒安装入口 —— **独立于 M2 注入分支**（R3-S4 的结构性修复）。
@@ -763,6 +679,23 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       return false;
     }
   };
+
+  /* 官方 defineTool 异步解析；就绪后若开关已开则补注册（开关关闭时不注册——完全不介入）。
+   * ⚠️ 本块必须放在 effortReady / compactToolReady **之后**：回调里引用这两个 const。
+   *    微任务语义下「晚于同步求值」本就不会真 TDZ，但把声明排在引用之前才不依赖这个巧合。 */
+  loadDefineTool()
+    .then(({ defineTool: fn, via, probe }) => {
+      defineToolFn = fn;
+      state.m3.effortToolLoader = { at: new Date().toISOString(), via, ok: !!fn, probe: probe.slice(-4) };
+      if (!fn) {
+        log('warn', 'defineTool 不可达 ⇒ 换档/压缩工具均不注册（主流程不受影响）');
+        return;
+      }
+      try { mergeConfig(); } catch { /* 吞 */ }
+      if (M3.effortEnabled === true) effortReady.then((api) => api?.ensure());
+      if (M3.enabled === true) compactToolReady.then((api) => api?.ensure());
+    })
+    .catch((e) => log('warn', `defineTool 解析异常（吞）：${msg(e)}`));
 
   /** 提取一条消息的可见文本（复杂度启发 + 关键词检测共用）。 */
   const messageText = (message) => {
@@ -1129,14 +1062,15 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
    *  且若 markerMinRatio > 卡门槛则反向错配（教了却不执行）。现统一为同一门槛，
    *  语义：「能收到卡 = 标记有效」，无论用户怎么填都不会出现死区或错配。 */
   const renderPolicyCard = (ratio) => {
-    if (ratio == null || ratio < M3.markerMinRatio) return null;
-    const pct = `${(ratio * 100).toFixed(0)}%`;
-    return [
-      `压缩决策卡（context-pilot，当前占用 ${pct}）：先判断接下来的任务是否还依赖本轮之前的对话细节——`,
-      `• 不依赖（换了话题/新子任务/上一阶段已收尾），或任务繁重需要预留空间：本轮先不执行任务——回复中先用一行「待执行：<任务简述>」记下用户任务，然后在最后一行单独写 ${M3.marker}。本轮结束后自动压缩，压缩完成后系统会自动拉起新一轮（压缩后的干净上下文），你继续执行该任务，用户无需重发。`,
-      `• 依赖（要引用之前给出的文件路径/结论/报错现场/长推理链中间量）：不写标记。占用达 ${Math.round(M3.criticalRatio * 100)}% 时系统会强制压缩（同样保留摘要+近期消息），无需任何操作。`,
-      `• 写标记前自检：本轮关键产物（文件路径、决策、未落盘的结论）已写入文件或本回复正文，再写标记；不要连续多轮写——压缩后占用需重新累积。`,
-    ].join('\n');
+    /* 教学文本本体在 compact-tool.mjs（压缩域自持，与 effort 同构）——此处只做出口。
+     * 门槛仍是 markerMinRatio（2026-10-07 用户决定：决策卡门槛 = 该值，消除「教了却不执行」的死区）。
+     * ⚠️ 文本已随 R4 改写为**工具版**：旧卡教的是「本轮先不执行任务 + 写标记」，
+     *    那正是会被伪造恢复消息拉起的那套；新卡要求「调用后直接继续，不要停下」。 */
+    try {
+      const api = compactToolApi;
+      if (!api) return null;
+      return api.renderCard({ ratio, minRatio: M3.markerMinRatio, criticalRatio: M3.criticalRatio });
+    } catch { return null; }
   };
 
   /* 官方工厂异步解析；就绪前监听器直接放行（不注入、不阻塞）。 */
@@ -1170,8 +1104,10 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
    * 官方源码实证（docs/reference @deepseek-ai/dsh-compaction-basic lib/index.js）：
    *  - compactIfNeeded(agent,"pressure",signal) 即官方 pre-step 自动压缩的原话调用（阈值走引擎自身 config，默认 80%——
    *    因此本函数的 critical 兜底在 ≥85% 时必然越过引擎阈值而生效；引擎自身监听若已压过则返回 null，幂等安全）；
-   *  - "context-overflow" 触发**绕过引擎阈值**（selectCompactableRange retain=0 → compactRegion，owner:"current-turn"）——
-   *    关键词「先压缩」在 20%~85% 区间也能立即生效的合法通道；
+   *  - "context-overflow" 触发**绕过引擎阈值**：源码原文「bypasses the normal threshold and
+   *    retained-tail policy so it can force one useful balanced reduction」，内部走
+   *    selectCompactableRange(session, measurement, **0**) ⇒ 保留近端≈0（只留最后一个节点 + tool-pairing 回退）。
+   *    ⚠️ 代价明确：这是唯一能低于阈值强制压缩的通道，但保留策略比引擎默认（retainRatio 0.16）激进得多。
    *  - compactNow 必须 idle（runMaintenance），轮内不可用——那是 idle 安全网专用。 */
   const preStepCompaction = async (payload) => {
     try {
@@ -1186,10 +1122,16 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       const mr = measureRatio(agent.session); // B2：读取收敛
       if (!mr.ok || mr.ratio == null) return;
       const ratio = mr.ratio;
+      /* ═══ R4（2026-10-08）：模型主动登记「下一步压缩」意图 ⇒ 轮内执行，本轮无缝继续 ═══
+       * 这是替代「marker + 伪造恢复消息」的核心：工具调用必然产生下一步 ⇒ 下一步的 pre-step
+       * 就在这里执行压缩 ⇒ 之后的步骤都在压缩后的上下文上继续，**不需要任何消息**。
+       * 意图无论成败都**先消费掉**（避免每个 step 反复尝试一次，污染报告也浪费额度）。 */
+      const intent = compactToolApi ? compactToolApi.peekIntent(sid) : null;
+      const wanted = !!intent;
+      if (wanted) compactToolApi.takeIntent(sid);
       /* C-own：生效强制线 = min(用户配置, 引擎阈值)——插件线必须先行，引擎只作卸载后的安全网 */
       const effCritical = Math.min(M3.criticalRatio, engineThreshold(agent));
-      if (ratio < effCritical) return; // 关键词通道已裁撤（用户决定）：pre-step 仅剩 critical 兜底
-      const trigger = 'pressure';
+      if (!wanted && ratio < effCritical) return;
       const compaction = resolveCompactionFor(agent);
       if (!compaction.service) {
         log('warn', `M3.5 pre-step 先压：解析不到作用域 compaction，跳过`);
@@ -1197,9 +1139,37 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       }
       state.m3.preStepActs += 1;
       const t0 = Date.now();
-      log('info', `M3.5 pre-step 先压开始：trigger=${trigger}（危险占用 ${(ratio * 100).toFixed(1)}%，via ${compaction.via}）`);
-      const result = await compaction.service.compactIfNeeded(agent, trigger, sig);
+      let trigger = wanted ? 'context-overflow' : 'pressure';
+      log('info', `M3.5 pre-step 先压开始：trigger=${trigger}（占用 ${(ratio * 100).toFixed(1)}%，via ${compaction.via}${wanted ? '，模型主动请求' : ''}）`);
+      let result;
+      if (wanted) {
+        /* 先按引擎正常阈值试一次：≥80% 时走 pressure ⇒ 用引擎默认保留策略（优于 overflow 的 retain=0）。
+         * 低于阈值时 pressure 在**任何 LLM 调用之前**就 return null（源码：先比 spec.thresholdTokens），
+         * 因此这次试探几乎零成本，不是「多压一次」。 */
+        result = await compaction.service.compactIfNeeded(agent, 'pressure', sig);
+        if (result == null) {
+          trigger = 'context-overflow';
+          result = await compaction.service.compactIfNeeded(agent, 'context-overflow', sig);
+        } else {
+          trigger = 'pressure';
+        }
+      } else {
+        result = await compaction.service.compactIfNeeded(agent, trigger, sig);
+      }
       state.m3.preStepOk += 1;
+      if (wanted) {
+        state.m3.compactIntents += 1;
+        state.m3.lastCompactIntent = {
+          at: new Date().toISOString(),
+          sessionId: sid,
+          reason: intent?.reason || null,
+          ratio: +(ratio * 100).toFixed(1),
+          trigger,
+          acted: result != null,
+          shadowedTokens: result?.shadowedTokenCount ?? null,
+          ms: Date.now() - t0,
+        };
+      }
       state.m3.lastPreStep = {
         at: new Date().toISOString(),
         sessionId: sid,
@@ -1242,13 +1212,17 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
 
   /* ---- M2.5 新会话一次性插件说明：让任何新会话的 Agent 不靠外部文档就明白压缩流程与用法 ----
    * A3（审查）：由冻结常量改为函数——原实现 apply 期拼死 M3.marker 与「85%」字样，config 热改后
-   * 说明文本与活值检测（事件解析/政策卡）自相矛盾；现每次注入现拼活值。 */
-  const renderBrief = () => [
-    '【context-pilot 插件说明（本会话仅此一次）】每轮开头的「Context usage」行就是本插件在测量上下文占用。',
-    '占用达到阈值时，该行下方会附「压缩决策卡」：若接下来的任务不依赖更早的对话细节，可本轮挂起——写一行「待执行：<任务>」，并在回复最后一行单独写 ' + M3.marker + '；',
-    '回合结束后插件自动压缩上下文（旧对话收为摘要），并自动拉起新一轮让你继续该任务（以「(context-pilot 自动恢复)」开头），用户无需重发。',
-    '若任务依赖细节则照常执行、勿写标记；占用达 ' + Math.round(M3.criticalRatio * 100) + '% 强制压缩线时系统自动压缩。标记不要连续多轮写（压缩后占用需重新累积）。',
-  ].join('');
+   * 说明文本与活值检测（事件解析/政策卡）自相矛盾；现每次注入现拼活值。
+   * ⚠️ R4（2026-10-08）：文本已改为**工具版**，且本体搬进 plugin/compact-tool.mjs（压缩域自持，
+   *    与 effort.mjs 同构）。旧文本教的是「本轮挂起 + 写标记 + 压缩后自动拉起」——那条链路已被
+   *    用户否决（伪造用户消息）；此处只做出口，漏改会导致模型**等一个永远不来的恢复**。 */
+  const renderBrief = () => {
+    try {
+      const api = compactToolApi;
+      if (!api) return null;
+      return api.renderBrief({ criticalRatio: M3.criticalRatio });
+    } catch { return null; }
+  };
 
   /* 智能思考的**注入文本**（一次性教学 / 每轮后缀）已随功能域搬入 plugin/effort.mjs：
    *   renderBrief(eff)  —— 一次性教学，覆盖度 6/6（当前值/可选档/工具名+用法/何时该用/生效时机/代价）
@@ -1261,6 +1235,9 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       /* 智能思考：懒安装**先于一切**（R3-S4：与 M2 注入分支彻底解耦，任何早退都影响不到它）。
        * 幂等 + 开关关闭时内部直接返回 ⇒ 放在最前面零成本。 */
       await ensureEffort();
+      /* 智能压缩工具（R4）：同款懒安装——同样必须在早退之前，否则「工具接受了却没有人消费意图」
+       * 会重演 R3 那个真 bug（工具成功、永不生效）。 */
+      await ensureCompactTool();
       await preStepCompaction(payload); // M3.5 通道1：轮内先压（绝不上抛）
       const decision = await next();
       if (!decision || decision.kind === 'reject') return decision;
@@ -1427,7 +1404,14 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
           /* R1：压缩成功 ⇒ 一次性说明（压缩流程 + 智能思考教学）已随旧对话被收走，
            * 清除「已讲」标记让下一轮重讲一次（否则模型永久失去用法说明）。 */
           clearBriefed(sid);
-          maybeResumeAfterMarker(sid, reason); // M5.5：标记压缩成功 → 自动投递恢复提示
+          /* ❌ R4（2026-10-08）**已删除伪造恢复消息**（用户明确要求：「自动压缩时，不用伪造一条
+           * 我的信息重新拉起会话」）。原实现 `maybeResumeAfterMarker` → `resumeViaAnyChannel`
+           * 会走 `sessionController.prompt(...)`，其内部是
+           * `createUserMessage({content, source:{kind:'user'}})` + `agent.followup` ⇒
+           * 等于**替用户发言**。
+           * 现在改由工具 `compact_context` 在轮内完成压缩（见 preStepCompaction），
+           * 本轮自然继续，**不需要任何消息**；若模型没有主动请求，idle 压缩就只是收尾动作
+           * （占用已降，用户下一轮直接继续即可）。 */
           log('info', `M3 idle 扫除完成：${result ? `shadowed ${result.shadowedSeqs?.length ?? '?'} nodes / ~${result.shadowedTokenCount ?? '?'} tokens` : 'null（无可压区间）'}`);
           schedule('m3-act', 500);
         })
@@ -1569,8 +1553,6 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       ctx.effect(() => () => {
         for (const t of pending.values()) { try { clearTimeout(t); } catch { /* 吞 */ } }
         pending.clear();
-        for (const t of resumeTimers) { try { clearTimeout(t); } catch { /* 吞 */ } } // A7：2s 恢复调度随卸载清
-        resumeTimers.clear();
         for (const d of disposers) { try { d?.(); } catch { /* 吞 */ } }
       }, 'context-pilot:cleanup');
     }

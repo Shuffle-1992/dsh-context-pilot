@@ -814,3 +814,78 @@ progress 不收敛 / 不用完整时间 / 恢复无参回退 / 过滤退回全�
 #### 部署
 
 `client.js` ⇒ **刷新页面**；`host.impl.mjs` + `wire.host.mjs`（后者仅签名散文）⇒ **plugin toggle 热换**。
+
+### R4：自动压缩改「工具触发」——彻底删除伪造用户消息 —— ✅ 2026-10-08
+
+**需求（用户原话）**：「现在可以开始自动压缩优化内容了，前面好像有落袋计划内容。就是自动压缩时，
+**不用伪造一条我的信息**重新拉起会话。」
+
+**落袋计划的定位**：`docs/r2-tool-switch-design.md` §6 早已提出「压缩能否也做成工具」，
+其中**方案 A（工具 + 轮末执行）**被列为推荐。本轮先去 asar 把 API 面摸清，结论是
+**方案 A 需要修正**，且三条「绕开消息」的捷径全部不通。
+
+#### 源码级事实（asar 实证，全部可复现）
+
+| 路径 | 事实 | 结论 |
+|---|---|---|
+| inbox | 只有 `next-turn` / `next-step` 两个队列；`agent/inbox/inserted` 载荷类型是 **`UserMessage`** | 往 inbox 塞东西**必然是消息** ⇒ 时机不是问题，**通道**才是 |
+| `system/developer` message | `session.append("developer/message", {message: createDeveloperMessage({source:{kind:'tool-registry'}})})` 确实存在 | 能写**非用户**内容，但**只写对话、不唤醒 agent** ⇒ 无法拉起 |
+| `mode:"steer"` | `placement = running ? (mode==='steer' ? 'steering' : 'queued') : 'transcript'`；`turn-stopping` 条件含 "no fresh steering" | 能注入当前回合，但**内容仍是用户发言**，且 idle 后 `status!=='running'` 用不了 ⇒ 不解决诉求 |
+| **工具调用** | 工具 ⇒ 必须回灌 tool result ⇒ **下一步必然存在**；`agent/pre-step` 在下一步请求前执行 | ✅ **在 pre-step 压缩 ⇒ 压缩天然作用于下一步，全程零消息** |
+
+**轮内 trigger 语义**（`compactIfNeeded`，源码原文）：
+`"context-overflow"` **bypasses the normal threshold and retained-tail policy**；内部走
+`selectCompactableRange(session, measurement, 0)` ⇒ 第三参是**保留 token 预算**，`0` = 只留最后一个节点。
+`"pressure"` 则未达阈值时**在任何 LLM 调用之前**就 return null。
+
+#### 与落袋方案的偏差（重要）
+
+方案 A 的推理是「模型调工具 → 本轮正常结束 → idle 执行 → 不需要恢复消息」。
+**但这在「压缩是为了腾空间继续干活」的主用例上不成立**：推迟到轮末 ⇒ 本轮内不腾空间，
+且与既有 idle safety-net 几乎重合，工具形同虚设。
+⇒ 改为**压缩落在下一步开始前**（工具调用保证下一步存在）。此方案**严格支配**原方案：
+本轮内腾空间、模型不必停、零消息、且压缩**必然发生**。
+
+#### 实施
+
+- **新模块 `plugin/compact-tool.mjs`**（依赖图叶子，与 `effort.mjs` 同构）：
+  工具 `compact_context`（可选 `reason`）**只登记意图并立即返回** `{ok:true, scheduled:"next-step"}`；
+  意图表 `Map<sid,{at,reason}>` + TTL 120s；**注入教学本体也在此模块**
+  （`renderBrief` 一次性说明 + `renderCard` 决策卡 + 工具自描述）。
+- **host 消费**（`preStepCompaction`）：意图门**在 critical 门之前**（`if (!wanted && ratio < effCritical) return`）；
+  `takeIntent` 先于执行（失败也不逐步重试）；主动请求**先试 `pressure`**（≥阈值时用引擎正常保留策略），
+  为 null 才退 `context-overflow` 强制。
+- **删除**：`maybeResumeAfterMarker` / `resumeViaAnyChannel`（三通道整函数删除）/
+  `resumeCountBySid` / `M5_RESUME_MAX` / `resumeTimers`。代码中
+  `sessionController.prompt`·`agent.followup`·`createUserMessage(source.kind:'user')` **零出现**。
+- **三处教学同步改写**（最易漏、且漏改是**静默失效**）：三处都明确「调用后直接继续，
+  **不要为了压缩而停下**」，并**反向澄清**「没有任何自动拉起动作」。
+  若只改机制不改文案，模型会继续写标记并**等一个永远不来的恢复**。
+
+**结构收益**：`host.impl.mjs` **1563 → 1500 行**；新增 `compact-tool.mjs` 241 行。
+
+#### 验收
+
+- **321 断言全绿**（contract **203 → 227** + static **34 → 37** + report 57）。
+- **14 项变异全部被抓住**：门控接错开关 / 工具名字面量散落 / 工具改为抛错 / TTL 失效 /
+  懒安装排在消费之后 / 意图门被 critical 门吞掉 / 直接走 overflow / 意图不消费 /
+  **伪造恢复被重新接上** / 教学丢掉「不要停下」/ 消费不留痕 / 说明退回旧文案 /
+  说明出口内联 / 说明不做反向澄清。
+- 过程中修掉 2 处**我自己写错的断言**：① 顺序断言比的是 `indexOf` 首次出现，而首次出现在
+  **注释**里（`compactIfNeeded 契约首行…`）⇒ 断言恒假；② `!/本轮先不执行任务/.test(ct)`
+  被**文件头里描述旧机制的那句话**判失败 ⇒ 须先剥注释。
+  ⇒ 教训：「未出现某字符串」类断言**必须先剥注释**，否则把解释性文字当成违规。
+
+#### 待办（下一步）
+
+1. **真机 E2E**：让模型调 `compact_context`，核对 `m3.compactToolCalls` / `compactIntents` /
+   `lastCompactIntent.trigger` / `preStepOk`，确认本轮不中断且**零消息注入**。
+2. **marker 通道彻底退役**：删 `M3.marker` / `armedTtlMs` / 标记解析 / 武装灯 / 「待执行」徽章 /
+   `pendingBySid` / `lastUserTextBySid` / `state.m55` / 面板两字段（`markerMinRatio` 保留——
+   它同时是决策卡注入门槛）。
+3. **保留策略可选**：`context-overflow` 的 `retain=0` 较激进；若真机显示「压太狠」，
+   可由插件自行算范围后调 `compactRegion`，复刻引擎 `retainRatio` 预算。
+
+#### 部署
+
+`host.impl.mjs` + 新模块 `compact-tool.mjs` ⇒ **plugin toggle 热换**（无 client / schema 改动）。

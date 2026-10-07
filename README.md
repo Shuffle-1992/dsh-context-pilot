@@ -54,13 +54,20 @@ DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`（面板名�
 **核心原则**：不要把阈值调得过低去追命中率——**过度压缩导致模型重读文件/重跑命令的返工成本，
 远超省下的 token**。高缓存价档（命中仍计费）压早更划算；DeepSeek 命中近免费，压晚保信息更好。
 
-### 2.2 标记闭环（零输入自动续跑）
+### 2.2 自动压缩：工具触发（零输入、零消息、本轮不中断）
 
-1. 模型回复尾行写 `[cp:compact]`
-2. 插件解析武装（TTL 120s）→ 回合结束 agent 转 idle 时立即压缩
-3. 压缩成功后自动投递恢复提示 → 模型以干净上下文继续原任务
+1. 模型判断该压缩时，调用工具 **`compact_context`**（可选 `reason`）
+2. 插件登记「下一步压缩」意图并**立即返回** → 工具调用让本轮**继续到下一步**
+3. 下一步的 `agent/pre-step` 先执行轮内压缩（`compactIfNeeded`），**再**组装本步请求
+4. 之后的步骤都在压缩后的上下文上继续 —— **本轮不中断、不注入任何消息**
 
-用户全程零操作。模型也可在回复里写「待执行：<任务>」显式记录要续跑的任务。
+用户全程零操作，且**不存在**任何伪造用户发言（旧「标记 + 自动拉起」机制已于 R4 整体删除）。
+
+> 为什么工具能做到：工具调用 ⇒ 必须回灌 tool result ⇒ **下一步必然存在**，
+> 而 pre-step 天然在下一步请求之前。压缩与「叫醒」因此解耦——**不需要叫醒**。
+> 详见 [`docs/r4-compaction-tool-design.md`](docs/r4-compaction-tool-design.md)。
+>
+> 占用达强制压缩线（默认 80%）时，仍由既有 pre-step / idle 安全网自动压缩，无需模型操作。
 
 ### 2.2b 智能思考（可选，默认关闭）
 
@@ -135,7 +142,7 @@ Agent 自改档不应改掉新会话的默认档。
 | 改什么 | 生效方式 |
 | --- | --- |
 | 面板配置（两条线、有效期、换档冷却等） | **即时生效**（host 活读 config，无需重启） |
-| `host.impl.mjs` / `effort.mjs` | plugin toggle 热换 |
+| `host.impl.mjs` / `effort.mjs` / `compact-tool.mjs` | plugin toggle 热换 |
 | `client.js` | 刷新页面 |
 
 > R3（2026-10-08）起智能思考功能域独立为 `plugin/effort.mjs`：host 用
@@ -185,6 +192,13 @@ Agent 自改档不应改掉新会话的默认档。
   （两个主题状态 token + `width` transition，像进度条一样过渡）；档位值与剩余秒数移入 title。
   ② 压缩记录弹窗：时间由 `hh:mm` 改为完整 `YYYY-MM-DD HH:MM:SS`，并**按会话严格过滤**——
   原 C-lineage 血统链把**别的会话**的记录混了进来（详见下条）
+- **R4 压缩改工具触发**（2026-10-08，用户要求「不用伪造一条我的信息重新拉起会话」）：
+  新模块 `plugin/compact-tool.mjs` 暴露工具 **`compact_context`** ⇒ 登记意图 ⇒ 宿主 pre-step
+  **轮内**压缩 ⇒ 本轮无缝继续。**整体删除**伪造恢复投递链（`maybeResumeAfterMarker` /
+  `resumeViaAnyChannel` 三条通道 / `resumeCountBySid` / `M5_RESUME_MAX` / `resumeTimers`），
+  代码中 `sessionController.prompt`·`agent.followup` **零出现**；三处教学同步改为工具版
+  （漏改会让模型写标记后**等一个永远不来的恢复**）。源码依据与落袋方案偏差见
+  [`docs/r4-compaction-tool-design.md`](docs/r4-compaction-tool-design.md)
 - **配置面**：7 个字段，面板按秒/比率显示（总开关为开关滑块）；成本阈值计算器（8 个模型预设，一键算推荐值并写入）
 - **只读审查落地**：外部审查 23 条，批次 1/2/3 全部实施（含心跳泄漏、`ctx.effect` 语义误用等真 bug）
 
@@ -215,11 +229,11 @@ npm run test:report   # 只跑报告形状
 
 | 套件 | 断言数 | 查什么 | 能抓到什么 |
 | --- | --- | --- | --- |
-| `contract.mjs` | 203 | face 方法表 ↔ client 描述符 ↔ TYPERT 三端对账；Config 字段在 FIELDS/schema/M3_DEFAULTS 三处齐全；退役字段未复活；`mergeConfig` 读取集 ⊆ schema；**getHud 作用域契约**（防 ReferenceError 回归）；**弹窗/阈值行排版契约**；**智能思考 UI 契约**（开关尺寸/右对齐/字段三端）；**智能思考 8 条实证结论**（prepend 最外层 / pending 持久 / 冷却基准 / 计数语义 / 两侧校验 / agent.ctx / sid 现读 / 删 maxTokens） | **调用静默失败**（P29：三端漂移不报错、只是拿不到数据）；已实测抓过 3 个真 bug |
-| `static.mjs` | 34 | 真实 `node --check`；client 自足（无外部 import，require 仅 react）；entry 薄壳（<40 行、有静态 Config、动态 import 带 `?ts=`）；模块依赖方向无环；热换纪律；调试残留扫描 | 语法错误、破坏热换、client 引入依赖、循环依赖、`TODO`/`XXX`/`console.log` 残留 |
+| `contract.mjs` | 227 | face 方法表 ↔ client 描述符 ↔ TYPERT 三端对账；Config 字段在 FIELDS/schema/M3_DEFAULTS 三处齐全；退役字段未复活；`mergeConfig` 读取集 ⊆ schema；**getHud 作用域契约**（防 ReferenceError 回归）；**弹窗/阈值行排版契约**；**智能思考 UI 契约**（开关尺寸/右对齐/字段三端）；**智能思考 8 条实证结论**（prepend 最外层 / pending 持久 / 冷却基准 / 计数语义 / 两侧校验 / agent.ctx / sid 现读 / 删 maxTokens） | **调用静默失败**（P29：三端漂移不报错、只是拿不到数据）；已实测抓过 3 个真 bug |
+| `static.mjs` | 37 | 真实 `node --check`；client 自足（无外部 import，require 仅 react）；entry 薄壳（<40 行、有静态 Config、动态 import 带 `?ts=`）；模块依赖方向无环；热换纪律；调试残留扫描 | 语法错误、破坏热换、client 引入依赖、循环依赖、`TODO`/`XXX`/`console.log` 残留 |
 | `report.mjs` | 57 | 产出侧字段契约；`bfOnce` 回填链依赖；C3② 关键事件必须走 full 档；**getHud 作用域与 criticalCap 实参契约**；**调查结论留档**（探针退役后结论不得丢）；真实报告结构自洽；`hud-acts.json` 去重；dump 工具可跑 | 报告形状无声破坏（本项目踩过 2 次：顶层读 m3/m5、脚本读已删字段） |
 
-合计 **294 条断言**。
+合计 **321 条断言**。
 
 **已验证有效**：注入 3 个人为 bug（`m3-act` 误入精简档 / client face 改名 / host 引用 client.js），
 三套件全部抓到且定位精准。**新增断言均实测验证过「对回归确实失败」**（两边都通过的测试等于没测）。
@@ -321,6 +335,7 @@ npm run asar -- grep --pattern compactIfNeeded --ext js --ctx 3
 | [`docs/r1-effort-design.md`](docs/r1-effort-design.md) | **智能思考设计定稿**：三层门控解耦 / 数据与写通道 / 提示词文本 / UI（弹窗 + 输入框 chip）/ 实施顺序 |
 | [`docs/r2-tool-switch-design.md`](docs/r2-tool-switch-design.md) | **换档改工具方案**：文本标记的两个致命缺陷 / `agent/request` + prepend 应用链 / 压缩能否也做成工具的分析 |
 | [`docs/r3-effort-review.md`](docs/r3-effort-review.md) | **R3 审查与解耦方案**：S1–S10 十项缺陷 / 抽 `effort.mjs` / 8 步实施顺序 / 10 条必须保留的实证结论 |
+| [`docs/r4-compaction-tool-design.md`](docs/r4-compaction-tool-design.md) | **R4 压缩改工具触发**：inbox 队列/steer/system-message 三条路为何都不行 / `compactIfNeeded` 两个 trigger 的保留语义 / 落袋方案 A 的偏差 / 三处教学同步 |
 | [`docs/compaction-failure-diagnosis.md`](docs/compaction-failure-diagnosis.md) | **压缩全线失效定位**：workbuddy provider 对摘要请求 400 的完整证据链与两条修复选项 |
 | [`docs/reference/README.md`](docs/reference/README.md) | 第三方（DSH 官方）抽取材料的来源与许可 |
 | [`review-brief.md`](review-brief.md) / [`review-findings.md`](review-findings.md) | 只读审查的任务书与报告 |
