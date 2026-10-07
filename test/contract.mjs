@@ -209,6 +209,29 @@ ok('智能思考组右对齐（margin-left:auto）', /wrapE\.style\.cssText = "[
   '智能思考组未右对齐 ⇒ 用户要求「智能思考+开关右对齐」未满足');
 ok('智能思考标签文本存在', /labE\.textContent = "智能思考"/.test(client));
 
+/* ═══════════ 6.7b 配置面板「就绪门」（用户实测：先显示默认值再跳变）═══════════ */
+console.log('\n== 6.7b 配置面板就绪门（防「先显示一个值再跳变」）==');
+// 用户实测（2026-10-08）：新增「换档冷却(秒)」行后，面板出现「刚出现显示 600s，随后变成 30s」。
+// 取证结论：**不是该行读错值**——`stored` 按字段键索引（持久化文件与 FIELDS 键逐一对应），
+// 实测 600s 是**紧邻的「强制压缩冷却(秒)」的 schema 默认值**（未持久化 ⇒ 恒为 600）。
+// 真正的缺陷是：**快照未就绪时每行都退回 `field.def`**——criticalRatio 默认 0.85 vs 已存 0.8、
+// markerMinRatio 默认 0.2 vs 已存 0.3 ⇒ 第一帧显示默认值、快照到达才跳成真实值。
+// 新增行让这一帧最扎眼，故表现为「刚出现显示 X 再变 Y」。
+const panelSrc = /function PilotPanelCard\(\{ view \}\) \{([\s\S]*?)\n\t\t\tif \(view === "summary"\)/.exec(client)?.[1] ?? '';
+ok('解析出 PilotPanelCard 主体', panelSrc.length > 0, '未找到面板组件');
+ok('就绪门判据 = 快照 value 已定义（而非用 writable 近似）',
+  /const ready = snapshot\.value !== void 0 && snapshot\.value !== null;/.test(panelSrc),
+  '未就绪时会渲染 field.def 冒充已存值 ⇒ 第一帧显示默认值随后跳变');
+ok('未就绪时不渲染字段表（page 视图渲染占位）',
+  /if \(!ready\) \{[\s\S]{0,400}?dcp-panel/.test(client),
+  '未就绪仍渲染字段 ⇒ 用户实测现象（刚出现显示一个值、随后变成真实值）复现');
+ok('summary 视图同样过就绪门',
+  /if \(view === "summary"\) \{\s*\n\s*if \(!ready\)/.test(client),
+  'summary 视图未过门 ⇒ 详情页顶部仍先显示默认值');
+ok('就绪门声明早于使用（无 const TDZ）',
+  client.indexOf('const ready = snapshot.value') < client.indexOf('if (!ready) {'),
+  'ready 声明在渲染之后 ⇒ 运行时 TDZ 抛 ReferenceError');
+
 /* ═══════════ 6.9 输入框档位 chip（conversation.input.right）═══════════ */
 console.log('\n== 6.9 输入框档位 chip（位置/显示条件/文本形态）==');
 // 用户要求（2026-10-07）：输入框模型左侧显示「智能思考档位:XXX」，后改为**不用冒号、用间距**。

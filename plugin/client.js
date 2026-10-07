@@ -246,6 +246,14 @@ window.__ModuleLoader__.load({
 			const snapshot = settingsScope.getSnapshot();
 			const writable = snapshot.writable === true;
 			const stored = unwrapLiveDeep(snapshot.value) ?? {};
+			/* ⚠️ 就绪门（2026-10-08，用户实测反馈修复）：快照未解析前**不得渲染字段值**。
+			 * 原实现直接就 `stored[field.key]`，而未就绪时 `stored = {}` ⇒ 每一行都退回
+			 * `field.def` —— 它与已存值并不相同（实测：criticalRatio 默认 0.85 vs 已存 0.8；
+			 * markerMinRatio 默认 0.2 vs 已存 0.3）⇒ 面板「先显示一个值、随后跳到真实值」。
+			 * 新增字段插进来时这一帧最扎眼（用户看到「刚出现显示 600s，然后才变成 30s」；
+			 * 600s 实为紧邻的「强制压缩冷却(秒)」的默认值，根因就是这帧默认值渲染）。
+			 * 现未就绪只渲染占位：值一出现即终值，不存在「先错后对」。 */
+			const ready = snapshot.value !== void 0 && snapshot.value !== null;
 			const [rev, setRev] = react.useState(0);
 			/** 草稿：{key: 原始输入串/布尔}；null = 未编辑。 */
 			const [draft, setDraft] = react.useState(null);
@@ -349,10 +357,21 @@ window.__ModuleLoader__.load({
 				}
 			};
 			if (view === "summary") {
+				if (!ready) return el("span", { className: "dcp-summary" }, "配置读取中…");
 				const crit = Math.round(valueOf(FIELDS.find((f) => f.key === "criticalRatio")) * 100);
 				const marker = valueOf(FIELDS.find((f) => f.key === "marker"));
 				return el("span", { className: "dcp-summary" },
 					`强制压缩线 ${crit}% ｜ 标记 ${marker ? marker : "关闭"}`);
+			}
+			/* 未就绪（命名空间尚未绑定 / 快照未解析）：只显示占位，绝不渲染 field.def 冒充当前值。 */
+			if (!ready) {
+				return el("div", { className: "dcp-panel" },
+					el("div", { className: "dcp-summary" }, "配置读取中…"),
+					el("div", { className: "dcp-hint" },
+						writable
+							? "读到当前配置后自动显示；就绪前不渲染默认值（避免先显示一个值再跳变）。"
+							: "设置命名空间尚未就绪，当前只读；就绪后自动显示当前值。"),
+				);
 			}
 			return el("div", { className: "dcp-panel" },
 				el("div", { className: "dcp-grid" },

@@ -643,3 +643,30 @@ R3 去掉兜底后暴露并修正为 `/TOOL_NAME \+ '（参数 effort=<档位>�
 **防回归**：`contract.mjs` 181 条（§6.12/§6.13 断言改指向 `effort.mjs`，
 并新增 S3/S4/S5/S6/S7/S8/S9 与「结论清单固化」判据）+ `static.mjs` 33 条 + `report.mjs` 57 条，
 **总计 271 断言全通过**（原 245）。6 条关键绊线实测有效（改回旧结构即 FIRES）。
+
+### 配置面板「首帧就绪门」：消除「先显示一个值再跳变」 —— ✅ 2026-10-08
+
+**用户实测反馈**：新增「换档冷却(秒)」行后，面板出现「刚出现时显示 600 秒，随后才变成 30 秒」。
+
+**取证（先排除「新行读错值」）**：
+- `stored` 按**字段键**索引（`unwrapLiveDeep(snapshot.value)[field.key]`），不存在位置错配；
+  `el = react.createElement`，`key: field.key` 生效，插入新行不会复用旧行 DOM。
+- 持久化文件 `~/.dsh/profiles/desktop/cordis.patch.yml` 实测：
+  `dsh-context-pilot.config = {enabled, effortEnabled, criticalRatio:0.8, markerMinRatio:0.3}`
+  ⇒ **其余字段全部走 schema 默认值**。故 600 是**紧邻的「强制压缩冷却(秒)」**的默认值
+  （`sweepMinIntervalMs` 未持久化 ⇒ 恒 600s），不是新行的值；新行的默认是 `effortCooldownMs=30000` → 30s。
+
+**找到的真缺陷（这才是「先显示再跳变」的机制）**：
+`PilotPanelCard` 在快照未就绪时 `stored = {}` ⇒ **每一行都退回 `field.def`**，而默认值与已存值不同：
+`criticalRatio` 默认 0.85 vs 已存 0.8、`markerMinRatio` 默认 0.2 vs 已存 0.3
+⇒ 第一帧渲染的是默认值，快照到达后才跳成真实值。新增一行让这一帧最扎眼，故被用户看见。
+
+**修复（就绪门）**：`const ready = snapshot.value !== void 0 && snapshot.value !== null;`
+未就绪时**只渲染占位**（page 视图「配置读取中…」+ 说明；summary 视图同款一行），
+就绪后才渲染字段表 ⇒ 值一出现即为终值，**不存在「先错后对」的帧**。
+判据用「`value` 已定义」而非 `writable`（后者在只读就绪态也为 false，会误判为未就绪）。
+
+**防回归**：`contract.mjs` §6.7b 新增 5 条（主体可解析 / 判据是 value 非 writable /
+page 占位 / summary 占位 / 声明早于使用无 TDZ），**4 项变异全部被抓住**，总计 **278 断言全通过**。
+
+**部署**：`client.js` 改动 ⇒ **刷新页面**生效（host 侧无改动）。
