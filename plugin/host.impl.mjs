@@ -57,6 +57,10 @@ const DSH_LLM_REL = ['dsh', 'node_modules', '@deepseek-ai', 'dsh-llm', 'lib', 'i
  */
 const M3_DEFAULTS = {
   enabled: true,
+  /* R1（2026-10-07）：智能思考总门。开 = 向 Agent 注入思考强度信息 + 允许其写 [cp:effort] 改档；
+   * 关 = 提示词不注入、标记不生效（用户定义：一个开关管两件事，不做只读/只写拆分）。
+   * 默认 false：新功能默认不介入，避免未确认行为改变既有会话（用户可随时在弹窗开启）。 */
+  effortEnabled: false,
   criticalRatio: 0.85, // 强制压缩线：pre-step/idle 无条件压（官方 pressure 路径）；GLM 等 1:4 档可降 0.80
   markerMinRatio: 0.2, // 智能压缩线：模型标记生效门槛，**同时是决策卡注入门槛**（2026-10-07 起二者统一）
   armedTtlMs: 120_000, // 标记有效期（事件→idle 之间）
@@ -222,10 +226,11 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       const live = (v) => (v !== null && typeof v === 'object' && typeof v.get === 'function' ? v.get() : v);
       if (!config || typeof config !== 'object') return;
       const raw = {};
-      for (const k of ['enabled', 'criticalRatio', 'marker', 'markerMinRatio', 'armedTtlMs', 'sweepMinIntervalMs']) {
+      for (const k of ['enabled', 'effortEnabled', 'criticalRatio', 'marker', 'markerMinRatio', 'armedTtlMs', 'sweepMinIntervalMs']) {
         raw[k] = live(config[k]);
       }
       if (typeof raw.enabled === 'boolean') M3.enabled = raw.enabled;
+      if (typeof raw.effortEnabled === 'boolean') M3.effortEnabled = raw.effortEnabled;
       if (typeof raw.marker === 'string') M3.marker = raw.marker;
       for (const k of ['criticalRatio', 'markerMinRatio']) {
         if (typeof raw[k] === 'number' && Number.isFinite(raw[k]) && raw[k] >= 0 && raw[k] <= 1) M3[k] = raw[k];

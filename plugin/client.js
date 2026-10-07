@@ -61,6 +61,9 @@ window.__ModuleLoader__.load({
 		 *  备注精简原则（2026-10-07 用户要求）：一行说清用途，不写推荐值枚举（推荐值在计算器里实时算）。 */
 		const FIELDS = [
 			{ key: "enabled", label: "总开关", type: "bool", def: true, hint: "关闭后完全恢复原生 DSH" },
+			/* R1（2026-10-07）：智能思考总门——开=注入思考强度信息 + 允许 Agent 写 [cp:effort] 改档；
+			 * 关=提示词不注入、标记也不生效（用户明确定义：一个开关管两件事，不做"只读/只写"拆分）。 */
+			{ key: "effortEnabled", label: "智能思考", type: "bool", def: false, hint: "开启后向 Agent 暴露思考档位并允许其自主换档；关闭则完全不介入" },
 			{ key: "markerMinRatio", label: "智能压缩线", type: "num", def: 0.2, hint: "占用达此值时，模型可自行决定压缩并自动续跑" },
 			{ key: "criticalRatio", label: "强制压缩线", type: "num", def: 0.85, hint: "占用达此值无条件强制压缩（先于 DSH 引擎自动压缩触发）" },
 			{ key: "marker", label: "压缩标记", type: "text", def: "[cp:compact]", hint: "模型回复尾行标记；置空则关闭智能压缩" },
@@ -139,6 +142,12 @@ window.__ModuleLoader__.load({
 			".dcp-switch .dcp-slider{display:block;width:16px;height:16px;border-radius:50%;corner-shape:round;background:var(--dsw-alias-switch-thumb,rgba(128,128,128,.85));transition:transform 120ms ease;pointer-events:none}",
 			".dcp-switch input:checked + .dcp-slider{transform:translateX(16px);background:var(--dsw-alias-label-primary-foreground,#fff)}",
 			".dcp-switch input:focus-visible + .dcp-slider{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary,#4c7dff));outline-offset:2px}",
+			/* R1（2026-10-07）：弹窗开关**小号**变体——用户要求「高度与『启用』字体一致」。
+			 * 12px 字号 ⇒ 轨道 28×16、滑块 12×12、位移 12px（比例与官方 36×20/16/16 一致）。
+			 * 只覆盖尺寸，配色/过渡/corner-shape 全部继承 .dcp-switch（含 DSH 全局 superellipse 的 opt-out）。 */
+			".dcp-switch-sm{width:28px;height:16px;padding:2px}",
+			".dcp-switch-sm .dcp-slider{width:12px;height:12px}",
+			".dcp-switch-sm input:checked + .dcp-slider{transform:translateX(12px)}",
 			".dcp-label{width:170px;color:var(--dsw-alias-label-secondary,currentColor);flex:none}",
 			".dcp-input{border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.45));border-radius:6px;background:transparent;color:var(--dsw-alias-label-primary,currentColor);padding:3px 8px;font-size:12px;min-width:110px}",
 			".dcp-hint{color:var(--dsw-alias-label-secondary,currentColor);opacity:.75;font-size:11px}",
@@ -639,38 +648,49 @@ window.__ModuleLoader__.load({
 					const label = document.createElement("span");
 					label.textContent = "智能压缩";
 					label.title = "注入 + 压缩总开关（关闭 = 恢复原生 DSH 行为）";
-					label.style.cssText = "flex:1 1 auto;opacity:.85;white-space:nowrap;";
-					/** 滑动开关：与面板 .dcp-switch 同一套官方样式（PANEL_CSS 全局注入，token 双主题自适配）。 */
+					/* ⚠️ 去掉 flex:1（用户要求开关「移到智能压缩右侧挨着」）——flex:1 会把开关顶到行最右，
+					 * 与「挨着」矛盾。现为左紧凑排列：■ 智能压缩 [sw] 智能思考 [sw]（标签仍与其他行左对齐）。 */
+					label.style.cssText = "opacity:.85;white-space:nowrap;flex:none;";
+					/* ── R1（2026-10-07 用户要求）弹窗开关行改造 ─────────────────────────────
+					 * 变更点：① 删除「启用」文字标签；② 开关**缩小**（高度与「启用」字号一致）；
+					 * ③ 开关移到「智能压缩」右侧紧邻（固定 8px）；④ 右侧新增「智能思考」+ 开关。
+					 * 布局：label(flex:1 吃掉剩余) 之后是两个 [开关(±文字)] 组，天然右对齐。
+					 * 尺寸：原 36×20 → 28×16（knob 16→12、位移 16→12px），与 12px 字号行高协调。
+					 * ⚠️ 尺寸靠 CSS 类 .dcp-switch-sm 覆盖，不改 .dcp-switch 本体（配置面板仍在用大号）。 */
+					const mkSwitch = (ariaLabel) => {
+						const box = document.createElement("span");
+						box.className = "dcp-switch dcp-switch-sm";
+						const input = document.createElement("input");
+						input.type = "checkbox";
+						input.setAttribute("role", "switch");
+						input.setAttribute("aria-label", ariaLabel);
+						const knob = document.createElement("span");
+						knob.className = "dcp-slider";
+						box.appendChild(input);
+						box.appendChild(knob);
+						return { box, input, knob };
+					};
+					/* ① 智能压缩开关（原「启用」文字已删；开关直接跟在 label 右侧，间距由 row gap 给出） */
 					const wrap = document.createElement("label");
-					wrap.style.cssText = "display:inline-flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap;flex:none;";
-					const box = document.createElement("span");
-					box.className = "dcp-switch";
-					const input = document.createElement("input");
-					input.type = "checkbox";
-					input.setAttribute("role", "switch");
-					input.setAttribute("aria-label", "智能压缩总开关");
-					const knob = document.createElement("span");
-					knob.className = "dcp-slider";
-					box.appendChild(input);
-					box.appendChild(knob);
-					/* 顺序：文字在前、开关在后（用户要求互换）；label 的 flex:1 已把本组推到最右 ⇒ 右对齐 */
-					wrap.appendChild(document.createTextNode("启用"));
-					wrap.appendChild(box);
+					/* margin 2px + row gap 6px = 与「智能压缩」间距 8px（用户要求「一定的间距」） */
+					wrap.style.cssText = "display:inline-flex;align-items:center;cursor:pointer;flex:none;margin-left:2px;";
+					const sw1 = mkSwitch("智能压缩总开关");
+					wrap.appendChild(sw1.box);
 					const sync = () => {
 						try {
 							const s = settingsScope.getSnapshot();
 							const raw = s?.value?.enabled;
 							const value = raw !== null && typeof raw === "object" && typeof raw.get === "function" ? raw.get() : raw;
-							input.checked = value !== false;
-							input.disabled = s?.writable !== true;
+							sw1.input.checked = value !== false;
+							sw1.input.disabled = s?.writable !== true;
 							wrap.style.opacity = s?.writable === true ? "1" : ".55";
 							label.style.opacity = s?.writable === true ? ".85" : ".45";
 							wrap.title = s?.writable === true ? "关闭 = 完全恢复原生 DSH 行为" : "设置命名空间未就绪，暂不可切换";
 						} catch { /* 快照失败保持现状 */ }
 					};
-					input.addEventListener("change", async () => {
-						const next = input.checked;
-						input.disabled = true;
+					sw1.input.addEventListener("change", async () => {
+						const next = sw1.input.checked;
+						sw1.input.disabled = true;
 						try {
 							if ((await settingsScope.set("enabled", next)) === false) throw new Error("Host 拒绝写入");
 							const backRaw = unwrapLiveDeep(settingsScope.getSnapshot().value)?.enabled;
@@ -681,11 +701,53 @@ window.__ModuleLoader__.load({
 							sync();
 						}
 					});
-					if (typeof settingsScope.subscribe === "function") liveRows.push({ row, off: settingsScope.subscribe(sync) }); // C4：off 在册
+					/* ② 智能思考开关（R1 新增）：独立配置字段 effortEnabled，与总开关解耦。
+					 * 语义（用户定义）：开 = 注入思考强度提示词 + 允许 Agent 写 [cp:effort] 改档；关 = 两者都不做。 */
+					const wrapE = document.createElement("label");
+					/* margin 6px + row gap 6px = 与压缩开关间距 12px（两组视觉分离，但整体仍紧凑） */
+					wrapE.style.cssText = "display:inline-flex;align-items:center;gap:6px;cursor:pointer;flex:none;margin-left:6px;";
+					const labE = document.createElement("span");
+					labE.textContent = "智能思考";
+					labE.style.cssText = "opacity:.85;white-space:nowrap;font-size:12px;";
+					const sw2 = mkSwitch("智能思考开关");
+					wrapE.appendChild(labE);
+					wrapE.appendChild(sw2.box);
+					const syncE = () => {
+						try {
+							const s = settingsScope.getSnapshot();
+							const raw = s?.value?.effortEnabled;
+							const value = raw !== null && typeof raw === "object" && typeof raw.get === "function" ? raw.get() : raw;
+							sw2.input.checked = value === true;
+							sw2.input.disabled = s?.writable !== true;
+							wrapE.style.opacity = s?.writable === true ? "1" : ".55";
+							wrapE.title = s?.writable === true
+								? "开启后向 Agent 暴露当前思考档位并允许其自主换档；关闭则完全不介入"
+								: "设置命名空间未就绪，暂不可切换";
+						} catch { /* 快照失败保持现状 */ }
+					};
+					sw2.input.addEventListener("change", async () => {
+						const next = sw2.input.checked;
+						sw2.input.disabled = true;
+						try {
+							if ((await settingsScope.set("effortEnabled", next)) === false) throw new Error("Host 拒绝写入");
+							const backRaw = unwrapLiveDeep(settingsScope.getSnapshot().value)?.effortEnabled;
+							if (backRaw !== next) throw new Error("写入未持久化，已回弹");
+						} catch (error) {
+							console.warn(`${LOG} 智能思考开关写入失败:`, error && error.message);
+						} finally {
+							syncE();
+						}
+					});
+					if (typeof settingsScope.subscribe === "function") {
+						liveRows.push({ row, off: settingsScope.subscribe(sync) }); // C4：off 在册
+						liveRows.push({ row, off: settingsScope.subscribe(syncE) });
+					}
 					sync();
+					syncE();
 					row.appendChild(icon);
 					row.appendChild(label);
 					row.appendChild(wrap);
+					row.appendChild(wrapE);
 					return row;
 				};
 				/** M5 HUD 行：最近压缩摘要 + 武装/待执行徽章。数据源 = host 轮询 getHud（5s）覆盖 + 配置镜像兜底。 */

@@ -168,6 +168,45 @@ ok('阈值分隔符用半角 ·（全角 ｜ 占一个汉字宽）',
   /智能压缩线 \$\{pct\(v\.markerMinRatio[^`]*· 强制压缩线/.test(client),
   '阈值行仍用全角 ｜ 分隔 ⇒ 三个分隔符吃掉约 27px');
 
+/* ═══════════ 6.7 R1 智能思考 UI 契约（弹窗行改造）═══════════ */
+console.log('\n== 6.7 智能思考 UI（弹窗行：开关缩小/删「启用」/新增智能思考）==');
+// 用户要求（2026-10-07）：① 开关缩小、高度与「启用」字体一致；② 删除「启用」标签；
+// ③ 开关移到「智能压缩」右侧紧邻；④ 右侧新增「智能思考」+ 开关。
+ok('弹窗行不再有「启用」文字标签', !/createTextNode\("启用"\)/.test(client),
+  '仍存在「启用」文字 ⇒ 用户要求删除');
+ok('新增智能思考开关（读 effortEnabled）', /value\?\.effortEnabled/.test(client),
+  '未读 effortEnabled ⇒ 智能思考开关无状态来源');
+ok('智能思考开关写 effortEnabled（独立字段，不复用 enabled）',
+  /settingsScope\.set\("effortEnabled",\s*next\)/.test(client),
+  '未写 effortEnabled ⇒ 与总开关耦合');
+ok('智能思考开关写后有回读校验', /set\("effortEnabled"[\s\S]{0,200}?effortEnabled;\s*$/m.test(client) || /backRaw\s*!==\s*next/.test(client),
+  '缺回读校验（set() resolve ≠ 真持久化）');
+// 小号开关：独立类，不改 .dcp-switch 本体（配置面板仍在用大号）
+const smCss = /\.dcp-switch-sm\{([^}]*)\}/.exec(client)?.[1] ?? '';
+ok('小号开关类 .dcp-switch-sm 存在', smCss.length > 0, '缺小号变体 ⇒ 无法满足「开关缩小」');
+ok('小号轨道尺寸 ≤ 28×16', /width:28px/.test(smCss) && /height:16px/.test(smCss), `实际：${smCss}`);
+ok('小号滑块 12×12 且位移 12px（比例与官方一致）',
+  /\.dcp-switch-sm \.dcp-slider\{width:12px;height:12px\}/.test(client) &&
+  /\.dcp-switch-sm input:checked \+ \.dcp-slider\{transform:translateX\(12px\)\}/.test(client),
+  '小号滑块尺寸/位移不匹配 ⇒ 视觉错位');
+ok('大号 .dcp-switch 本体未被改小（面板仍用大号）',
+  /\.dcp-switch\{position:relative;display:inline-block;width:36px;height:20px/.test(client),
+  '.dcp-switch 本体被改 ⇒ 配置面板开关尺寸受影响');
+ok('「智能压缩」标签去掉 flex:1（开关才能挨着它）', /label\.textContent = "智能压缩"/.test(client) &&
+  /label\.style\.cssText = "opacity:\.85;white-space:nowrap;flex:none;"/.test(client),
+  'label 仍有 flex:1 ⇒ 开关被顶到行最右，与「挨着」矛盾');
+ok('智能思考标签文本存在', /labE\.textContent = "智能思考"/.test(client));
+
+/* ═══════════ 6.8 R1 智能思考字段三端对账 ═══════════ */
+console.log('\n== 6.8 智能思考字段（FIELDS ↔ schema ↔ M3_DEFAULTS）==');
+ok('FIELDS 含 effortEnabled', fieldsKeys.includes('effortEnabled'), '面板缺该字段');
+ok('schema 含 effortEnabled', schemaKeys.includes('effortEnabled'), 'schema 缺该字段 ⇒ 面板保存被拒');
+ok('M3_DEFAULTS 含 effortEnabled', hostDefaults.includes('effortEnabled'), 'host 缺该字段 ⇒ 读不到');
+ok('mergeConfig 读取 effortEnabled', /for \(const k of \[[\s\S]{0,120}'effortEnabled'/.test(host),
+  'mergeConfig 未读 ⇒ 面板改值不生效');
+ok('effortEnabled 默认关闭（新功能默认不介入）', /effortEnabled:\s*false/.test(host),
+  '默认开启 ⇒ 未确认就改变既有会话行为');
+
 /* ═══════════ 7. mergeConfig 读取集 ⊆ schema 键 ═══════════ */
 console.log('\n== 7. mergeConfig 读取集 ⊆ schema 键 ==');
 const mergeList = /const k of \[([^\]]+)\][\s\S]{0,80}?raw\[k\] = live/.exec(host)?.[1];
