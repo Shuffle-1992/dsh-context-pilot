@@ -540,6 +540,34 @@ ok('面板计算器/回读提示同样用面板 state（三处同源）',
   /const cap = engineCap !== null && engineCap > 0 && engineCap <= 1 \? engineCap : null;/.test(client)
   && /Math\.round\(engineCap \* 1000\) \/ 10/.test(client),
   '计算器或回读提示仍读 NS.engineCap ⇒ 与保存路径不同源');
+/* ═══ 用户二次反馈：「设置 0.8 没有钳回 0.75」且**保存按钮是灰的** ═══
+ * 根因：只做了「保存时钳制」。而用户输入 0.8 时**已存值也是 0.8** ⇒ `dirty=false`
+ * ⇒ `保存` 的 disabled 条件含 `!dirty` ⇒ 按钮灰掉 ⇒ 那条钳制路径**根本走不到**。
+ * ⇒ 必须在**输入时**就把值钳回上限（输入框当场显示 0.75 ⇒ dirty 变真 ⇒ 保存可用）。 */
+ok('强制压缩线在**输入时**即钳到生效上限（不只是保存时）',
+  /if \(field\.key === "criticalRatio" && engineCap !== null\) \{/.test(client)
+  && /const n = parseInput\(field, raw\);/.test(client)
+  && /if \(n !== null && n > engineCap\) next = String\(engineCap\);/.test(client),
+  '只有保存时钳制 ⇒ dirty=false 时保存按钮是灰的，钳制路径走不到（实测截图）');
+ok('输入钳制不误伤输入过程（空串/半成品不改写）且上限未知时不瞎钳',
+  /if \(n !== null && n > engineCap\)/.test(client) && /engineCap !== null\) \{/.test(client),
+  '对非法输入也钳 / 未探测到上限也钳 ⇒ 边打字边被改写或钳到错值');
+/* ═══ 用户三次反馈：「如果原保存值超过钳回值，应该也直接钳回保存」 ═══
+ * 场景：早先存过 0.8，之后上限收紧到 0.75 ⇒ 进面板时 stored 仍 0.8，而 dirty=false
+ * ⇒ 保存按钮灰的，用户**没有可行的收敛路径**。⇒ 进面板即自动钳回并落盘（只做一次）。 */
+ok('已存值超上限 ⇒ 进面板自动钳回并保存（用户明确要求）',
+  /const autoClamped = react\.useRef\(false\);/.test(client)
+  && /await writeField\(settingsScope, field, engineCap\);/.test(client)
+  && /if \(!Number\.isFinite\(cur\) \|\| cur <= engineCap\) return;/.test(client),
+  '没有自动钳制 ⇒ 已存超限值时保存按钮是灰的，用户无法收敛（实测卡点）');
+ok('自动钳制只做一次且有回读校验（失败可重试）',
+  /if \(autoClamped\.current\) return;/.test(client)
+  && /if \(back !== engineCap\) throw new Error/.test(client)
+  && /autoClamped\.current = false; \/\/ 失败允许下次重试/.test(client),
+  '无一次性守卫 ⇒ 可能反复写；无回读校验 ⇒ 写了不生效也不知道');
+ok('自动钳制仅在可写 + 上限已知 + 就绪时执行',
+  /if \(!ready \|\| !writable \|\| engineCap === null\) return;/.test(client),
+  '未就绪/只读时也写配置 ⇒ 越权或写坏值');
 /* ═══ 教学必须教**生效值**（2026-10-08 实测：卡片写「占用达 80%」而实际 75%） ═══ */
 ok('决策卡/一次性说明拿到的是**生效**强制线（不是配置值）',
   /const effCrit = Math\.min\(M3\.criticalRatio, criticalCapOf\(agent\)\);/.test(host)

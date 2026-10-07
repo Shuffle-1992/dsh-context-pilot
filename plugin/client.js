@@ -290,6 +290,38 @@ window.__ModuleLoader__.load({
 				pullCap();
 				return () => { alive = false; };
 			}, []);
+			/**
+			 * 已存值**本身超过生效上限** ⇒ 自动钳回并保存（用户要求 2026-10-08：
+			 * 「如果原保存值超过钳回值，应该也直接钳回保存」）。
+			 * 场景：用户早先存过 0.8，之后余量规则把上限收到 0.75 ⇒ 进面板时 `stored` 仍是 0.8，
+			 * 而「保存」按钮的 disabled 含 `!dirty` —— 输入框显示的就是已存值 ⇒ `dirty=false`
+			 * ⇒ **按钮是灰的**，用户没有可行的收敛路径（用户实测就卡在这里）。
+			 * 只执行一次（ref 守卫）；仅在可写 + 上限已知 + 确实超限时动手；失败则复位以便重试。 */
+			const autoClamped = react.useRef(false);
+			react.useEffect(() => {
+				if (autoClamped.current) return;
+				if (!ready || !writable || engineCap === null) return;
+				const cur = Number(stored.criticalRatio);
+				if (!Number.isFinite(cur) || cur <= engineCap) return;
+				const field = FIELDS.find((f) => f.key === "criticalRatio");
+				if (!field) return;
+				autoClamped.current = true;
+				(async () => {
+					try {
+						await writeField(settingsScope, field, engineCap);
+						const back = Number(unwrapLiveDeep(settingsScope.getSnapshot().value)?.criticalRatio);
+						if (back !== engineCap) throw new Error(`回读不一致（读到 ${back}）`);
+						setRev((v) => v + 1);
+						setMessage({
+							kind: "ok",
+							text: `已把「强制压缩线」由 ${cur} 自动钳到生效上限 ${engineCap} 并保存（上限 = DSH 内置阈值 − 5 个百分点）。`,
+						});
+					} catch (error) {
+						autoClamped.current = false; // 失败允许下次重试
+						setMessage({ kind: "error", text: `自动钳制失败：${String(error?.message ?? error)}` });
+					}
+				})();
+			}, [ready, writable, engineCap, stored.criticalRatio]);
 			/** 取字段的 **UI 口径**值：草稿已是 UI 串（秒），存储值经 toUi 转成 UI 口径（毫秒→秒）。 */
 			const valueOf = (field) => {
 				if (draft !== null && Object.prototype.hasOwnProperty.call(draft, field.key)) return draft[field.key];
@@ -313,7 +345,18 @@ window.__ModuleLoader__.load({
 				return cur === null || JSON.stringify(canon(f, cur)) !== JSON.stringify(base);
 			});
 			const setField = (field, raw) => {
-				setDraft((d) => ({ ...(d ?? {}), [field.key]: raw }));
+				/* 强制压缩线**输入即时钳制**（2026-10-08 用户二次反馈：「设置 0.8 没有钳回 0.75」）。
+				 * 为什么不能只靠保存时钳制：用户输入 0.8 而**已存值也是 0.8** 时 `dirty=false`
+				 * ⇒ **保存按钮直接是灰的**（用户截图），那条钳制路径根本走不到。
+				 * 即时钳制让输入框当场显示 0.75 ⇒ dirty 变真、保存可用。
+				 * 只钳「已构成完整数字且超过生效上限」的情形——输入过程（"" / "0."）不改写，
+				 * 否则会边打字边被改。上限未探测到（engineCap=null）时不钳，保存路径仍有同一道兜底。 */
+				let next = raw;
+				if (field.key === "criticalRatio" && engineCap !== null) {
+					const n = parseInput(field, raw);
+					if (n !== null && n > engineCap) next = String(engineCap);
+				}
+				setDraft((d) => ({ ...(d ?? {}), [field.key]: next }));
 				setMessage(void 0);
 			};
 			/**
