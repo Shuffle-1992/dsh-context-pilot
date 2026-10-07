@@ -594,39 +594,76 @@ window.__ModuleLoader__.load({
 				} catch { /* 忽略 */ }
 			}, [effort]);
 			if (!hostInfo || !hostInfo.on || !effort) return null;
-			/* 显示形态（2026-10-07 用户要求）：不用冒号，改成**两个 span + 间距**——
-			 * 「智能思考档位」与档位值视觉分离（冒号在中英混排里偏挤，间距更清爽）。
-			 * 间距 6px（与弹窗内其他 label/开关的 gap 一致）。
-			 * 冷却（用户要求「把 30 秒冷却加到档位后面显示」）：紧跟档位值之后，
-			 * 显示剩余秒数「· 冷却 23s」；不在冷却时不占位。 */
-			const coolLeft = cooling ? Math.ceil((until - now) / 1000) : 0;
+			/* 显示形态（2026-10-08 用户要求重做）：
+			 * ① **删除内联的档位值与冷却秒数**（原「智能思考档位 low · 冷却 23s」）——
+			 *    这两项不再占位，全部移入 title 提示（信息不丢，只是不抢视觉）。
+			 * ② 文案固定为「智能思考就绪」，**状态由样式承担**。
+			 * ③ 两个样式 + 进度条式过渡：
+			 *    底层铺满 warn 色 = 冷却态；上层 success 色按 progress 从左往右扫过
+			 *    ⇒ 冷却走完时正好扫满 = 就绪态。1s tick + CSS transition 补帧，肉眼即平滑。
+			 * 判据：progress 0 = 刚进冷却，1 = 冷却完成（`cooling=false` 时直接取 1，
+			 * 因此「冷却结束」与「扫满」是同一时刻，不会出现「样式已就绪但条还没满」）。 */
+			const totalMs = hostInfo.cooldownTotalMs > 0 ? hostInfo.cooldownTotalMs : 30000;
+			const remainMs = cooling ? Math.max(0, until - now) : 0;
+			const progress = cooling ? Math.min(1, Math.max(0, (totalMs - remainMs) / totalMs)) : 1;
+			const coolLeft = Math.ceil(remainMs / 1000);
+			const C_WARN = "var(--dsw-alias-state-warn-primary, #ff9f0a)";
+			const C_OK = "var(--dsw-alias-state-success-primary, #34c759)";
+			const accent = cooling ? C_WARN : C_OK;
 			const tip = [
 				`模型：${shown.provider}/${shown.model}`,
 				`当前档位：${effort}${pendingNow ? "（已选，下一步生效）" : ""}`,
 				coolLeft > 0
-					? `换档冷却中：还剩 ${coolLeft}s（冷却 ${Math.round((hostInfo.cooldownTotalMs || 30000) / 1000)}s，防频繁换档打断前缀缓存）`
+					? `换档冷却中：还剩 ${coolLeft}s（冷却 ${Math.round(totalMs / 1000)}s，防频繁换档打断前缀缓存）`
 					: "换档冷却：已就绪",
 				"Agent 可调用 set_reasoning_effort 工具自主换档（本次任务内立即生效）",
 			].join("\n");
 			return el("div", {
 				ref,
 				className: "dcp-effort-chip",
+				"data-state": cooling ? "cooling" : "ready",
 				title: tip,
 				style: {
-					display: "inline-flex", alignItems: "center", gap: "6px", flex: "none",
+					position: "relative", overflow: "hidden", flex: "none",
+					display: "inline-flex", alignItems: "center", gap: "6px",
 					marginRight: "8px", padding: "0 8px", height: "24px",
 					borderRadius: "6px", fontSize: "12px", lineHeight: 1,
 					background: "var(--dsw-alias-bg-layer-2, rgba(128,128,128,.14))",
 					color: "var(--dsw-alias-label-secondary, rgba(200,200,200,.9))",
+					boxShadow: `inset 0 0 0 1px ${accent}`,
+					transition: "box-shadow .3s linear",
 					whiteSpace: "nowrap", userSelect: "none",
 				},
 			},
-				el("span", { style: { opacity: ".75" } }, "智能思考档位"),
-				el("span", { style: { fontWeight: "600" } }, effort),
-				pendingNow ? el("span", { style: { opacity: ".55", fontSize: "11px" } }, "· 下一步") : null,
-				coolLeft > 0
-					? el("span", { style: { opacity: ".5", fontSize: "11px", fontVariantNumeric: "tabular-nums" } }, `· 冷却 ${coolLeft}s`)
-					: null,
+				el("span", {
+					"aria-hidden": "true",
+					style: {
+						position: "absolute", left: 0, top: 0, right: 0, bottom: 0,
+						background: C_WARN, opacity: cooling ? ".16" : "0",
+						transition: "opacity .3s linear",
+					},
+				}),
+				el("span", {
+					"aria-hidden": "true",
+					style: {
+						position: "absolute", left: 0, top: 0, bottom: 0,
+						width: `${progress * 100}%`,
+						background: C_OK, opacity: ".26",
+						transition: "width 1s linear, opacity .3s linear",
+					},
+				}),
+				el("span", {
+					style: { position: "relative", zIndex: 1, display: "inline-flex", alignItems: "center", gap: "6px" },
+				},
+					el("span", {
+						"aria-hidden": "true",
+						style: {
+							width: "6px", height: "6px", borderRadius: "50%", flex: "none",
+							background: accent, transition: "background .3s linear",
+						},
+					}),
+					el("span", { style: { opacity: ".85" } }, "智能思考就绪"),
+				),
 			);
 		}
 		//#endregion
@@ -938,32 +975,45 @@ window.__ModuleLoader__.load({
 						return c;
 					};
 					let hudRemote = null; // getHud 结果（覆盖配置镜像同名字段）
+					/* 完整本地日期时间（2026-10-08 用户要求）：YYYY-MM-DD HH:MM:SS。
+					 * 解析失败时回退原文前 19 字符，绝不显示 Invalid Date。 */
+					const fmtFullTime = (iso) => {
+						const d = new Date(String(iso ?? ""));
+						if (Number.isNaN(d.getTime())) return String(iso ?? "?").slice(0, 19) || "?";
+						const p = (n) => String(n).padStart(2, "0");
+						return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} `
+							+ `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+					};
+					/* host 的 text 形如「02:45 · 智能压缩 · 省 217.8K」——完整日期时间已由 fmtFullTime 给出，
+					 * 故去掉前导 hh:mm 以免同一行出现两个时间。旧记录同样适用（模板自 B1 起未变）。 */
+					const stripHhmm = (text) => String(text ?? "").replace(/^\d{1,2}:\d{2}\s*·\s*/, "");
 					const renderHud = () => {
 						try {
 							const cfg = unwrapLiveDeep(settingsScope.getSnapshot()?.value) ?? {};
 							const v = { ...cfg, ...(hudRemote ?? {}) };
 							const act = typeof v.hudLastAct === "string" && v.hudLastAct ? v.hudLastAct : "";
-							/* 全局兜底（2026-10-07 最终方案）：多会话交错/ id 摆动时按 id 过滤会空
-							 * （实测「记录经常丢失」的根因）⇒ 本会话优先，空则回退全局并标注，记录永不消失。 */
-							const actGlobal = typeof v.hudLastActGlobal === "string" && v.hudLastActGlobal ? v.hudLastActGlobal : "";
-							const useGlobal = !act && !!actGlobal;
 							/* 自诊断（2026-10-07）：无数据时把轮询状态显示出来——host 侧已证 getHud 从未被调用，
 							 * 而弹窗行是渲染成功的 ⇒ 断点在 client（$mount/inject 未就绪）。这段让截图即可定位。 */
 							let diag = "";
-							if (!act && !actGlobal) {
+							if (!act) {
 								const d = NS.hudDebug;
 								diag = d == null ? "（轮询未启动）"
 									: d.svc === false ? "（轮询面未就绪）"
 										: d.ok === false ? `（RPC 失败：${String(d.r || d.err || "?").slice(0, 40)}）`
 											: d.svc === true ? "（RPC 已通但无记录）" : "";
 							}
-							label.textContent = act
-								? `最近压缩 ${act}`
-								: useGlobal ? `最近压缩 ${actGlobal}（其他会话）` : `本会话暂无压缩记录${diag}`;
-							/* 悬停 = 对应来源的最近压缩列表 + 取证指纹 */
-							const listSrc = act ? v.acts : useGlobal ? v.actsGlobal : null;
-							const actLines = Array.isArray(listSrc) && listSrc.length ? listSrc : (act ? [act] : (useGlobal ? [actGlobal] : []));
-							row.title = `${actLines.length ? actLines.join("\n") + (useGlobal ? "\n（本会话无匹配记录，显示全局最近压缩）" : "") : "（暂无压缩记录）"}\n—— dcp: gen=${v.gen || "?"} sid=${(NS.sid || "").slice(0, 13) || "?"}`;
+							label.textContent = act ? `最近压缩 ${act}` : `本会话暂无压缩记录${diag}`;
+							/* 悬停 = **本会话**最近压缩列表（host 严格按 sid 过滤）+ 完整日期时间 + 取证指纹。
+							 * 2026-10-08 两处修正（用户实测反馈）：
+							 * ① **删除「全局兜底」显示路径**——它正是「弹窗里混进别的会话压缩记录」的来源。
+							 *    取证：hud-acts.json 里 3 个 sid，lineage 链 16616c07 → f4154f01（已成环）
+							 *    使 4/5 条被「本会话」命中，其中 f4154f01 属另一个 workspace 的会话。
+							 * ② 列表时间由 hh:mm 改为完整「YYYY-MM-DD HH:MM:SS」。 */
+							const detail = Array.isArray(v.actsDetail) ? v.actsDetail : null;
+							const actLines = detail && detail.length
+								? detail.map((x) => `${fmtFullTime(x && x.at)} · ${stripHhmm(x && x.text)}`)
+								: (act ? [act] : []);
+							row.title = `${actLines.length ? actLines.join("\n") : "（暂无压缩记录）"}\n—— dcp: gen=${v.gen || "?"} sid=${(NS.sid || "").slice(0, 13) || "?"}`;
 							chips.replaceChildren();
 							if (v.hudArmed === "armed") chips.appendChild(chip("武装中", "#4c7dff"));
 							let pendingTask = "";
@@ -1033,27 +1083,25 @@ window.__ModuleLoader__.load({
 								return;
 							}
 							const sidNow = NS.sid || "";
-							let r = unwrapEnv(await hudRemoteSvc.getHud(sidNow));
-							if ((!r || !r.ok) && sidNow) {
-								/* 协议未生效（旧 face/typert 未重载）时带参可能被拒：退回无参全局查询 */
-								r = unwrapEnv(await hudRemoteSvc.getHud(""));
-							}
+							const r = unwrapEnv(await hudRemoteSvc.getHud(sidNow));
+							/* 2026-10-08：**删除「带参失败即退回无参全局查询」的回退**。
+							 * 原回退的初衷是「旧 face 未重载时带参被拒」，但它在协议不匹配时会把
+							 * **全部会话**的压缩记录灌进弹窗——正是用户实测反馈的问题形态。
+							 * 现在失败即如实显示 RPC 错误（renderHud 的 diag），不拿别会话数据顶替。 */
 							if (r && r.ok) {
 								hudRemote = {
 									hudLastAct: r.hudLastAct || "",
 									hudArmed: r.hudArmed || "",
 									hudPending: r.hudPending || "",
 									gen: r.gen || "",
-									acts: Array.isArray(r.acts) ? r.acts : null,
-									/* 全局兜底（本会话过滤为空时回退显示，见 renderHud） */
-									hudLastActGlobal: r.hudLastActGlobal || "",
-									actsGlobal: Array.isArray(r.actsGlobal) ? r.actsGlobal : null,
+									/* 本会话压缩记录明细（host 严格按 sid 过滤）：{at, text}[] */
+									actsDetail: Array.isArray(r.actsDetail) ? r.actsDetail : null,
 								};
 								/* C-own：引擎阈值上限（host 动态探测，方案 C 钳制用）——存 NS 供保存路径读取 */
 								if (typeof r.criticalCap === "number" && Number.isFinite(r.criticalCap) && r.criticalCap > 0 && r.criticalCap <= 1) {
 									NS.engineCap = r.criticalCap;
 								}
-								NS.hudDebug = { svc: true, ok: true, act: r.hudLastAct ?? null, gen: r.gen ?? null, acts: Array.isArray(r.acts) ? r.acts.length : null, sid: (NS.sid || "").slice(0, 13) || null, at: Date.now() };
+								NS.hudDebug = { svc: true, ok: true, act: r.hudLastAct ?? null, gen: r.gen ?? null, acts: Array.isArray(r.actsDetail) ? r.actsDetail.length : null, sid: (NS.sid || "").slice(0, 13) || null, at: Date.now() };
 								renderHud();
 							} else {
 								NS.hudDebug = { svc: true, ok: false, r: r && r.error || JSON.stringify(r)?.slice(0, 120), at: Date.now() };

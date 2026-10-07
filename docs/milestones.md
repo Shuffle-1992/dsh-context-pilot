@@ -746,3 +746,63 @@ compaction/start = 322 ｜ compaction/end = 322 ｜ 其中带 400 error = 312
 - `README.md` §4.1 断言数由 **181/33/57 = 271** 更正为 **187/34/57 = 278**（`npm test` 实测）。
   说明：本条目之前的历史台账数字**保持原样**（记录当时事实），仅在 README 汇总处对齐现状。
 - **无源码改动**，故无部署动作（三端状态不变）。
+
+### chip 两态样式 + 弹窗完整时间 / 严格会话过滤（血统链退役） —— ✅ 2026-10-08
+
+**用户两项 UI 要求**（附截图）：① 输入框 chip 删除「档位」与「冷却」显示，文案改「智能思考就绪」，
+冷却中/冷却完成各一套样式，并**像进度条一样按冷却时间在两样式间过渡**；
+② 悬浮压缩记录里显示**完整日期时间**，且**按会话过滤**（当时显示的是全 DSH 的记录）。
+
+#### ② 的根因：C-lineage 血统链在跨会话误连（一手证据定案）
+
+先复现：`hud-acts.json` 实际含 **3 个 sid**，`lineage` 为
+
+```
+f4154f01→16616c07 ｜ cb8d115e→f4154f01 ｜ 16616c07→f4154f01（回边，成环） ｜ 899bfaca→16616c07
+```
+
+从本会话 `16616c07` 回溯得链 `{16616c07, f4154f01}` ⇒ **命中 4/5 条**，而严格 sid 只应命中 3 条。
+用户截图里悬停列表正好 **4 条** —— 第 4 条 `13:58 · 标记 · 省 198.4K` 属 `f4154f01`，
+该 sid 位于 **`--F-My Code-keysion-dac-vue--` 另一个 workspace**（`cb8d115e` 则在 `zcode-dispatch`）。
+⇒ **串会话的确是血统链干的，不是「记录丢失」的反向问题。**
+
+**并且血统链的存在前提被证伪**：本会话 12:51、18:25、18:45 三次压缩**全部**记录在同一 sid 下
+⇒ 「DSH 压缩会轮转 session id」不成立，「按当前 id 过滤永远匹配不上」是误判。
+
+**处理：整体退役 C-lineage**（不是打补丁）——删 `noteSessionId`（+4 处调用）、`state.m5.lineage`、
+`state.m5.lastSid`、`hud-acts.json` 的 `lineage` 键（旧文件读入即忽略）、`m5.hudPoll` 的
+`lineageSize`/`chainSize`/`chainHeads`；`getHud` 与快照取证**同一口径 = sid 精确相等**。
+同时退役「全局兜底」显示路径（`actsGlobal` / `hudLastActGlobal` 三端清零）与 client 侧
+「带参失败即退回无参全局查询」的回退——那两条都会把全部会话的记录灌进弹窗。
+
+**教训**：用「启发式推断的关联」去补「以为丢了的记录」，会把别的对象的数据当成自己的。
+匹配不到就如实显示「本会话暂无压缩记录」，比拿别会话数据顶替更正确。
+
+#### ① chip 重做（两态 + 进度条式过渡）
+
+- 文案固定「**智能思考就绪**」；**档位值与剩余秒数移入 title**（信息不丢，只是不抢视觉）。
+- 底层铺满 `--dsw-alias-state-warn-primary` = 冷却态；上层 `--dsw-alias-state-success-primary`
+  按 `progress` 从左往右扫过 ⇒ 冷却走完正好扫满 = 就绪态。
+- 关键判据：`cooling=false ⇒ progress=1`，**「冷却结束」与「扫满」同一时刻**，
+  不会出现「样式已就绪但条没满」。1s tick + `transition: width 1s linear` 补帧 ⇒ 肉眼平滑。
+- 顺带：`data-state="cooling|ready"` 作为可测锚点；未新增定时器（沿用既有 1s 冷却 tick）。
+
+#### 弹窗时间格式
+
+`hh:mm` → **`YYYY-MM-DD HH:MM:SS`**（本地时区）。host 新增结构化 `actsDetail:{at,text}[]`
+（带 `at`），client 用 `fmtFullTime(at)` 渲染并用 `stripHhmm` 剥掉 host 文本里的前导 `hh:mm`，
+避免同一行出现两个时间；旧记录同样适用（模板自 B1 起未变）。
+
+#### 防回归（294 断言全通过）
+
+`contract.mjs` **187 → 203**：§6.9 重写为 10 条 chip 两态契约，新增 §6.14 共 10 条
+（精确过滤 / 血统链退役 / `actsDetail` / 全局兜底清零 / 完整时间 / 无参回退已删 / wire 一致 /
+取证口径一致），退役清单新增 `actsGlobal`·`hudLastActGlobal`·`lineage`。
+**12 项变异全部被抓住**（文案回退 / 重新内联档位值 / 重新内联冷却秒数 / 去掉 transition /
+progress 不收敛 / 不用完整时间 / 恢复无参回退 / 过滤退回全局 / 去掉 actsDetail /
+恢复 actsGlobal / 血统链调用复活 / lineage 重新持久化）——含 1 次**测试自身 TDZ 真 bug**
+（`chipBody` 声明晚于新断言 ⇒ `Cannot access before initialization`，整套件 0 通过）。
+
+#### 部署
+
+`client.js` ⇒ **刷新页面**；`host.impl.mjs` + `wire.host.mjs`（后者仅签名散文）⇒ **plugin toggle 热换**。

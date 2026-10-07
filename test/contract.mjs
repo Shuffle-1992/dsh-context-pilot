@@ -255,12 +255,22 @@ ok('host getHud 独立返回 effortEnabled（与 effort 数据分离）',
 ok('wire 的方法签名声明了 effortEnabled（三端一致）',
   /effortEnabled:boolean/.test(wire),
   'wire 签名缺 effortEnabled ⇒ 与 host 实际返回漂移');
-ok('chip 不用冒号分隔（用户要求改间距）', !/智能思考档位:\$\{/.test(client) && !/`智能思考档位:/.test(client),
-  '仍用「智能思考档位:XXX」冒号形态 ⇒ 用户要求改成间距');
-ok('chip 用两个 span + gap 呈现（间距 6px）',
-  /el\("span", \{ style: \{ opacity: "\.75" \} \}, "智能思考档位"\)/.test(client) &&
-  /gap: "6px"/.test(client),
-  '未拆成「标签 + 值」两个 span + 间距');
+/* setInterval 只允许用于**冷却倒计时**（本地 1s tick，且冷却结束即停）；
+ * 不得用于「定期问 host 要档位」——那正是用户要去掉的 5s 轮询。
+ * 判据：定时器回调里只能有 setNow，不得出现 getHud/pullOnce。
+ * ⚠️ chipBody 必须**先声明**再被下面的断言使用（否则 const TDZ 直接抛，整份套件 0 通过）。 */
+const chipBody = /function EffortChip\([\s\S]*?\n\t\t\}/.exec(client)?.[0] ?? '';
+ok('解析出 EffortChip 函数体', chipBody.length > 0, '未找到 EffortChip');
+/* 2026-10-08 用户要求重做 chip：**删除内联的档位值与冷却秒数**、文案固定「智能思考就绪」、
+ * 状态改由**两个样式 + 进度条式过渡**承担（底层 warn=冷却，上层 success 按冷却进度扫满=就绪）。 */
+ok('chip 标签不再用「智能思考档位」',
+  !/el\("span", \{ style: \{ opacity: "\.75" \} \}, "智能思考档位"\)/.test(client),
+  '仍是旧的「智能思考档位」标签 span ⇒ 用户已要求改成「智能思考就绪」');
+ok('chip 文案为「智能思考就绪」', /"智能思考就绪"/.test(chipBody),
+  '未改成「智能思考就绪」');
+ok('chip 不再把档位值渲染成子节点（用户要求删除）',
+  !/\}, effort\)/.test(chipBody),
+  '仍把 effort 值当子节点渲染 ⇒ 用户要求删除内联档位显示');
 /* ⚠️ 用户明确要求「不要 5S 轮询」（2026-10-07）。档位必须走**响应式投影**：
  * `useProjection("modelSelection")`（官方 UI 同款，dsh-client-ui-conversation L17240 同形），
  * 投影由会话事件驱动（model/selection、request/header）⇒ 换档落库即重渲染，零轮询。
@@ -268,23 +278,34 @@ ok('chip 用两个 span + gap 呈现（间距 6px）',
 ok('档位走响应式投影 useProjection（不是轮询）',
   /up\("modelSelection"\)/.test(client) && /props && props\.useProjection/.test(client),
   '未用 useProjection("modelSelection") ⇒ 又退化成轮询/静态值');
-/* setInterval 只允许用于**冷却倒计时**（本地 1s tick，且冷却结束即停）；
- * 不得用于「定期问 host 要档位」——那正是用户要去掉的 5s 轮询。
- * 判据：定时器回调里只能有 setNow，不得出现 getHud/pullOnce。 */
-const chipBody = /function EffortChip\([\s\S]*?\n\t\t\}/.exec(client)?.[0] ?? '';
-ok('解析出 EffortChip 函数体', chipBody.length > 0, '未找到 EffortChip');
 ok('chip 不用定时器轮询 host（用户明确要求去掉 5s 轮询）',
   !/setInterval\([^)]*(?:getHud|pullOnce)/.test(chipBody),
   'EffortChip 内用 setInterval 定期拉 host ⇒ 违反「不要 5S 轮询」');
 ok('chip 的定时器仅用于冷却倒计时且冷却结束即停',
   /if \(!cooling\) return undefined;/.test(chipBody) && /setInterval\(\(\) => setNow\(Date\.now\(\)\), 1000\)/.test(chipBody),
   '倒计时未按 cooling 条件启停 ⇒ 常驻定时器（变相轮询）');
-ok('冷却显示在档位后面（用户要求）',
-  /冷却 \$\{coolLeft\}s/.test(chipBody) && /coolLeft > 0\s*\n?\s*\?/.test(chipBody),
-  '未在档位后显示冷却剩余秒数');
-ok('冷却只在确实冷却时占位（结束后不显示）',
-  /const cooling = until > now;/.test(chipBody),
-  '未判断 cooling ⇒ 冷却结束后仍显示「冷却 0s」');
+ok('chip 不再内联显示冷却秒数（用户要求删除）',
+  !/冷却 \$\{coolLeft\}s/.test(chipBody) && !/fontVariantNumeric/.test(chipBody),
+  '仍内联显示「· 冷却 Ns」⇒ 用户要求删除');
+ok('chip 两态用 data-state 标记（cooling / ready）',
+  /"data-state": cooling \? "cooling" : "ready"/.test(chipBody),
+  '缺 data-state ⇒ 两态不可区分（也失去可测锚点）');
+ok('chip 用主题状态色（warn=冷却 / success=就绪）',
+  /--dsw-alias-state-warn-primary/.test(chipBody) && /--dsw-alias-state-success-primary/.test(chipBody),
+  '未用主题状态 token ⇒ 两态颜色不跟随主题');
+ok('chip 进度条宽度由冷却进度驱动',
+  /const progress = cooling \? Math\.min\(1, Math\.max\(0, \(totalMs - remainMs\) \/ totalMs\)\) : 1;/.test(chipBody) &&
+  /width: `\$\{progress \* 100\}%`/.test(chipBody),
+  '冷却进度未接到进度条宽度 ⇒ 用户要的「像进度条一样过渡」未实现');
+ok('chip 冷却结束与进度扫满同一时刻（cooling=false ⇒ progress=1）',
+  /: 1;/.test(chipBody) && /const cooling = until > now;/.test(chipBody),
+  'progress 未在冷却结束时取 1 ⇒ 出现「样式已就绪但条没满」');
+ok('chip 进度条有 CSS transition 补帧（1s tick 仍平滑）',
+  /transition: "width 1s linear, opacity \.3s linear"/.test(chipBody),
+  '缺 transition ⇒ 1s tick 呈跳变而非平滑过渡');
+ok('chip 的档位/冷却信息移入 title 提示（未丢失）',
+  /当前档位：\$\{effort\}/.test(chipBody) && /换档冷却中：还剩 \$\{coolLeft\}s/.test(chipBody),
+  '信息被直接删掉而非移入 title ⇒ 用户失去查看途径');
 ok('投影 pending 优先显示（已选待生效提前可见）',
   /sel\.pending \|\| sel\.lastUsed/.test(client),
   '未优先取 pending ⇒ 换档后要等下一轮才显示');
@@ -292,6 +313,46 @@ ok('host 信息在投影变化时重问（事件驱动，非定时器）',
   /settingsScope\.subscribe\?\.\(\(\) => \{ pullOnce\(\); \}\)/.test(client) &&
   /\}, \[effort, pendingNow\]\);/.test(client),
   '未按投影变化重问 ⇒ 换档后冷却状态不更新');
+
+/* ═══════════ 6.14 压缩记录弹窗：严格会话过滤 + 完整日期时间 ═══════════ */
+console.log('\n== 6.14 压缩记录弹窗（会话过滤 / 完整时间 / 血统链退役）==');
+/* 用户实测反馈（2026-10-08）：弹窗里出现了**别的会话**的压缩记录，且时间只有 hh:mm。
+ * 取证：hud-acts.json 含 3 个 sid，lineage 链 16616c07 → f4154f01（已成环）使 4/5 条被
+ * 「本会话」命中，其中 f4154f01 属 `keysion-dac-vue` workspace ⇒ 这就是串会话的机制。 */
+const hostNoComment = host.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+ok('getHud 按 sid 精确过滤（不再走血统链）',
+  /const filtered = sid \? list\.filter\(\(a\) => a\.sid === sid\) : list;/.test(host),
+  '过滤仍走 lineage 链 ⇒ 会命中别的会话的记录');
+ok('血统链机制已整体退役（noteSessionId / state.m5.lineage / lastSid）',
+  !/noteSessionId/.test(hostNoComment) && !/state\.m5\.lineage/.test(hostNoComment) && !/state\.m5\.lastSid/.test(hostNoComment),
+  '血统链残留 ⇒ 跨会话误连可复活');
+ok('hud-acts.json 不再持久化 lineage 键', !/lineage: state\.m5\.lineage/.test(host),
+  '仍写 lineage ⇒ 假边继续累积');
+ok('getHud 返回结构化明细 actsDetail（带 at 供完整时间渲染）',
+  /actsDetail: filtered\.slice\(0, 8\)\.map\(\(a\) => \(\{ at: a\.at, text: a\.text \}\)\)/.test(host),
+  '缺 actsDetail ⇒ client 无法渲染完整日期时间');
+ok('全局兜底字段已退役（actsGlobal / hudLastActGlobal 三端清零）',
+  !/actsGlobal/.test(hostNoComment) && !/hudLastActGlobal/.test(hostNoComment) &&
+  !/actsGlobal/.test(client) && !/hudLastActGlobal/.test(client),
+  '全局兜底残留（代码层，非注释）⇒ 会把全部会话的记录灌进弹窗');
+ok('client 渲染完整日期时间（YYYY-MM-DD HH:MM:SS）',
+  /const fmtFullTime = \(iso\) => \{/.test(client) && /padStart\(2, "0"\)/.test(client) &&
+  /fmtFullTime\(x && x\.at\)/.test(client),
+  '未渲染完整日期时间 ⇒ 用户要求「显示完整的日期时间」');
+ok('client 剥掉 host 文本里的前导 hh:mm（避免两个时间）',
+  /const stripHhmm = \(text\) =>/.test(client) && /stripHhmm\(x && x\.text\)/.test(client),
+  '未剥前导 hh:mm ⇒ 同一行出现两个时间');
+ok('client 删除了「带参失败退回无参全局查询」的回退',
+  !/getHud\(""\)/.test(client),
+  '仍回退无参查询 ⇒ 协议不匹配时显示全 DSH 记录');
+/* wire 的**类型声明**不得再含全局兜底字段（签名里的散文可以叙述其退役，故只查声明形态）。 */
+ok('wire 签名与 host 返回一致（actsDetail / 无全局兜底声明）',
+  /actsDetail:\{at:string,text:string\}\[\]/.test(wire) &&
+  !/actsGlobal:string\[\]/.test(wire) && !/hudLastActGlobal:string/.test(wire),
+  'wire 签名仍声明全局兜底字段 ⇒ 三端漂移');
+ok('m5.hudPoll 取证口径与 getHud 一致（按 sid 精确匹配）',
+  /matched: state\.m5\.acts\.filter\(\(x\) => x\.sid === asid\)\.length,/.test(host),
+  '取证口径仍走链 ⇒ 排查时看到的命中数与真实显示不一致');
 
 /* ═══════════ 6.8 R1 智能思考字段三端对账 ═══════════ */
 console.log('\n== 6.8 智能思考字段（FIELDS ↔ schema ↔ M3_DEFAULTS）==');

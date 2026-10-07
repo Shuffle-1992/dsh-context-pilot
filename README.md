@@ -154,7 +154,7 @@ Agent 自改档不应改掉新会话的默认档。
 - **M2** 每轮注入：`agent/pre-step` 追加 usage 行（step 1 门控，异常放行不注入）
 - **M2.5** 新会话自说明：首次注入追加插件说明（约 200 字），让 Agent 不靠外部文档就懂流程
 - **M3.6** 标记闭环：尾行标记 → 武装 → idle 压缩 → **实弹 E2E 通过**（省 181K token / 节点 471）
-- **M5** 弹窗 HUD：最近压缩记录、武装/待执行徽章、按会话过滤、悬停多条
+- **M5** 弹窗 HUD：最近压缩记录、武装/待执行徽章、**按会话严格过滤（sid 精确匹配）**、悬停多条（含完整日期时间）
 - **M5.5** 任务挂起-自动恢复：多通道投递（A sessionController → B remote → C direct-followup），
   **三测复现通过**，实际走通道 C
 - **M5.7** 压缩历史持久化（`hud-acts.json`，cap 50）：跨重启/跨 toggle 存续
@@ -171,10 +171,19 @@ Agent 自改档不应改掉新会话的默认档。
   调查脚手架（`r1ProbeOnce` + 三个 `snap.*Probe`）清理，结论改为「留档断言」防丢
 - **压缩失效定位**（2026-10-08）：压缩两条路径全 400 ⇒ 补错误正文取证后定位为 **workbuddy
   provider 对摘要请求的思考档位报 400**（非本插件）；切 `trae` 后同一路径一次成功
-  （733.9K token / 95% → 1.9%）。全文见 [`docs/compaction-failure-diagnosis.md`](docs/compaction-failure-diagnosis.md)
+  （733.9K token / 95% → 1.9%）。**结论已锐化到 provider×model**：坏的是
+  `workbuddy × deepseek-v4.1-flash` 组合（`workbuddy/glm-5.3-flash` 曾成功），
+  且 `deepseek-account/deepseek-flash` 实测可用（省 217.8K）。全文见
+  [`docs/compaction-failure-diagnosis.md`](docs/compaction-failure-diagnosis.md)
 - **配置面板首帧就绪门**（2026-10-08）：快照未解析前不再渲染 `field.def`
   （默认值与已存值不同：`criticalRatio` 0.85 vs 0.8、`markerMinRatio` 0.2 vs 0.3）
   ⇒ 消除「刚出现显示一个值、随后跳变」的那一帧
+- **两处 UI 修正**（2026-10-08，用户实测反馈）：
+  ① 输入框 chip 由「智能思考档位 low · 冷却 23s」改为固定文案「智能思考就绪」，
+  **状态改由样式承担**——底层 warn 色=冷却态、上层 success 色按冷却进度扫满=就绪态
+  （两个主题状态 token + `width` transition，像进度条一样过渡）；档位值与剩余秒数移入 title。
+  ② 压缩记录弹窗：时间由 `hh:mm` 改为完整 `YYYY-MM-DD HH:MM:SS`，并**按会话严格过滤**——
+  原 C-lineage 血统链把**别的会话**的记录混了进来（详见下条）
 - **配置面**：7 个字段，面板按秒/比率显示（总开关为开关滑块）；成本阈值计算器（8 个模型预设，一键算推荐值并写入）
 - **只读审查落地**：外部审查 23 条，批次 1/2/3 全部实施（含心跳泄漏、`ctx.effect` 语义误用等真 bug）
 
@@ -205,11 +214,11 @@ npm run test:report   # 只跑报告形状
 
 | 套件 | 断言数 | 查什么 | 能抓到什么 |
 | --- | --- | --- | --- |
-| `contract.mjs` | 187 | face 方法表 ↔ client 描述符 ↔ TYPERT 三端对账；Config 字段在 FIELDS/schema/M3_DEFAULTS 三处齐全；退役字段未复活；`mergeConfig` 读取集 ⊆ schema；**getHud 作用域契约**（防 ReferenceError 回归）；**弹窗/阈值行排版契约**；**智能思考 UI 契约**（开关尺寸/右对齐/字段三端）；**智能思考 8 条实证结论**（prepend 最外层 / pending 持久 / 冷却基准 / 计数语义 / 两侧校验 / agent.ctx / sid 现读 / 删 maxTokens） | **调用静默失败**（P29：三端漂移不报错、只是拿不到数据）；已实测抓过 3 个真 bug |
+| `contract.mjs` | 203 | face 方法表 ↔ client 描述符 ↔ TYPERT 三端对账；Config 字段在 FIELDS/schema/M3_DEFAULTS 三处齐全；退役字段未复活；`mergeConfig` 读取集 ⊆ schema；**getHud 作用域契约**（防 ReferenceError 回归）；**弹窗/阈值行排版契约**；**智能思考 UI 契约**（开关尺寸/右对齐/字段三端）；**智能思考 8 条实证结论**（prepend 最外层 / pending 持久 / 冷却基准 / 计数语义 / 两侧校验 / agent.ctx / sid 现读 / 删 maxTokens） | **调用静默失败**（P29：三端漂移不报错、只是拿不到数据）；已实测抓过 3 个真 bug |
 | `static.mjs` | 34 | 真实 `node --check`；client 自足（无外部 import，require 仅 react）；entry 薄壳（<40 行、有静态 Config、动态 import 带 `?ts=`）；模块依赖方向无环；热换纪律；调试残留扫描 | 语法错误、破坏热换、client 引入依赖、循环依赖、`TODO`/`XXX`/`console.log` 残留 |
 | `report.mjs` | 57 | 产出侧字段契约；`bfOnce` 回填链依赖；C3② 关键事件必须走 full 档；**getHud 作用域与 criticalCap 实参契约**；**调查结论留档**（探针退役后结论不得丢）；真实报告结构自洽；`hud-acts.json` 去重；dump 工具可跑 | 报告形状无声破坏（本项目踩过 2 次：顶层读 m3/m5、脚本读已删字段） |
 
-合计 **278 条断言**。
+合计 **294 条断言**。
 
 **已验证有效**：注入 3 个人为 bug（`m3-act` 误入精简档 / client face 改名 / host 引用 client.js），
 三套件全部抓到且定位精准。**新增断言均实测验证过「对回归确实失败」**（两边都通过的测试等于没测）。

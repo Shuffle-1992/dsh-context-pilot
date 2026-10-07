@@ -358,8 +358,8 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
           acts: j.acts
             .filter((a) => a && typeof a.sid === 'string' && typeof a.text === 'string' && typeof a.at === 'string')
             .slice(0, HUD_ACTS_CAP),
-          lineage: j.lineage && typeof j.lineage === 'object' ? j.lineage : {}, // C-lineage：会话血统链
         };
+        /* 旧文件的 `lineage` 键**读入即忽略**（2026-10-08 血统链退役，见 noteSessionId 处注释）。 */
       }
     } catch (e) {
       if (e?.code !== 'ENOENT') log('warn', `hud-acts.json 读取失败（忽略，走报告回填）：${msg(e)}`);
@@ -369,7 +369,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
   const saveHudActs = (acts) => {
     try {
       mkdirSync(dirname(hudActsPath), { recursive: true });
-      writeFileSync(hudActsPath, JSON.stringify({ version: 1, savedAt: new Date().toISOString(), acts: acts.slice(0, HUD_ACTS_CAP), lineage: state.m5.lineage ?? {} }, null, 2));
+      writeFileSync(hudActsPath, JSON.stringify({ version: 1, savedAt: new Date().toISOString(), acts: acts.slice(0, HUD_ACTS_CAP) }, null, 2));
     } catch (e) {
       log('warn', `hud-acts.json 写入失败（吞）：${msg(e)}`);
     }
@@ -389,21 +389,21 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       saveHudActs(state.m5.acts);
     } catch { /* 吞 */ }
   };
-  /** C-lineage（2026-10-07）：会话 id 轮转链——DSH 压缩会分叉出新 session id（实测本会话连换 3 个 id），
-   *  压缩记录按「当时的 id」存 ⇒ getHud 按当前 id 过滤永远匹配不上（用户实测「记录经常丢失」的根因）。
-   *  本助手记录 newSid ← prevSid 的血统边（随 hud-acts.json 持久化）；getHud 沿链回溯即可命中
-   *  「同一条会话」的全部历史记录。局限：多会话并发时按最近活跃推断，可能误连（单窗口使用无碍）。 */
-  const noteSessionId = (sid) => {
-    try {
-      if (!sid) return;
-      if (state.m5.lastSid && sid !== state.m5.lastSid && state.m5.lineage[sid] === undefined) {
-        state.m5.lineage[sid] = state.m5.lastSid;
-        saveHudActs(state.m5.acts);
-        log('info', `M5 会话血统：${String(sid).slice(0, 13)}… ← ${String(state.m5.lastSid).slice(0, 13)}…`);
-      }
-      state.m5.lastSid = sid;
-    } catch { /* 吞 */ }
-  };
+  /* C-lineage 会话血统链 —— ❌ 2026-10-08 已整体移除（连同 noteSessionId / state.m5.lineage /
+   * state.m5.lastSid / hud-acts.json 的 lineage 键 / m5.hudPoll.lineageSize）。
+   *
+   * 移除依据（两条独立证据，均来自一手会话存盘）：
+   * ① **前提被证伪**：血统链的前提是「DSH 压缩会轮转 session id」。但本会话
+   *    12:51、18:25、18:45 三次压缩**全部**记录在同一个 sid（session-16616c07…）下
+   *    ⇒ 压缩并不换 id，「按当前 id 过滤永远匹配不上」是误判。
+   * ② **它自己制造 bug**：链的建立规则是「sid 一变就连一条边」，而多对话下 UI 的
+   *    `NS.sid` 会漂移到别的会话 ⇒ 生成跨会话假边，实测已成环：
+   *      { f4154f01→16616c07, cb8d115e→f4154f01, 16616c07→f4154f01（回边）, 899bfaca→16616c07 }
+   *    从 16616c07 回溯得 { 16616c07, f4154f01 } ⇒ 命中 4/5 条，把 `keysion-dac-vue`
+   *    workspace 里**另一个对话**的压缩记录显示进了本会话弹窗（用户实测反馈）。
+   *
+   * 教训：用「启发式推断的关联」去补「以为丢了的记录」，会把别的对象的数据当成自己的。
+   * 现在 getHud 严格按 sid 精确匹配；匹配不到就如实显示「本会话暂无压缩记录」。 */
 
   /* ---- M5.5 任务挂起-自动恢复（用户定义的完整闭环）----
    *  任务进来 → 模型判断需先压缩 → 本轮不执行、回复写「待执行：<任务>」+ 标记 → idle 自动压缩 →
@@ -658,7 +658,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     // M5 HUD 发布取证（entry 查找/edit 结果全程留痕——弹窗侧空态无法区分静默失败）
     // hud.gen = 实例指纹：客户端取到的 gen 应与本实例一致；不一致 = RPC 打到了旧激活的僵尸面
     // acts = 最近压缩记录（按会话可过滤，新→旧，cap 8）：主行显示最新，悬停展开列表
-    m5: { lastPublish: null, hud: { hudLastAct: '', hudArmed: '', hudPending: '', gen: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}` }, hudFace: 'absent', acts: [], lastSid: null, lineage: {} },
+    m5: { lastPublish: null, hud: { hudLastAct: '', hudArmed: '', hudPending: '', gen: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}` }, hudFace: 'absent', acts: [] },
     // M5.5 恢复通道取证（每次尝试逐相位落报告，杜绝 log-only 黑洞）
     m55: { armed: null, attempts: [], channelProbe: null },
   };
@@ -666,7 +666,6 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
    * 报告回填降级为迁移/兜底源（bfOnce 内合并去重，不再覆盖式写 acts）。 */
   const hudLoaded = loadHudActs();
   state.m5.acts = hudLoaded?.acts ?? [];
-  state.m5.lineage = hudLoaded?.lineage ?? {}; // C-lineage：历史血统边随文件恢复
 
   /** 解析某 agent 作用域的 compaction 服务实例（顶层 ctx 实测 absent，必须走 agent 上下文）。 */
   const resolveCompactionFor = (agent) => {
@@ -1025,22 +1024,15 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         snap.compactionProbe = { via: r.via, probe: r.probe };
       }
       if (!snap.m5.hudPoll) {
-        /* C-lineage 运行时取证：getHud 同款链路逐状态落盘——记录不显示时从这里定位断点
-         * （acts 是否加载 / 血统链多大 / 首 agent 的 sid 是否在链上 / 过滤命中几条）。 */
+        /* getHud 链路运行时取证：记录不显示时从这里定位断点
+         * （acts 是否加载 / 首个 agent 的 sid 是什么 / 精确匹配命中几条）。
+         * 2026-10-08：血统链退役后，匹配口径与 getHud 完全一致 = **按 sid 精确相等**。 */
         const asid = String(pick(a?.session?.id, a?.sessionId, a?.id, ''));
-        const chain = new Set();
-        let cur = asid;
-        let g = 0;
-        while (cur && !chain.has(cur) && g < 16) { chain.add(cur); cur = state.m5.lineage?.[cur]; g++; }
         snap.m5.hudPoll = {
           at: new Date().toISOString(),
-          lastSid: state.m5.lastSid ? String(state.m5.lastSid).slice(0, 24) : null,
-          lineageSize: Object.keys(state.m5.lineage ?? {}).length,
           actsCount: state.m5.acts.length,
           agentSid: asid.slice(0, 24) || null,
-          chainSize: chain.size,
-          chainHeads: [...chain].slice(0, 4).map((x) => x.slice(8, 24)),
-          matched: state.m5.acts.filter((x) => chain.has(x.sid)).length,
+          matched: state.m5.acts.filter((x) => x.sid === asid).length,
         };
       }
       snap.agents.push(row);
@@ -1191,7 +1183,6 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       const sig = signal && typeof signal === 'object' ? signal : AbortSignal.timeout(180_000);
       if (sig.aborted) return;
       const sid = String(pick(agent.session.id, agent.sessionId, agent.id, 'unknown'));
-      noteSessionId(sid); // C-lineage：轮转边记录（pre-step 每轮必经）
       const mr = measureRatio(agent.session); // B2：读取收敛
       if (!mr.ok || mr.ratio == null) return;
       const ratio = mr.ratio;
@@ -1295,7 +1286,6 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         }
         const card = renderPolicyCard(r.ratio); // M3.5 通道2：政策卡（相关占用以上才出现）
         const sid = String(pick(agent.session.id, agent.sessionId, 'unknown'));
-        noteSessionId(sid); // C-lineage
         /* 智能思考：**独立门控**（effortEnabled），与压缩的 markerMinRatio 完全解耦——
          * 用户明确要求「全程允许」：低占用也必须能注入/换档（压缩的卡在低占用时是不注入的）。 */
         let eff = null;
@@ -1357,7 +1347,6 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       if (!agent?.session) return;
       const text = messageText(message);
       const sid0 = String(pick(agent.session.id, agent.sessionId, 'unknown'));
-      noteSessionId(sid0); // C-lineage
       if (text) lastUserTextBySid.set(sid0, text.slice(0, 500)); // M5.5：记住最近任务文本（恢复兜底）
       const taskChars = text.length;
       const d = decideCompaction(agent);
@@ -1391,7 +1380,6 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     try {
       if (!effEnabled()) return; // 总开关活读（演习模式已随 2026-10-07 面板精简退役：压缩路径无影子模式）
       const sid = String(pick(agent?.session?.id, agent?.id, 'unknown'));
-      noteSessionId(sid); // C-lineage
       /* A2（审查）：TTL 清灯前移到一切早退之前——measure 失败/in-flight 早退也要熄过期武装灯，防 hudArmed 永亮 */
       const armedMark = markerArmed.get(sid);
       if (armedMark && Date.now() - armedMark.at > M3.armedTtlMs) {
@@ -1600,13 +1588,16 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
          *  按 id 过滤会空（用户「记录经常丢失」的最终根因），client 侧按「本会话优先、全局兜底」显示并标注。 */
         onGetHud: async (sid) => {
           const list = Array.isArray(state.m5.acts) ? state.m5.acts : [];
-          /* C-lineage：按会话血统链匹配——当前 sid + 沿 lineage 回溯的全部历史前身 id。
-           * 仅按当前 id 过滤会在压缩轮转后误判「无记录」。 */
-          const chain = new Set();
-          let cur = sid;
-          let guard = 0;
-          while (cur && !chain.has(cur) && guard < 16) { chain.add(cur); cur = state.m5.lineage?.[cur]; guard++; }
-          const filtered = sid ? list.filter((a) => chain.has(a.sid)) : list;
+          /* 会话过滤（2026-10-08 改为**严格按 sid 精确匹配**，用户实测反馈驱动）。
+           * 原实现走 C-lineage 血统链（当前 sid + 沿 lineage 回溯的全部历史前身 id），
+           * 其前提「DSH 压缩会轮转 session id」已被证伪；实测血统链反而**跨会话误连**：
+           *   hud-acts.json lineage = { f4154f01→16616c07, cb8d115e→f4154f01,
+           *                             16616c07→f4154f01（回边，成环）, 899bfaca→16616c07 }
+           *   ⇒ 从 16616c07 回溯得 { 16616c07, f4154f01 }，命中 4/5 条，
+           *     而 f4154f01 属 `keysion-dac-vue` workspace、cb8d115e 属 `zcode-dispatch`
+           *     —— 都是**另一个对话**，只因 UI 的 NS.sid 漂移过一次就被连成一条链。
+           * 这正是用户看到的「弹窗里显示全 DSH 的压缩记录」。故彻底改回精确匹配。 */
+          const filtered = sid ? list.filter((a) => a.sid === sid) : list;
           /* ⚠️ 2026-10-07 真根因修复：agents/sess 必须提到 onGetHud 作用域。
            * 原实现在下方 occ IIFE 内部声明 agents，而 criticalCap 在 IIFE 外引用它
            * ⇒ 每次 getHud 抛 ReferenceError("agents is not defined") ⇒ client 永远拿不到数据，
@@ -1639,10 +1630,11 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
             ok: true,
             ...state.m5.hud,
             hudLastAct: filtered[0]?.text || '',
-            acts: filtered.slice(0, 8).map((a) => a.text),
-            /* 全局兜底（client 按「本会话优先」消费；仅当本会话过滤为空时回退显示并标注） */
-            hudLastActGlobal: list[0]?.text || '',
-            actsGlobal: list.slice(0, 8).map((a) => a.text),
+            /* 本会话压缩记录明细（严格按 sid 过滤，新→旧，cap 8）：client 用 at 渲染
+             * 完整日期时间「YYYY-MM-DD HH:MM:SS · 原因 · 省 xK」。
+             * 2026-10-08：裸字符串 `acts` 被本字段取代；全局兜底 `actsGlobal` /
+             * `hudLastActGlobal` 一并退役——它正是「弹窗混进别会话记录」的来源。 */
+            actsDetail: filtered.slice(0, 8).map((a) => ({ at: a.at, text: a.text })),
             sessionMatched: filtered.length,
             occupancyRatio: occ.ratio,
             occupancyWindow: occ.window,
@@ -1672,11 +1664,9 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
             state.m5.hudPollReq = {
               at: resp.at,
               sid: sid ? String(sid).slice(0, 24) : null,
-              chainSize: chain.size,
               sessionMatched: filtered.length,
               actsCount: list.length,
               hudLastAct: resp.hudLastAct || null,
-              hudLastActGlobal: resp.hudLastActGlobal || null,
             };
           } catch { /* 吞 */ }
           return resp;
