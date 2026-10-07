@@ -166,18 +166,14 @@ if (wanted) {
 
 ## 7. 待办
 
-1. **真机 E2E**：让模型调用 `compact_context` —— 见下方 §7.1 验收清单。
+1. ~~**真机 E2E**：让模型调用 `compact_context`~~ —— **2026-10-07 已通过**，见下方 §7.1 实测结果。
 2. **marker 通道彻底退役**：删 `M3.marker` / `armedTtlMs` / `agent/inbox/inserted` 的标记解析 /
    武装灯 / 「待执行」徽章 / `pendingBySid` / `lastUserTextBySid` / `state.m55` / 面板两个字段。
    （`markerMinRatio` 需保留——它同时是**决策卡注入门槛**。）
-3. **保留策略可选（用户已确认要做）**：`context-overflow` 的 `retainTokens = 0` 较激进
-   （只保留最后一个节点）。E2E 通过后改为「**自己算范围 + 沿用官方兜底**」：
-   - 自己算：按引擎 `retainRatio`（默认 0.16）算出保留预算，从尾部回退选范围，调
-     `compactRegion(start, end, agent, signal)`；
-   - 兜底：自选范围若被引擎校验拒绝（**切断 tool-call/result 配对**是最可能的失败模式，
-     `validateSurfaceRegion` 会抛），则 `catch` 后回退 `compactIfNeeded(agent, 'context-overflow', signal)`；
-   - 这样在「保留近端细节」与「低占用强制压缩」之间取得可控性，同时不依赖复刻引擎的
-     `toolPairingBalancedBefore`（内部函数，不导出）。
+3. ~~**保留策略可选**：`context-overflow` 的 `retainTokens = 0` 较激进~~ —— **2026-10-08 已实施（R5）**。
+   见 [`docs/r5-retention-range-design.md`](r5-retention-range-design.md)：自选保留范围（窗口 × 0.16）
+   → 调公开方法 `compactRegion`；边界被拒逐节点回退；失败/仍越线才**沿用官方 overflow 兜底**。
+   §7.1.2 的实测数字（1117 → 4 节点）就是本项的直接动因。
 
 ### 7.1 E2E 验收清单（调用 `compact_context` 后**从报告核对**）
 
@@ -198,6 +194,56 @@ if (wanted) {
 
 ⚠️ 压缩会走 `context-overflow`（当前占用 < 80%，`pressure` 会返回 null）⇒ 保留近端 ≈0，
 本次对话会被大幅收掉。**验收所需的全部信息都在 host 侧报告里**，模型侧上下文丢了不影响核对。
+
+#### 7.1.1 实测结果（2026-10-07，session `16616c07`，turn 167）
+
+调用时占用 52.5%（低于引擎 80% 门限 ⇒ 预期走 `context-overflow`）。全部核对项**一次通过**：
+
+| 核对项 | 期望 | 实测 |
+|---|---|---|
+| `m3.compactToolCalls` | +1 | **1**（基线 0） |
+| `m3.compactIntents` | +1 | **1**；`compactIntentExpired` **0** |
+| `m3.lastCompactIntent.trigger` | — | **`context-overflow`**（与 52.5% < 80% 的预期一致，证明 `pressure` 如期返回 null 后落到兜底档） |
+| `m3.lastCompactIntent.acted` | true | **true** |
+| `m3.lastCompactIntent.shadowedTokens` | > 0 | **361769** |
+| `m3.preStepActs` / `preStepOk` | 各 +1 | **1 / 1** |
+| `m3.lastPreStepError` | null | **null** |
+| 本轮是否中断 | 否 | **否**（同一 turn 167 继续到 step 7） |
+| 是否有消息注入 | 无 | **无**（inbox 记录只有 358 条 `spliced`，即插件自己的用量行/决策卡；无 `agent/inbox/inserted`） |
+
+**时序铁证**（会话存储 `session.v4.jsonl.zstd`，seq 连续，可直接证明「工具调用 → 下一步 pre-step」）：
+
+```
+18300 tool/call    name=compact_context            ← 模型调用
+18301 tool/result  {"ok":true,"scheduled":"next-step"}
+18302 step/end     (step 6)
+18303 compaction/start                             ← 下一步的 pre-step 触发（不是工具调用当场）
+18304 compaction/summary  shadowedRange{15507..18296}  provider=deepseek-account/model=deepseek-flash
+18305 user/message  source.kind="compact-checkpoint"   ← DSH 官方摘要载体消息
+18306 compaction/end
+18307 step/start   (step 7)                        ← 压缩后的下一步
+18308 request/header  已换用压缩后上下文
+18309 assistant/message                            ← 模型继续，未中断
+```
+
+时间戳（毫秒）：`18301`=…348886 → `18303`=…348907（pre-step 起）→ `18304`=…377709（摘要 LLM 耗时 **28.8s**）。
+报告侧 `m3.lastPreStep.ms = 28817` 与之一致。
+
+**摘要 LLM 调用成功**：`compaction/summary.usage = {inputTokens:396, outputTokens:7442,
+cacheReadTokens:531328, totalTokens:539166}`，`provider: deepseek-account, model: deepseek-flash`。
+（此前 `workbuddy × deepseek-v4.1-flash` 的 312/322 次失败是 provider×model 问题，换 provider 即通——
+本次是「工具触发」链路而非 provider 修复的证据。）
+
+#### 7.1.2 附带发现：`context-overflow` 的保留策略确实过激
+
+- 报告 `m2` 记录压缩前 `surface 363,127`、`used 525,326`（52.5%）；
+  本次 `shadowedTokenCount = 361,769`（≈ 整个 surface）。
+- `shadowedRange.end = 18296` ⇒ 保留尾部 = seq **18297..18302**（最后一步的 6 条记录），
+  即 `retainTokens = 0` 语义（只留最后一个节点 + 工具配对回退）**实测确认**，保留 ≈1.4k token。
+- 结论：在**只有 53% 占用**时就把会话面砍掉 99.6%，近端细节几乎全丢。
+  这正是待办 3「自己算范围 + 沿用官方兜底」要解决的问题——**用可控的保留预算换掉 `retainTokens=0`**。
+  ⇒ **已于 2026-10-08 实施为 R5**：[`docs/r5-retention-range-design.md`](r5-retention-range-design.md)。
+
 
 ## 8. 教训
 
