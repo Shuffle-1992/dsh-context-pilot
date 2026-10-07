@@ -409,3 +409,48 @@ getHud（client 5s 轮询）。
 **防回归**（`contract.mjs` §6.10/§6.11，共 19 条）：
 门控必须独立、教学 6 要素逐条断言、无档不注入、`clearBriefed` 存在且清两个集合、
 两条路径都调用、声明早于调用（防 const TDZ）。**5 条绊线均实测验证有效**。
+
+### R1 换档通道：agent.ctx 作用域 + 标记独占一行 —— ✅ 2026-10-07
+
+**① 执行 seam 的关键发现（差点埋雷）**
+源码实证：`waterfall("agent/request", {turn, step, signal}, seed)`
+（`dsh-agent-loop` L1179）——**payload 里没有 agent**，只有 turn/step/signal。
+
+⇒ 第一版实现用 `payload.agent.session.id` 找会话，**per-session 查找会恒不命中**、
+换档**静默失效**（不报错、只是永远不生效——最难查的一类故障）。
+
+官方 `installModelSelection` 的做法（`dsh-agent/lib/types/model-selection.js` L45/L61，
+调用方 `api-session-controller` L310 传 `agent.ctx`）：**注册在 agent.ctx 上**。
+本插件同款：按 agent **懒安装** + WeakSet 去重，sid 由闭包捕获；
+`ensureEffortHooks()` 在每次 pre-step 调用（新会话自动覆盖）。
+
+**② 标记正则必须独占一行（E2E 前自查发现的真风险）**
+宽松正则 `/\[cp:effort\s+(\w+)\s*\]/g` 会误触发**散文提及**：
+本插件注入的教学文本本身就含「在回复最后一行单独写 [cp:effort <档>]」，
+模型引用/复述它（「你可以写 [cp:effort high] 来换档」）时会被当成指令 ⇒ **非预期换档**。
+压缩标记用 `text.trimEnd().endsWith(M3.marker)` 天然规避（要求结尾），
+effort 标记因位置自由才暴露该问题。
+
+修复：`/^[ \t]*\[cp:effort[ \t]+([A-Za-z0-9_-]+)[ \t]*\][ \t]*$/gm`（锚定行首行尾 + m 标志）。
+实测 8 个用例：散文/文档/引用教学全部不再误触发；正常独占一行、带空格、与 compact 共存均正常。
+**残余风险（诚实标注）**：代码块内独占一行仍会触发——正则无法识别 markdown 上下文，
+但该场景远少于散文提及，可接受。
+
+**③ 四道必备防护**
+1. **档位合法性校验**：`dsh-llm resolveCallWithInfo` L2182 对非法档**直接抛错**
+   （`UNSUPPORTED_REASONING_EFFORT`）⇒ 会中断该次请求。不在可选集内 ⇒ 忽略 + 留痕（不硬送）。
+2. **冷却 30s**：换档可能使前缀缓存失效（`call-config.js` 注明 effort 属 cache-affecting 状态）。
+3. **让位他人显式指定**：当前 config 带 effort 且**不是本插件上次写的**（用户手动选档 /
+   subagent 自带 `reasoning_effort`）⇒ 不覆盖（router-laya `carriesExplicitRoute` 语义）。
+   用 `appliedEffortBySid` 区分「自己的足迹」与「他人选择」——否则第二轮起每轮都看似显式，会自我锁死。
+4. **删除 maxTokens**：换档不应把上个 adapter 的 cap 钉到新档（router-laya `applyRoute` 同款教训）。
+
+**④ 声明顺序修复**：R1 块（`EFFORT_MARKER_RE` / `installEffortRequestHook` /
+`ensureEffortHooks`）原在 pre-step 之后，而 const 无提升 ⇒ **TDZ 抛 ReferenceError**。
+已整体前移到 `readEffort` 之后，并加断言锁死三者「声明早于使用」。
+
+**取证字段**：`m3.effortMarkerHits / effortSwitches / effortSkips{cooldown,invalid,foreign,noRoute}
+/ effortHooks / lastEffortMarker / lastEffortApply`（含 from→want、options、applied:false+error）。
+
+**防回归**：`contract.mjs` §6.12（15 条）+ §6.13（7 条，含**行为验证**——用真实正则跑
+误触发用例），总计 219 断言。标记正则绊线实测有效（结构检查 + 行为检查双 FIRES）。

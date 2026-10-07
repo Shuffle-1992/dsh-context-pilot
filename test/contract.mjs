@@ -356,6 +356,34 @@ ok('应用时删除 maxTokens（不把上个 adapter 的 cap 钉住）',
 ok('换档异常原样放行（绝不影响请求）', /catch \(e\) \{\s*\n\s*log\('warn', `R1 换档应用异常（吞，原样放行）/.test(host),
   '异常未吞 ⇒ 新功能可打崩模型请求');
 
+/* ═══════════ 6.13 换档标记必须独占一行（防散文误触发）═══════════ */
+console.log('\n== 6.13 换档标记正则（防「散文提及」误触发）==');
+// E2E 前自查发现的真风险：本插件注入的教学文本本身就含「[cp:effort <档>]」字样，
+// 模型引用/复述它时（「你可以写 [cp:effort high] 来换档」）宽松正则会误判为指令。
+// 压缩标记用 endsWith 天然规避（要求结尾），effort 标记位置自由才暴露该问题。
+const markerReSrc = /const EFFORT_MARKER_RE = \/(.+?)\/([a-z]*);/.exec(host);
+ok('解析出 EFFORT_MARKER_RE', !!markerReSrc, '未找到换档标记正则');
+ok('换档标记正则要求独占一行（含 ^ 与 $）',
+  !!markerReSrc && /^\^/.test(markerReSrc[1]) && /\$$/.test(markerReSrc[1]),
+  '正则未锚定行首行尾 ⇒ 散文里提及 [cp:effort x] 会被误当成指令（模型复述教学文本即触发）');
+ok('换档标记正则带 m 标志（多行匹配）', !!markerReSrc && /m/.test(markerReSrc[2]),
+  '缺 m 标志 ⇒ ^$ 只匹配整串首尾，正文里的独立行匹配不到');
+// 行为验证：用真实正则跑误触发用例
+if (markerReSrc) {
+  const re = new RegExp(markerReSrc[1], markerReSrc[2].includes('g') ? markerReSrc[2] : markerReSrc[2] + 'g');
+  const hits = (t) => [...t.matchAll(new RegExp(re.source, 'gm'))].map((m) => m[1]);
+  ok('散文提及不触发（「你可以写 [cp:effort high] 来换档」）',
+    hits('你可以写 [cp:effort high] 来换档。').length === 0,
+    '散文提及被误判为指令 ⇒ 模型复述教学文本就会意外换档');
+  ok('独占一行正常触发', hits('需要更深的推理。\n[cp:effort high]').join(',') === 'high',
+    '独占一行的标记未被识别 ⇒ 换档永不生效');
+  ok('与压缩标记共存时只识别 effort',
+    hits('[cp:effort high]\n[cp:compact]').join(',') === 'high',
+    '与 [cp:compact] 共存时解析异常');
+  ok('行首行尾空白容错', hits('  [cp:effort max]  ').join(',') === 'max',
+    '带空格的独立行未识别（模型可能缩进）');
+}
+
 /* ═══════════ 7. mergeConfig 读取集 ⊆ schema 键 ═══════════ */
 console.log('\n== 7. mergeConfig 读取集 ⊆ schema 键 ==');
 const mergeList = /const k of \[([^\]]+)\][\s\S]{0,80}?raw\[k\] = live/.exec(host)?.[1];

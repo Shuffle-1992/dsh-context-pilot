@@ -685,7 +685,15 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
    *  ④ **冷却**：换档可能使前缀缓存失效（call-config.js 注明 effort 属 cache-affecting 状态），
    *     故同一会话两次换档之间有最小间隔，防模型每轮都换。
    *  ⑤ 标记解析放在 `session/event`（与压缩标记同一事件源），**应用**放在 agent/request。 */
-  const EFFORT_MARKER_RE = /\[cp:effort\s+([A-Za-z0-9_-]+)\s*\]/g;
+  /* ⚠️ 正则必须要求标记**独占一行**（`^...$` + m 标志），不能只做子串匹配。
+   * 实测误触发（2026-10-07，E2E 前自查发现）：本插件注入的教学文本本身就含
+   * 「在回复最后一行单独写 [cp:effort <档>]」——模型在回复里**引用/复述**这句
+   * （如「你可以写 [cp:effort high] 来换档」）时，宽松正则会把**散文提及**当成指令，
+   * 造成非预期换档。压缩标记用 `text.trimEnd().endsWith(M3.marker)` 天然规避了这点
+   * （要求结尾），effort 标记因位置自由才暴露该问题。
+   * 独占一行后：散文/文档/引用教学全部不再误触发（代码块内独占一行仍会触发，
+   * 属可接受残余风险——正则无法识别 markdown 上下文）。 */
+  const EFFORT_MARKER_RE = /^[ \t]*\[cp:effort[ \t]+([A-Za-z0-9_-]+)[ \t]*\][ \t]*$/gm;
   /** sid → { effort, at, reason }：待应用的档位（agent/request 现读现用）。 */
   const pendingEffortBySid = new Map();
   /** 换档冷却（默认 30s）：防频繁换档反复打断前缀缓存。 */
