@@ -857,6 +857,25 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         const r = resolveCompactionFor(a); // 首个 agent 即取证：作用域压缩实例可达性
         snap.compactionProbe = { via: r.via, probe: r.probe };
       }
+      if (!snap.m5.hudPoll) {
+        /* C-lineage 运行时取证：getHud 同款链路逐状态落盘——记录不显示时从这里定位断点
+         * （acts 是否加载 / 血统链多大 / 首 agent 的 sid 是否在链上 / 过滤命中几条）。 */
+        const asid = String(pick(a?.session?.id, a?.sessionId, a?.id, ''));
+        const chain = new Set();
+        let cur = asid;
+        let g = 0;
+        while (cur && !chain.has(cur) && g < 16) { chain.add(cur); cur = state.m5.lineage?.[cur]; g++; }
+        snap.m5.hudPoll = {
+          at: new Date().toISOString(),
+          lastSid: state.m5.lastSid ? String(state.m5.lastSid).slice(0, 24) : null,
+          lineageSize: Object.keys(state.m5.lineage ?? {}).length,
+          actsCount: state.m5.acts.length,
+          agentSid: asid.slice(0, 24) || null,
+          chainSize: chain.size,
+          chainHeads: [...chain].slice(0, 4).map((x) => x.slice(8, 24)),
+          matched: state.m5.acts.filter((x) => chain.has(x.sid)).length,
+        };
+      }
       snap.agents.push(row);
     }
     snap.totals.agents = (aList.value ?? []).length;
@@ -1354,11 +1373,13 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
   import(`./wire.host.mjs?ts=${state.seq}-${Date.now().toString(36)}`)
     .then((hudWire) => {
       const face = hudWire.createRemoteFace({
-        /** sid 可选：传会话 id 则只返回该会话的最近压缩（主行=该会话最新，acts=该会话列表）；空=全局。 */
+        /** sid 可选：传会话 id 则返回该会话（含血统链）的最近压缩；空=全局。
+         *  **同时**返回全局最近记录（actsGlobal/hudLastActGlobal）作兜底——实测多会话交错/ id 摆动时
+         *  按 id 过滤会空（用户「记录经常丢失」的最终根因），client 侧按「本会话优先、全局兜底」显示并标注。 */
         onGetHud: (sid) => {
           const list = Array.isArray(state.m5.acts) ? state.m5.acts : [];
           /* C-lineage：按会话血统链匹配——当前 sid + 沿 lineage 回溯的全部历史前身 id。
-           * 仅按当前 id 过滤会在压缩轮转后误判「无记录」（用户实测丢失的根因）。 */
+           * 仅按当前 id 过滤会在压缩轮转后误判「无记录」。 */
           const chain = new Set();
           let cur = sid;
           let guard = 0;
@@ -1390,6 +1411,10 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
             ...state.m5.hud,
             hudLastAct: filtered[0]?.text || '',
             acts: filtered.slice(0, 8).map((a) => a.text),
+            /* 全局兜底（client 按「本会话优先」消费；仅当本会话过滤为空时回退显示并标注） */
+            hudLastActGlobal: list[0]?.text || '',
+            actsGlobal: list.slice(0, 8).map((a) => a.text),
+            sessionMatched: filtered.length,
             occupancyRatio: occ.ratio,
             occupancyWindow: occ.window,
             /* C-own：生效强制线上限（用户配置与引擎阈值取小）——client 保存时钳制用。

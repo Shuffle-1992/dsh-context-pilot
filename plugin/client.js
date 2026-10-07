@@ -714,10 +714,17 @@ window.__ModuleLoader__.load({
 							const cfg = unwrapLiveDeep(settingsScope.getSnapshot()?.value) ?? {};
 							const v = { ...cfg, ...(hudRemote ?? {}) };
 							const act = typeof v.hudLastAct === "string" && v.hudLastAct ? v.hudLastAct : "";
-							label.textContent = act ? `最近压缩 ${act}` : "本会话暂无压缩记录";
-							/* 悬停 = 本会话（血统链）最近压缩列表 + 取证指纹 */
-							const actLines = Array.isArray(v.acts) && v.acts.length ? v.acts : (act ? [act] : []);
-							row.title = `${actLines.length ? actLines.join("\n") : "（本会话暂无压缩记录）"}\n—— dcp: gen=${v.gen || "?"} sid=${(NS.sid || "").slice(0, 13) || "?"}`;
+							/* 全局兜底（2026-10-07 最终方案）：多会话交错/ id 摆动时按 id 过滤会空
+							 * （实测「记录经常丢失」的根因）⇒ 本会话优先，空则回退全局并标注，记录永不消失。 */
+							const actGlobal = typeof v.hudLastActGlobal === "string" && v.hudLastActGlobal ? v.hudLastActGlobal : "";
+							const useGlobal = !act && !!actGlobal;
+							label.textContent = act
+								? `最近压缩 ${act}`
+								: useGlobal ? `最近压缩 ${actGlobal}（其他会话）` : "本会话暂无压缩记录";
+							/* 悬停 = 对应来源的最近压缩列表 + 取证指纹 */
+							const listSrc = act ? v.acts : useGlobal ? v.actsGlobal : null;
+							const actLines = Array.isArray(listSrc) && listSrc.length ? listSrc : (act ? [act] : (useGlobal ? [actGlobal] : []));
+							row.title = `${actLines.length ? actLines.join("\n") + (useGlobal ? "\n（本会话无匹配记录，显示全局最近压缩）" : "") : "（暂无压缩记录）"}\n—— dcp: gen=${v.gen || "?"} sid=${(NS.sid || "").slice(0, 13) || "?"}`;
 							chips.replaceChildren();
 							if (v.hudArmed === "armed") chips.appendChild(chip("武装中", "#4c7dff"));
 							let pendingTask = "";
@@ -796,6 +803,9 @@ window.__ModuleLoader__.load({
 									hudPending: r.hudPending || "",
 									gen: r.gen || "",
 									acts: Array.isArray(r.acts) ? r.acts : null,
+									/* 全局兜底（本会话过滤为空时回退显示，见 renderHud） */
+									hudLastActGlobal: r.hudLastActGlobal || "",
+									actsGlobal: Array.isArray(r.actsGlobal) ? r.actsGlobal : null,
 								};
 								/* C-own：引擎阈值上限（host 动态探测，方案 C 钳制用）——存 NS 供保存路径读取 */
 								if (typeof r.criticalCap === "number" && Number.isFinite(r.criticalCap) && r.criticalCap > 0 && r.criticalCap <= 1) {

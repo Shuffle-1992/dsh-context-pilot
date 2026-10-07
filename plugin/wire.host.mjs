@@ -25,7 +25,7 @@ const JSON_ANY = Object.freeze({ parse: (value) => value });
 
 /** face 方法面：[方法名, 参数名数组, 签名, 可选参数名数组]。 */
 const FACE_METHOD_TABLE = [
-  ['getHud', ['sid'], 'getHud(sid?): Promise<{ok:true, hudLastAct:string, hudArmed:string, hudPending:string, gen:string, acts:string[], occupancyRatio:number|null, occupancyWindow:number|null, at:string}|{ok:false, error}>（HUD 状态轮询；sid 可选=按会话过滤最近压缩，空=全局）', ['sid']],
+  ['getHud', ['sid'], 'getHud(sid?): Promise<{ok:true, hudLastAct:string, hudArmed:string, hudPending:string, gen:string, acts:string[], hudLastActGlobal:string, actsGlobal:string[], sessionMatched:number, occupancyRatio:number|null, occupancyWindow:number|null, at:string}|{ok:false, error}>（HUD 状态轮询；sid 可选=按会话过滤最近压缩，空=全局）', ['sid']],
 ];
 
 /**
