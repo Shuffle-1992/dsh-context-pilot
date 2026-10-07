@@ -56,18 +56,17 @@ window.__ModuleLoader__.load({
 		};
 
 		/** 字段描述符（与 host.impl.mjs M3_DEFAULTS / plugin-config.schema.mjs 一一对应）。
-		 *  备注里的「推荐值」分两种计费口径（2026-10-06 官方文档实证，见 README §6 成本模型）：
-		 *   - DeepSeek API：缓存命中 $0.003/M vs 未命中 $0.15/M（1:50）⇒ 大上下文便宜，别为省钱压掉信息，阈值可高。
-		 *   - GLM Coding Plan：缓存命中 1.7 vs 输入 6.9（1:4.1，命中仍计费）⇒ 上下文是持续失血，压早更省额度。
-		 *  两者「压低绝对值都省钱」，但 GLM 收益约 2 倍于 DeepSeek（上下文成本占比 ~6.5x vs ~2x）。 */
+		 *  存储口径：比率类字段为 0-1 小数；时长类字段**存储仍为毫秒**（兼容 host/schema/已有配置），
+		 *  scale:1000 仅在 UI 层做「秒 ↔ 毫秒」换算（parseInput/canon/显示/草稿比较统一按秒）。
+		 *  备注精简原则（2026-10-07 用户要求）：一行说清用途，不写推荐值枚举（推荐值在计算器里实时算）。 */
 		const FIELDS = [
 			{ key: "enabled", label: "总开关", type: "bool", def: true, hint: "关闭后完全恢复原生 DSH" },
 			{ key: "dryRun", label: "演习模式", type: "bool", def: false, hint: "只记录，不真压缩" },
 			{ key: "markerMinRatio", label: "智能压缩线", type: "num", def: 0.2, hint: "占用达此值时，模型可自行决定压缩并自动续跑" },
 			{ key: "criticalRatio", label: "强制压缩线", type: "num", def: 0.85, hint: "占用达此值无条件强制压缩" },
 			{ key: "marker", label: "压缩标记", type: "text", def: "[cp:compact]", hint: "模型回复尾行标记；置空则关闭智能压缩" },
-			{ key: "armedTtlMs", label: "标记有效期(ms)", type: "int", def: 120000, hint: "标记后多久内有效" },
-			{ key: "sweepMinIntervalMs", label: "强制压缩冷却(ms)", type: "int", def: 600000, hint: "两次强制压缩的最小间隔" },
+			{ key: "armedTtlMs", label: "标记有效期(秒)", type: "int", def: 120000, scale: 1000, hint: "标记后多久内有效" },
+			{ key: "sweepMinIntervalMs", label: "强制压缩冷却(秒)", type: "int", def: 600000, scale: 1000, hint: "两次强制压缩的最小间隔" },
 		];
 
 		//#region helpers
@@ -81,14 +80,15 @@ window.__ModuleLoader__.load({
 			for (const key of Object.keys(source)) out[key] = unwrapLiveDeep(source[key]);
 			return out;
 		}
-		/** 字段值规范化（写前/回读比对同一口径）。 */
+		/** 字段值规范化（写前/回读比对同一口径）。
+		 *  scale>1 的字段（如时长字段存 ms、UI 用秒）：本函数与 parseInput 都工作在**存储口径**（ms）。 */
 		function canon(field, value) {
 			if (field.type === "bool") return value === true;
 			if (field.type === "num") { const n = Number(value); return Number.isFinite(n) ? n : null; }
 			if (field.type === "int") { const n = Math.round(Number(value)); return Number.isFinite(n) ? n : null; }
 			return typeof value === "string" ? value : void 0;
 		}
-		/** 解析输入框字符串 → 字段类型值；非法返回 null。 */
+		/** 解析输入框字符串 → 字段类型值（**存储口径**：scale 字段在此把「秒」换回「毫秒」）；非法返回 null。 */
 		function parseInput(field, raw) {
 			if (field.type === "bool") return raw === true;
 			if (field.type === "text") return typeof raw === "string" ? raw : null;
@@ -97,8 +97,16 @@ window.__ModuleLoader__.load({
 			if (typeof raw === "string" && raw.trim() === "") return null;
 			const n = Number(raw);
 			if (!Number.isFinite(n)) return null;
-			if (field.type === "int") return Math.round(n);
-			return n;
+			const scaled = field.scale ? n * field.scale : n; // UI 秒 → 存储毫秒
+			if (field.type === "int") return Math.round(scaled);
+			return scaled;
+		}
+		/** 存储值 → UI 显示值（scale 字段：毫秒转秒）。 */
+		function toUi(field, storedValue) {
+			const base = storedValue === void 0 || storedValue === null ? field.def : storedValue;
+			const n = Number(base);
+			if (!Number.isFinite(n)) return base;
+			return field.scale ? n / field.scale : n;
 		}
 		/**
 		 * 写一个设置字段并回读校验（zcode writeField 同款纪律）：
@@ -225,10 +233,10 @@ window.__ModuleLoader__.load({
 				if (settingsScope.subscribe === void 0) return void 0;
 				return settingsScope.subscribe(() => setRev((v) => v + 1));
 			}, [settingsScope]);
+			/** 取字段的 **UI 口径**值：草稿已是 UI 串（秒），存储值经 toUi 转成 UI 口径（毫秒→秒）。 */
 			const valueOf = (field) => {
 				if (draft !== null && Object.prototype.hasOwnProperty.call(draft, field.key)) return draft[field.key];
-				const v = stored[field.key];
-				return v === void 0 ? field.def : v;
+				return toUi(field, stored[field.key]);
 			};
 			const dirty = draft !== null && FIELDS.some((f) => {
 				const cur = parseInput(f, valueOf(f));
