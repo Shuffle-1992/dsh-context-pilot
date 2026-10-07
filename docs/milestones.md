@@ -1071,3 +1071,75 @@ m3.compactToolDiag = { calls:2, enabled:true, installed:false }
 `required: false`，变异 1/1 被抓住）。
 ⇒ 教训：「未出现某字符串」类断言**必须先剥注释**——本轮**第二次**栽在这一点上
 （第一次是 `本轮先不执行任务` 被文件头描述旧机制的那句话判失败）。
+
+### R4 真机 E2E 通过 + R5 保留范围自选 —— ✅ 已实现（2026-10-08）
+
+#### 一、R4 E2E：`compact_context` 真的跑通了（这是 R4 落地时唯一没验的假设）
+
+调用时占用 **52.5%**（低于引擎 80% ⇒ 预期走 `context-overflow`）。**全部核对项一次通过**：
+`compactToolCalls 0→1`、`compactIntents 0→1`（`compactIntentExpired 0`）、
+`lastCompactIntent.trigger = context-overflow`、`acted true`、`shadowedTokens 361,769`、
+`preStepActs/preStepOk 0→1`、`lastPreStepError null`，**本轮未中断**，
+且**无任何 `agent/inbox/inserted`**（8 类 inbox 记录只有 `spliced` 358 条 = 插件自己的用量行/决策卡）。
+
+**逐帧时序**（会话存储 `session.v4.jsonl.zstd`，seq 连续，可直接证明「工具调用 → 下一步 pre-step」）：
+
+```
+18300 tool/call      name=compact_context            ← 模型调用
+18301 tool/result    {"ok":true,"scheduled":"next-step"}
+18302 step/end
+18303 compaction/start                                ← 下一步的 pre-step 触发（不是工具调用当场）
+18304 compaction/summary  shadowedRange{15507..18296}  provider=deepseek-account
+18305 user/message   source.kind="compact-checkpoint"  ← DSH 官方摘要载体（不是伪造的用户发言）
+18306 compaction/end
+18307 step/start     (step 7)                          ← 压缩后的下一步
+18309 assistant/message                                ← 模型继续，未中断
+```
+
+**摘要 LLM 调用成功**：`usage{input 396 / output 7442 / cacheRead 531328 / total 539166}`。
+（此前 `workbuddy × deepseek-v4.1-flash` 的 312/322 次失败是 provider×model 问题，换 provider 即通。）
+
+#### 二、E2E 顺带挖出 R5 的动因（数字，不是形容词）
+
+报告在同一轮里自动记下了前后对照，**无需任何人工测量**：
+
+| | 压缩前 `20:02:29` | 压缩后 `20:02:58` |
+| --- | --- | --- |
+| `surfaceTokens` | 367,794 | **8,603** |
+| `nodeCount` | **1117** | **4** |
+
+⇒ `context-overflow` 的 `retainTokens = 0` 在**只有 53% 占用**时就把 97.7% 的 surface 砍掉。
+我此前在 R4 文档里写的「保留近端 ≈0」**是对的，但量级完全没传达出来**——是报告的 `nodeCount`
+把「1117 → 4」摆到眼前才看清。**教训：结论要带数字。**
+
+> 附带解掉一个悬案：新报告条目里 `measure` 少了 `nodeCount/keys`，一度怀疑「磁盘代码 ≠ 运行代码」。
+> 实际是 `slimSnapshot` 的精简档位**刻意**只留 `{totalTokens, surfaceTokens}`。核对运行代码新旧
+> 要看**同一份报告的不同历史条目**（有 `nodeCount` 的条目即证明运行代码是新的）。
+
+#### 三、R5 实现（用户确认：「自己算范围 + 沿用官方兜底」）
+
+- 引擎 `selectCompactableRange` / `systemHead` / `validateSurfaceRegion` **均未导出**（只导出
+  `BasicCompactionEngine`），但 **`compactRegion(start, end, agent, signal)` 是公开方法** ⇒ 范围可由我们给。
+- **关键源码事实**：`validateSurfaceRegion`（:452）在 `compaction/start`（:469）**之前** ⇒
+  边界被拒是**零副作用、零 LLM 成本**的纯读错误 ⇒ 可以「让引擎替我判配对，被拒就回退一个节点」，
+  **不必复刻引擎的 `toolPairingBalancedBefore/After`**（那会造成两套真相）。
+- 起点按引擎规则：`session.eventAt(seq)?.type === 'system/message'`（引擎 `systemHead` 同款公开 API）
+  ⇒ surface 节点 0 的系统消息**永不进范围**。
+- 保留比例 = 模块常量 `RETAIN_RATIO = 0.16`（**与引擎 `DEFAULT_RETAIN_RATIO` 同源**，contract 与引擎源码对账）。
+  1M 窗口 ⇒ 保留预算 **160,000 token**（取代 8,603）。
+- 新模块 `plugin/compact-range.mjs`（纯函数叶子，无 IO）；host 侧 `compactWithOwnRange`：
+  `own` →（边界拒绝则回退重试 ≤64）→ 仍不行/压完仍越线 ⇒ `official` ⇒ 兜底 `own+official`。
+  **「没什么可压」且未越线 ⇒ 收手**（回退官方 = retain 0 = 与「没得压」自相矛盾）。
+- `trigger` 现在只表触发原因，**实际保留策略记在 `rangeSource`**；新增 `rangeProbe` 留最后一次范围读数。
+
+#### 四、验证
+
+- contract **275** + static **40** + report **57** = **372 断言**全过。新增 R5 段**真跑纯函数**
+  （不是正则）：预算-范围-影子量、`retainTokens=0` 精确复现引擎语义、系统头起点后移、
+  一致性拒绝、`prevEnd` 边界、非法预算 ⇒ 0、引擎 5 种错误文案逐字对账 + 分类。
+- **变异验证 9/9 被捕获**：其中「去掉 `MAX_WALK_BACK` 回退上限」**第一次逃逸**——
+  原断言只匹配 `return official('boundary-exhausted')`，文本还在、上限没了。
+  已改为连 `walkBacks + 1 > api.MAX_WALK_BACK` 一起钉死。
+  **又一次证明：「两边都通过的测试等于没测」。**
+- ⚠️ `retainRatio` 起初想放进 `M3_DEFAULTS`，被既有护栏「M3 字段必须在 schema 中」拦下
+  ⇒ 归位为模块常量（`M3` 的语义是**用户可配项**）。要面板可调需 schema + **DSH 重启**，未做。

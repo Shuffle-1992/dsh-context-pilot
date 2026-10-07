@@ -14,7 +14,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PLUGIN = join(ROOT, 'plugin');
@@ -445,14 +445,152 @@ ok('意图先消费后执行（防每个 step 反复重试）',
     return t > -1 && c > -1 && t < c;
   })(),
   'takeIntent 晚于执行 ⇒ 失败后逐步重试，污染报告且浪费额度');
-ok('主动请求时先试 pressure、为 null 才退 overflow（保留策略优先）',
-  /result = await compaction\.service\.compactIfNeeded\(agent, 'pressure', sig\);/.test(ctPreStep)
-  && /result = await compaction\.service\.compactIfNeeded\(agent, 'context-overflow', sig\);/.test(ctPreStep)
-  && ctPreStep.indexOf("'pressure', sig") < ctPreStep.indexOf("'context-overflow', sig"),
-  '直接走 overflow ⇒ 丢掉引擎正常保留策略（overflow 的 retain=0 过于激进）');
+/* R5（2026-10-08，E2E 之后 · 用户确认要做）：保留策略从
+ * 「先试 pressure、为 null 才退 overflow」改为「**自选保留范围** → 失败/仍越线才**沿用官方** overflow 兜底」。
+ * 旧断言在此**退役**（它固化的正是那条「53% 占用就把 1117 节点砍到 4 个」的路径）。
+ * 自选范围本体见下方 §R5 段与 plugin/compact-range.mjs。 */
+const ctOwnRange = /const compactWithOwnRange = async \(agent, compaction, ctx\) => \{([\s\S]*?)\n  \};/.exec(host)?.[1] ?? '';
+ok('R5 保留策略：自选范围优先 + 官方 overflow 兜底',
+  /const out = await compactWithOwnRange\(agent, compaction, \{ forced, sig, sid, window: mr\.window, measure: mr\.measure \}\);/.test(ctPreStep)
+  && /const forced = ratio >= effCritical;/.test(ctPreStep)
+  && /compactRegion\(sel\.start, end, agent, sig\)/.test(ctOwnRange)
+  /* ⚠️ 必须连**回退次数上限**一起钉死：只断言 `return official('boundary-exhausted')` 会被
+   * 「去掉 MAX_WALK_BACK 判断」的回归骗过去（变异验证实测逃逸过一次）。 */
+  && /if \(!prev \|\| walkBacks \+ 1 > api\.MAX_WALK_BACK\) return official\('boundary-exhausted'\);/.test(ctOwnRange)
+  && /return official\('invalid-boundary'\)/.test(ctOwnRange)
+  && /compactIfNeeded\(agent, 'context-overflow', sig\)/.test(ctOwnRange),
+  '自选范围未接上，或官方兜底缺失 ⇒ 要么丢掉保留预算，要么强制线不再兜底');
+ok('R5 意图先消费后执行（防每个 step 反复重试）',
+  (() => {
+    /* 必须比**调用点**而非首次出现：R5 把 compactIfNeeded 挪进了 compactWithOwnRange，
+     * 但 preStepCompaction 里仍有「强制线收口」那次调用——顺序断言继续按 preStepCompaction 内比对。 */
+    const code = ctPreStep.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    const t = code.indexOf('.takeIntent(sid)');
+    const c = code.indexOf('.compactIfNeeded(');
+    return t > -1 && c > -1 && t < c;
+  })(),
+  'takeIntent 晚于执行 ⇒ 失败后逐步重试，污染报告且浪费额度');
 ok('意图消费全程留痕（compactIntents / lastCompactIntent）',
   /state\.m3\.compactIntents \+= 1;/.test(ctPreStep) && /state\.m3\.lastCompactIntent = \{/.test(ctPreStep),
   '消费无留痕 ⇒ 失败时无从定位（重演「工具接受成功却永不生效」）');
+
+/* ═══════════ R5：保留范围自选（plugin/compact-range.mjs）═══════════
+ * 起因是真机实测（2026-10-07，session 16616c07 turn 167，报告自动留痕）：
+ *   `context-overflow` 的 retainTokens=0 ⇒ surface 从 **1117 节点 / 367,794 token**
+ *   砍到 **4 节点 / 8,603 token**，而当时占用只有 53%。
+ * R5 改为「自选保留预算（窗口 × 0.16）→ 失败/仍越线才沿用官方 overflow」。
+ * 本段除静态接线外**真跑纯函数**（该模块无 IO ⇒ 可直接 import 断言行为）。 */
+const cr = read('compact-range.mjs');
+const crNoComment = cr.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+const ENGINE_REF = join(ROOT, 'docs', 'reference', '__dsh__node_modules__@deepseek-ai__dsh-compaction-basic__lib__index.js');
+const engineRef = readFileSync(ENGINE_REF, 'utf8');
+const crMod = await import(pathToFileURL(join(PLUGIN, 'compact-range.mjs')).href);
+
+ok('compact-range.mjs 按热换纪律动态加载（带 ?ts=）',
+  /import\(`\.\/compact-range\.mjs\?ts=\$\{IMPL_TS\}`\)/.test(host),
+  '未带 ?ts= ⇒ 改模块后不随 toggle 生效（P16 教训）');
+ok('RETAIN_RATIO 与引擎 DEFAULT_RETAIN_RATIO 同源（0.16）',
+  crMod.RETAIN_RATIO === 0.16 && /const DEFAULT_RETAIN_RATIO = \.16;/.test(engineRef),
+  `模块常量 ${crMod.RETAIN_RATIO}，引擎默认 ${/DEFAULT_RETAIN_RATIO = ([\d.]+)/.exec(engineRef)?.[1] ?? '?'} ⇒ 保留预算口径漂移`);
+ok('起点规则与引擎 systemHead 同源（走 session.eventAt，不是猜）',
+  /session\?\.eventAt\?\.\(seq\)\?\.type === 'system\/message'/.test(crNoComment)
+  && /const firstIdx = isSystemHead\(session, surface\[0\]\) \? 1 : 0;/.test(crNoComment)
+  && /function systemHead\(session, headSeq\) \{\s*const head = session\.eventAt\(headSeq\);/.test(engineRef),
+  '起点规则与引擎不一致 ⇒ 可能把 surface 节点 0 的 system/message 一起影子化');
+
+/* ---- 行为断言（真跑模块，不是正则）---- */
+const mkCase = ({ count, tokens, systemHead = false, headSeq = 1000 }) => {
+  const nodes = [];
+  const surface = [];
+  const types = new Map();
+  for (let i = 0; i < count; i += 1) {
+    const seq = headSeq + i;
+    surface.push(seq);
+    nodes.push({ seq, tokens });
+    types.set(seq, i === 0 && systemHead ? 'system/message' : 'assistant/message');
+  }
+  return {
+    session: { surface: { nodes: surface }, eventAt: (s) => ({ type: types.get(s) ?? 'assistant/message' }) },
+    measurement: { nodes },
+  };
+};
+const c10 = mkCase({ count: 10, tokens: 100 });
+const sel300 = crMod.selectRange({ ...c10, retainTokens: 300 });
+ok('预算 300 / 10×100 token ⇒ 保留末 3 节点、影子前 7 节点',
+  sel300.ok === true && sel300.retainedTokens === 300 && sel300.shadowTokens === 700
+  && sel300.end === c10.session.surface.nodes[6] && sel300.start === c10.session.surface.nodes[0],
+  `实际 ${JSON.stringify({ start: sel300.start, end: sel300.end, retained: sel300.retainedTokens, shadow: sel300.shadowTokens })}`);
+const sel0 = crMod.selectRange({ ...c10, retainTokens: 0 });
+ok('retainTokens=0 精确复现引擎 overflow 语义（只留最后 1 个节点）——这正是要改掉的过激行为',
+  sel0.ok === true && sel0.retainedTokens === 100 && sel0.end === c10.session.surface.nodes[8],
+  '与引擎 selectCompactableRange(...,0) 语义不符 ⇒ 无法用它解释线上实测的 1117→4');
+const c10sys = mkCase({ count: 10, tokens: 100, systemHead: true });
+const selSys = crMod.selectRange({ ...c10sys, retainTokens: 300 });
+ok('surface 节点 0 是 system/message ⇒ 起点后移一位（系统消息永不进范围）',
+  selSys.ok === true && selSys.start === c10sys.session.surface.nodes[1] && selSys.startIdx === 1,
+  '起点未后移 ⇒ 会把系统消息影子化');
+const c3 = mkCase({ count: 3, tokens: 100 });
+ok('预算大于整个 surface ⇒ 判「没什么可压」而不是硬压',
+  crMod.selectRange({ ...c3, retainTokens: 100000 }).why === 'nothing-to-compact',
+  '预算超 surface 仍报可压 ⇒ 会压出空范围/无意义摘要');
+ok('measurement 与 surface 不一致 / 无节点 ⇒ 拒绝（防按过期测量选范围）',
+  crMod.selectRange({
+    session: mkCase({ count: 5, tokens: 100, headSeq: 2000 }).session,
+    measurement: mkCase({ count: 5, tokens: 100, headSeq: 1000 }).measurement,
+    retainTokens: 100,
+  }).why === 'surface-mismatch'
+  && crMod.selectRange({ session: c3.session, measurement: { nodes: [] }, retainTokens: 100 }).why === 'no-nodes',
+  '不校验 ⇒ 用旧测量切新 surface，范围会错位到别的消息上');
+ok('prevEnd 逐个节点回退、到起点即放弃',
+  crMod.prevEnd(c10.session.surface.nodes, 0, 5).end === c10.session.surface.nodes[4]
+  && crMod.prevEnd(c10.session.surface.nodes, 0, 0) === null,
+  '回退边界错 ⇒ 要么死循环，要么把起点也切进去');
+ok('retainBudgetTokens = 窗口 × 比例；非法输入一律 0',
+  crMod.retainBudgetTokens(1_000_000) === 160_000 && crMod.retainBudgetTokens(1_000_000, 0.5) === 500_000
+  && crMod.retainBudgetTokens(0) === 0 && crMod.retainBudgetTokens(NaN) === 0 && crMod.retainBudgetTokens(1000, -1) === 0,
+  '预算算错 ⇒ 保留比例整体偏移（窗口读不到时会变成「不保留」）');
+ok('isSystemHead 对 eventAt 异常/缺失一律 false（与引擎「无系统头」同解）',
+  crMod.isSystemHead({ eventAt: () => { throw new Error('boom'); } }, 1) === false
+  && crMod.isSystemHead({}, 1) === false
+  && crMod.isSystemHead({ eventAt: () => ({ type: 'system/message' }) }, 1) === true,
+  '读类型失败即当系统头 ⇒ 起点错位一整个节点');
+
+/* 错误分类：末端不合法 = 可回退重试；起点/找不到/无 turn = 直接官方兜底（重试无意义） */
+const END_MSG = 'compactRegion: end seq 18296 is not a balanced boundary (would split a step, or the step is still open)';
+const START_MSG = "compactRegion: start seq 15507 is not a balanced boundary (would split a step's tool-call/result pair)";
+ok('引擎校验错误分类正确',
+  crMod.isEndBoundaryError(new Error(END_MSG)) === true
+  && crMod.isEndBoundaryError(new Error(START_MSG)) === false
+  && crMod.isValidationError(new Error(END_MSG)) === true
+  && crMod.isValidationError(new Error(START_MSG)) === true
+  && crMod.isValidationError(new Error('compactRegion: end seq 9 not found in surface')) === true
+  && crMod.isValidationError(new Error('compactRegion: no open turn — automatic compaction events must be enclosed in a turn')) === true
+  && crMod.isValidationError(new Error('summarize failed')) === false
+  && crMod.isValidationError(Object.assign(new Error('compaction already in progress'), { code: 'busy' })) === false,
+  '分类错 ⇒ 要么无限回退，要么把真正的失败（摘要失败/busy）当边界问题吞掉');
+ok('错误文案与引擎源码逐字一致（引擎改文案时这里先响）',
+  engineRef.includes('is not a balanced boundary (would split a step, or the step is still open)')
+  && engineRef.includes("is not a balanced boundary (would split a step's tool-call/result pair)")
+  && engineRef.includes('compactRegion: end seq ${end} not found in surface')
+  && engineRef.includes('no open turn — automatic compaction events must be enclosed in a turn'),
+  '引擎错误文案已变 ⇒ 本模块的边界识别会静默失灵（回退重试不再发生）');
+
+/* ---- host 接线 ---- */
+ok('host 把 measure 本体带进自选范围（不二次测量、不猜节点）',
+  /return \{ ok: true, used, surface, window, ratio, measure: m\.value \};/.test(host)
+  && /api\.selectRange\(\{ session: agent\.session, measurement: measure, retainTokens: budget \}\)/.test(ctOwnRange),
+  '没带 measure ⇒ 只能退化成官方路径，自选范围形同未接');
+ok('保留比例来自模块常量，不进 M3（M3 语义 = 用户可配项）',
+  /const ratioKept = api\.RETAIN_RATIO;/.test(ctOwnRange) && !/M3\.retainRatio/.test(hostNoComment),
+  '塞进 M3 会让「M3 字段必须在 schema 中」护栏失败，或在面板露出一个改不动的假开关');
+ok('自选范围全程留痕（rangeProbe + rangeSource）',
+  /state\.m3\.rangeProbe = \{/.test(ctOwnRange) && /rangeSource,/.test(ctPreStep) && /rangeProbe: null,/.test(hostNoComment),
+  '范围算错时无现场 ⇒ 只剩「压了个奇怪的东西」这一句现象');
+ok('强制线收口：自选范围后仍越线则追加官方 overflow（保住旧的强制承诺）',
+  /if \(forced && rangeSource === 'own' && result != null\) \{/.test(ctPreStep)
+  && /mr2\.ratio >= effCritical/.test(ctPreStep)
+  && /rangeSource = 'own\+official';/.test(ctPreStep),
+  '只自选不收口 ⇒ 保留过多时强制线可能压不下去');
 
 /* 伪造恢复必须**彻底消失**（不是「不调用」而是「不存在」——留着重接上的地雷更危险） */
 for (const gone of ['maybeResumeAfterMarker', 'resumeViaAnyChannel', 'sessionController.prompt', 'agent.followup']) {

@@ -175,12 +175,13 @@ const existing = TARGET_MODULES.filter((f) => existsSync(join(PLUGIN, f)));
 const done = existing.length === TARGET_MODULES.length;
 /* R3（2026-10-08）：effort.mjs 是**计划外的第一刀**（智能思考功能域，不在 D1 的 6 个目标模块内）。
  * R4（2026-10-08）：compact-tool.mjs 为第二刀（自动压缩的「工具触发」域）。
+ * R5（2026-10-08）：compact-range.mjs 为第三刀（保留范围自选：纯函数叶子，无 IO）。
  * 单独报出来，免得「已抽 0/6」看起来像毫无进展。 */
-const extraModules = ['effort.mjs', 'compact-tool.mjs'].filter((f) => existsSync(join(PLUGIN, f)));
+const extraModules = ['effort.mjs', 'compact-tool.mjs', 'compact-range.mjs'].filter((f) => existsSync(join(PLUGIN, f)));
 console.log(`   host.impl.mjs = ${hostLines} 行（目标 ≤${SPLIT_TARGET}）｜ 已抽模块 ${existing.length}/${TARGET_MODULES.length}${existing.length ? '：' + existing.join(', ') : ''}`);
-if (extraModules.length) console.log(`   ℹ️  D1 计划外已抽功能域模块：${extraModules.join(', ')}（R3 智能思考 / R4 压缩工具）`);
-ok('R3/R4 已抽独立功能域模块（依赖图叶子节点）',
-  extraModules.length === 2, `期望 effort.mjs + compact-tool.mjs 都存在，实际只有 ${extraModules.join(', ') || '（无）'}`);
+if (extraModules.length) console.log(`   ℹ️  D1 计划外已抽功能域模块：${extraModules.join(', ')}（R3 智能思考 / R4 压缩工具 / R5 保留范围）`);
+ok('R3/R4/R5 已抽独立功能域模块（依赖图叶子节点）',
+  extraModules.length === 3, `期望 effort.mjs + compact-tool.mjs + compact-range.mjs 都存在，实际只有 ${extraModules.join(', ') || '（无）'}`);
 if (done) {
   ok(`D1 已完成：host.impl.mjs ≤ ${SPLIT_TARGET} 行`, hostLines <= SPLIT_TARGET,
     `切分未彻底：${hostLines} 行`);

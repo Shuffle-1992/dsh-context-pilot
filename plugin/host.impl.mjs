@@ -549,7 +549,10 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       lastCompactTool: null, // 最近一次工具登记（sid/reason/repeated）
       compactIntents: 0, // pre-step 消费意图次数
       compactIntentExpired: 0, // 意图过期作废次数（登记后未被消费）
-      lastCompactIntent: null, // 最近一次消费详情（trigger/ratio/acted/shadowedTokens/ms）
+      lastCompactIntent: null, // 最近一次消费详情（trigger/ratio/acted/shadowedTokens/ms + R5 rangeSource）
+      /* R5：最近一次**自选范围**读数（预算/起点/终点/保留·影子 token/失败原因）。
+       * 范围算错时这是唯一现场：报告里没有它就只剩「压了个奇怪的东西」这一句现象。 */
+      rangeProbe: null,
     },
     // M5 HUD 发布取证（entry 查找/edit 结果全程留痕——弹窗侧空态无法区分静默失败）
     // hud.gen = 实例指纹：客户端取到的 gen 应与本实例一致；不一致 = RPC 打到了旧激活的僵尸面
@@ -664,6 +667,23 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       return null;
     });
 
+  /* ═══════════ 保留范围自选（R5，2026-10-07 E2E 之后）═══════════
+   * 动机（真机实测，非推测）：E2E 查明 `context-overflow` 的 `retainTokens = 0` 在 **53% 占用**时
+   * 就把 surface 从 **1117 节点 / 367,794 token** 砍到 **4 节点 / 8,603 token**。
+   * 引擎另有公开方法 `compactRegion(start, end, agent, signal)` ⇒ 范围可由我们给。
+   * 取舍、边界重试为何安全、为何不复刻内部配对函数：见 plugin/compact-range.mjs 文件头。
+   * 同款 ?ts= 热替换约定（漏掉会在 ESM 里按无参 URL 永久缓存）。 */
+  let rangeApi = null;
+  const rangeReady = import(`./compact-range.mjs?ts=${IMPL_TS}`)
+    .then((m) => {
+      rangeApi = m;
+      return m;
+    })
+    .catch((e) => {
+      log('warn', `保留范围模块加载失败（吞，回退官方保留策略）：${msg(e)}`);
+      return null;
+    });
+
   /** 智能压缩工具懒安装入口（由 pre-step 最前面调用；幂等；总开关关闭时内部直接返回）。 */
   const ensureCompactTool = async () => {
     try {
@@ -748,7 +768,9 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     const surface = m.value.surfaceTokens ?? null;
     const window = pressureRec?.contextWindow ?? null;
     const ratio = window && used != null ? used / window : null;
-    return { ok: true, used, surface, window, ratio };
+    /* R5：带上 measure 本体（`nodes` = `{seq,tokens,heuristicTokens}[]`，官方承诺 deeply immutable
+     * ⇒ 持有引用安全）。自选范围需要它；报告侧仍走 compactMeasure 的白名单，不会因此膨胀。 */
+    return { ok: true, used, surface, window, ratio, measure: m.value };
   };
 
   /** M3 决策：仅剩强制压缩线（决策主体是模型标记，此函数供 pre-step/idle 兜底与审计）。 */
@@ -1129,7 +1151,82 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
    *    retained-tail policy so it can force one useful balanced reduction」，内部走
    *    selectCompactableRange(session, measurement, **0**) ⇒ 保留近端≈0（只留最后一个节点 + tool-pairing 回退）。
    *    ⚠️ 代价明确：这是唯一能低于阈值强制压缩的通道，但保留策略比引擎默认（retainRatio 0.16）激进得多。
-   *  - compactNow 必须 idle（runMaintenance），轮内不可用——那是 idle 安全网专用。 */
+   *  - compactNow 必须 idle（runMaintenance），轮内不可用——那是 idle 安全网专用。
+   *  - ⚠️ R5（2026-10-08）：上面这条「overflow 保留近端≈0」不再是本函数的默认行为——现在**先自选范围**
+   *    （保留预算 = 窗口 × M3.retainRatio），失败才沿用官方 overflow 兜底。见 compactWithOwnRange。 */
+
+  /* ═══ R5：自选保留范围 + 官方兜底 ═══
+   * 返回值：`{ result, source, skipWhy, retainBudget, walkBacks }`
+   *   source ∈ 'own'（自选范围成功）| 'official'（沿用官方 overflow）| 'none'（判定无需压缩）
+   * 异常语义：**非校验类错误一律上抛**（由 preStepCompaction 的 catch 统一记录）——
+   *   摘要 LLM 失败、`busy`、abort 等重试/兜底都无意义（官方路径会同样失败）。 */
+  const compactWithOwnRange = async (agent, compaction, ctx) => {
+    const { forced, sig, sid, window, measure } = ctx;
+    const official = async (why) => ({
+      result: await compaction.service.compactIfNeeded(agent, 'context-overflow', sig),
+      source: 'official',
+      officialWhy: why ?? null,
+      retainBudget: null,
+      walkBacks: 0,
+    });
+    const api = rangeApi ?? (await rangeReady);
+    if (!api) return official('no-range-module');
+    /* 保留比例是**范围模块自己的常量**（= 引擎 DEFAULT_RETAIN_RATIO 0.16），不放进 M3：
+     * M3 的语义是「用户可配项」（且有「M3 字段必须在 schema 中」的护栏），而面板可调需要
+     * plugin-config.schema.mjs 新增字段 + DSH 重启——待用户确认后再补，届时在这里读配置即可。 */
+    const ratioKept = api.RETAIN_RATIO;
+    const budget = api.retainBudgetTokens(window, ratioKept);
+    const sel = api.selectRange({ session: agent.session, measurement: measure, retainTokens: budget });
+    /* 取证：无论成败都留一次范围读数（范围不对时这是唯一的现场） */
+    state.m3.rangeProbe = {
+      at: new Date().toISOString(),
+      sessionId: sid,
+      window,
+      retainRatio: ratioKept,
+      budget,
+      ok: sel.ok === true,
+      why: sel.why ?? null,
+      surfaceNodes: sel.surfaceNodes ?? null,
+      firstIdx: sel.firstIdx ?? null,
+      start: sel.start ?? null,
+      end: sel.end ?? null,
+      retainedTokens: sel.retainedTokens ?? null,
+      shadowTokens: sel.shadowTokens ?? null,
+    };
+    if (!sel.ok) {
+      /* 「没什么可压」而占用又没越强制线 ⇒ **就此收手**。
+       * 回退官方 = retainTokens 0 = 把整段砍光，与「本来就没多少可压」自相矛盾。
+       * 其余原因（读不到 nodes / surface 与 measurement 不一致）语义上等价于「自选不可用」⇒ 官方兜底。 */
+      if (sel.why === 'nothing-to-compact' && !forced) {
+        return { result: null, source: 'none', skipWhy: sel.why, retainBudget: budget, walkBacks: 0 };
+      }
+      return official(sel.why);
+    }
+    let end = sel.end;
+    let endIdx = sel.endIdx;
+    let walkBacks = 0;
+    for (;;) {
+      try {
+        const result = await compaction.service.compactRegion(sel.start, end, agent, sig);
+        return { result, source: 'own', retainBudget: budget, walkBacks, range: { start: sel.start, end } };
+      } catch (e) {
+        /* 末端不合法 ⇒ 回退一个 surface 节点重试。校验在 compaction/start（lib:469）之前发生
+         * （lib:452）⇒ 这一步是零副作用、零 LLM 成本的纯读，故可放心循环。 */
+        if (api.isEndBoundaryError(e)) {
+          const prev = api.prevEnd(agent.session?.surface?.nodes, sel.firstIdx, endIdx);
+          if (!prev || walkBacks + 1 > api.MAX_WALK_BACK) return official('boundary-exhausted');
+          walkBacks += 1;
+          end = prev.end;
+          endIdx = prev.endIdx;
+          continue;
+        }
+        /* 起点不合法 / 找不到 seq / 无 open turn 等：重试无意义 ⇒ 官方兜底（官方若也失败由外层记录） */
+        if (api.isValidationError(e)) return official('invalid-boundary');
+        throw e;
+      }
+    }
+  };
+
   const preStepCompaction = async (payload) => {
     try {
       if (!effEnabled()) return; // 总开关活读（演习模式已随 2026-10-07 面板精简退役：压缩路径无影子模式）
@@ -1161,24 +1258,45 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       }
       state.m3.preStepActs += 1;
       const t0 = Date.now();
-      let trigger = wanted ? 'context-overflow' : 'pressure';
-      log('info', `M3.5 pre-step 先压开始：trigger=${trigger}（占用 ${(ratio * 100).toFixed(1)}%，via ${compaction.via}${wanted ? '，模型主动请求' : ''}）`);
-      let result;
-      if (wanted) {
-        /* 先按引擎正常阈值试一次：≥80% 时走 pressure ⇒ 用引擎默认保留策略（优于 overflow 的 retain=0）。
-         * 低于阈值时 pressure 在**任何 LLM 调用之前**就 return null（源码：先比 spec.thresholdTokens），
-         * 因此这次试探几乎零成本，不是「多压一次」。 */
-        result = await compaction.service.compactIfNeeded(agent, 'pressure', sig);
-        if (result == null) {
-          trigger = 'context-overflow';
-          result = await compaction.service.compactIfNeeded(agent, 'context-overflow', sig);
-        } else {
-          trigger = 'pressure';
+      /* R5：trigger 现在只表达**触发原因**；实际执行策略（自选范围/官方兜底）记在 rangeSource。
+       *   - 模型主动请求（wanted）⇒ overflow 语义（原本就是「轮内强制压一次」）
+       *   - 越强制线（forced）  ⇒ pressure 语义（原本就是「无条件兜底压」） */
+      const forced = ratio >= effCritical;
+      const trigger = wanted ? 'context-overflow' : 'pressure';
+      log(
+        'info',
+        `M3.5 pre-step 先压开始：${wanted ? '模型主动请求' : '越强制线'}（占用 ${(ratio * 100).toFixed(1)}%，强制线 ${(effCritical * 100).toFixed(1)}%，via ${compaction.via}）`,
+      );
+      const out = await compactWithOwnRange(agent, compaction, { forced, sig, sid, window: mr.window, measure: mr.measure });
+      let result = out.result;
+      let rangeSource = out.source;
+      let ratioAfter = null;
+      /* 强制线收口：自选范围若保留过多、压完仍在线之上 ⇒ 追加官方 overflow 再压一次。
+       * 保证「越强制线必定压到线下」这条旧承诺不因换了保留策略而丢失。 */
+      if (forced && rangeSource === 'own' && result != null) {
+        const mr2 = measureRatio(agent.session);
+        ratioAfter = mr2.ok ? mr2.ratio : null;
+        if (mr2.ok && mr2.ratio != null && mr2.ratio >= effCritical) {
+          log('info', `M3.5 自选范围后占用仍 ${(mr2.ratio * 100).toFixed(1)}% ≥ 强制线 ${(effCritical * 100).toFixed(1)}% ⇒ 追加官方 overflow 收口`);
+          const r2 = await compaction.service.compactIfNeeded(agent, 'context-overflow', sig);
+          if (r2) {
+            result = r2;
+            rangeSource = 'own+official';
+          }
         }
-      } else {
-        result = await compaction.service.compactIfNeeded(agent, trigger, sig);
       }
       state.m3.preStepOk += 1;
+      /* R5 取证口径：rangeSource 说明**实际用了哪条保留策略**（own=自选范围 / official=官方 overflow 兜底 /
+       * own+official=自选后仍越线再收口 / none=判定无需压）。retainBudget 是自选预算（token）。 */
+      const rangeInfo = {
+        rangeSource,
+        retainBudget: out.retainBudget ?? null,
+        walkBacks: out.walkBacks ?? 0,
+        skipWhy: out.skipWhy ?? null,
+        officialWhy: out.officialWhy ?? null,
+        ratioAfter: ratioAfter != null ? +(ratioAfter * 100).toFixed(1) : null,
+        ownRange: out.range ?? null,
+      };
       if (wanted) {
         state.m3.compactIntents += 1;
         state.m3.lastCompactIntent = {
@@ -1190,6 +1308,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
           acted: result != null,
           shadowedTokens: result?.shadowedTokenCount ?? null,
           ms: Date.now() - t0,
+          ...rangeInfo,
         };
       }
       state.m3.lastPreStep = {
@@ -1201,6 +1320,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         shadowedTokens: result?.shadowedTokenCount ?? null,
         range: result?.shadowedRange ?? null,
         ms: Date.now() - t0,
+        ...rangeInfo,
       };
       if (result) {
         const __t = formatAct('pressure', result?.shadowedTokenCount);
