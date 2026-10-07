@@ -670,3 +670,79 @@ R3 去掉兜底后暴露并修正为 `/TOOL_NAME \+ '（参数 effort=<档位>�
 page 占位 / summary 占位 / 声明早于使用无 TDZ），**4 项变异全部被抓住**，总计 **278 断言全通过**。
 
 **部署**：`client.js` 改动 ⇒ **刷新页面**生效（host 侧无改动）。
+
+### 摘要归属可查：`deepseek-account` 摘要可用 + 结论锐化 —— ✅ 2026-10-08
+
+**任务**：验证标记压缩在**当前主力 provider**（`deepseek-account/deepseek-flash`）下是否成立。
+（此前 workbuddy 全败、trae 已验证，`deepseek-account` 未测。）
+
+**结论：✅ 可用**——并顺带找到一条**比报告更硬的一手证据源**。
+
+#### 决定性证据：`compaction/summary` 记录自带 `provider` / `model`
+
+回到 DSH 会话存盘（`~/.dsh/sessions/<slug>/<sid>/session.v4.jsonl.zstd`）逐条解析。
+该文件是**多帧 zstd 拼接的 JSONL**（本会话 8752 帧 / 15.9 MB），两个坑：
+
+1. `zstdDecompressSync(buf)` 只解**第一帧**（否则只得 210 字节）⇒ 必须按帧头魔数
+   `28 B5 2F FD` 哨兵扫描、逐帧解压；
+2. **一帧内可能含多条 JSON 记录** ⇒ 只取 `split('\n')[0]` 会漏约 1/3 记录，
+   必须**逐帧解压 + 逐行 `JSON.parse`**（修正后记录数 8752 → 15606）。
+
+由此得到本会话**全部 10 次成功压缩的归属**（`compaction/summary` 自带
+`provider`/`model`/`maxTokens`/`usage`/`shadowedRange`）：
+
+| # | 时间 | provider / model | 压掉 tokens | 发起方 |
+|---|---|---|---|---|
+| 1–6 | 10-05 ~ 10-06 | `zcode/glm-5.3-flash` | 91K ~ 213K | context-pilot |
+| 7 | 10-07 09:38 | **`workbuddy/glm-5.3-flash`** ✅ | 433,684 | 自动 |
+| 8 | 10-07 12:51 | `trae/deepseek-v4.1-flash` | 350,454 | context-pilot |
+| 9 | 10-07 18:25 | `trae/deepseek-v4.1-flash` | 733,850 | context-pilot |
+| 10 | **10-07 18:45** | **`deepseek-account/deepseek-flash`** ✅ | **217,768** | context-pilot |
+
+#### 两处结论锐化
+
+1. **workbuddy 不是全废** —— 第 7 次 `workbuddy/glm-5.3-flash` **成功**。
+   坏的是 **`workbuddy × deepseek-v4.1-flash` 这个 provider×model 组合**
+   （呼应既有结论「`reasoning.efforts` 声明随 provider 变、且声明≠实现」）。
+   若止步于上一轮的排除法，结论会错写成「workbuddy 坏了」。
+2. **`deepseek-account` 摘要可用** —— 第 10 次即本轮标记压缩：
+   `provider:"deepseek-account"`、`model:"deepseek-flash"`、`shadowedTokenCount:217768`、
+   `usage:{inputTokens:468, outputTokens:6244, cacheReadTokens:323072}`。
+
+#### 失败总量与时间线（存盘口径，比报告更全）
+
+```
+compaction/start = 322 ｜ compaction/end = 322 ｜ 其中带 400 error = 312
+最后一条 400：2026-10-07T18:23:14.228Z (seq 14719, turn 150)   ← 切换 deepseek-account 之前
+切换之后 (seq > 14795) 的 400 条数 = 0
+```
+
+**成功链条完整闭环**（相邻三条 seq）：
+
+```
+15506  18:45:39.506  compaction/summary   sourceCommandId:"context-pilot"  provider:deepseek-account
+15508  18:45:39.508  compaction/end       （无 error 字段）
+15509  18:45:41.593  agent/inbox/spliced  target:"next-turn"  ←「（context-pilot 自动恢复）」
+```
+
+⇒ 标记路径「发起 → 摘要成功 → 收口 → 自动拉起」四步全部有据；占用 ~31% → **11.1%**。
+与报告侧取证一致：`m3.markerHits=1`、`acts=1/actOk=1`、`reason:"marker"`、
+`shadowedTokens=217768`、`lastActError=null`。
+
+#### 附带发现
+
+- **摘要请求的 `maxTokens` 恒为 `65536`**（10 次全同）——与「换档时必须 `delete maxTokens`」
+  的既有结论同源：档位/上限留给 upstream 自行推导。详见诊断文档 §5。
+- **可观测性缺口**：312 次失败、历时约 40 分钟，**用户全程无感**（插件只记 `acts/actOk`，
+  压缩失败不会冒泡到 HUD）。本轮靠人工挖报告才发现。已列入诊断文档 §8 待办。
+- **方案 A（独立摘要模型）降级**：本会话在「主力避开坏组合」下已恢复正常，
+  故 A 从「救火」变为**纵深防御**，优先级由「最高」降为「建议」。
+
+#### 文档与数字
+
+- `docs/compaction-failure-diagnosis.md` **全文重写**：新增 §6（决定性证据 / 全量压缩史 /
+  锐化结论 / 失败时间线）、§7 方案 A 降级说明、§8 待办、§9 三条教训
+  （含「provider 不可用」须切到 provider×model 粒度、报告是二手证据而存盘是一手证据）。
+- `README.md` §4.1 断言数由 **181/33/57 = 271** 更正为 **187/34/57 = 278**（`npm test` 实测）。
+  说明：本条目之前的历史台账数字**保持原样**（记录当时事实），仅在 README 汇总处对齐现状。
+- **无源码改动**，故无部署动作（三端状态不变）。
