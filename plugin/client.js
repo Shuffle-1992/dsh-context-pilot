@@ -851,12 +851,12 @@ window.__ModuleLoader__.load({
 					const chips = document.createElement("span");
 					chips.style.cssText = "display:inline-flex;align-items:center;gap:4px;flex:none;";
 					const thr = document.createElement("div");
-					/* 排版（2026-10-07 用户反馈「上限 80% 没显示完整」）：10px + nowrap 在窄弹窗里必然截断。
-					 * 改 9px + 允许换行 + 分隔符全角「｜」换半角「·」（全角竖线占一个汉字宽，三个就吃掉 ≈27px）。
-					 * ⚠️ 用 word-break:normal 而**不是** keep-all：keep-all 会禁止汉字间断行，
-					 *    对无空格的中文串等于完全不能折行 ⇒ 反而更容易溢出（我第一版就踩了）。
-					 * **不再用 ellipsis**：宁可折成两行，也不让「上限 NN%」被静默吃掉（截断=信息丢失）。 */
-					thr.style.cssText = "font-size:9px;line-height:1.4;opacity:.6;letter-spacing:0;max-width:100%;white-space:normal;word-break:normal;overflow-wrap:anywhere;text-align:center;";
+					/* 排版（2026-10-07）：用户两轮反馈的最终形态——
+					 * ①「上限 80% 没显示完整」→ 曾用 9px + 折行 + 半角分隔符解决截断；
+					 * ②「删除上限」「字体改大一些」→ 删掉上限（行变短）+ 字号 9px → **11px**。
+					 * 保留 word-break:normal（**不是** keep-all：keep-all 禁止汉字断行，反而更易溢出）
+					 * 与 overflow-wrap:anywhere 作为窄容器兜底；不再用 ellipsis（宁可折行不静默截断）。 */
+					thr.style.cssText = "font-size:11px;line-height:1.4;opacity:.68;letter-spacing:0;max-width:100%;white-space:normal;word-break:normal;overflow-wrap:anywhere;text-align:center;";
 					const chip = (text, color) => {
 						const c = document.createElement("span");
 						c.textContent = text;
@@ -899,12 +899,13 @@ window.__ModuleLoader__.load({
 								c.title = `压缩后自动恢复执行：${pendingTask}`;
 								chips.appendChild(c);
 							}
-							/* 底部阈值速览：智能压缩线 / 强制压缩线（配置镜像实时跟随）+ 生效上限（C-own） */
+							/* 底部阈值速览：智能压缩线 / 强制压缩线（配置镜像实时跟随）。
+							 * 2026-10-07 用户要求：**删除「上限 NN%」**（引擎阈值是内部钳制细节，
+							 * 用户不需要在弹窗里看到；面板备注与计算器仍会说明该约束）。
+							 * 同时字号 9px → 11px（用户要求「字体改大一些」）——删掉上限后行更短，
+							 * 11px 仍能一行放下，无需再靠缩小字号换空间。 */
 							const pct = (x, d) => `${Math.round((Number.isFinite(Number(x)) ? Number(x) : d) * 100)}%`;
-							const capTxt = typeof NS.engineCap === "number" ? ` · 上限 ${pct(NS.engineCap)}` : "";
-							/* 分隔符用半角「·」而非全角「｜」：全角竖线在 9px 下占一个汉字宽（≈9px），
-							 * 三个分隔符就吃掉 27px —— 窄弹窗里正是「上限 80%」被挤掉的原因之一。 */
-							thr.textContent = `智能压缩线 ${pct(v.markerMinRatio, 0.2)} · 强制压缩线 ${pct(v.criticalRatio, 0.85)}${capTxt}`;
+							thr.textContent = `智能压缩线 ${pct(v.markerMinRatio, 0.2)} · 强制压缩线 ${pct(v.criticalRatio, 0.85)}`;
 							/* 「距离触发还差多少」——弹窗已在顶部显示当前占用，这里补最有决策价值的一行：
 							 * 距智能压缩线还有多少（达线后模型可自行决定压缩），以及是否已越线。 */
 							const num = (x, d) => (Number.isFinite(Number(x)) ? Number(x) : d);
