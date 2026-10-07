@@ -151,6 +151,23 @@ ok('弹窗开关写 settingsScope.set("enabled")（与面板同存储）', /sett
 ok('面板写路径走 writeField(settingsScope)（同一 settingsScope）', /await writeField\(settingsScope,\s*field,\s*parsed\)/.test(client),
   '面板写路径改道 ⇒ 与弹窗开关可能不同源');
 
+/* ═══════════ 6.6 阈值速览行排版（防截断回归）═══════════ */
+console.log('\n== 6.6 阈值速览行排版（「上限 NN%」不得被截断）==');
+// 实测回归（2026-10-07 用户截图）：阈值行 `font-size:10px` + `white-space:nowrap` + `text-overflow:ellipsis`
+// 在窄弹窗里必然截掉行尾 ⇒「（上限 80%）」显示成「（上限 80...」——**信息静默丢失**（比换行更糟）。
+const thrCss = /const thr = document\.createElement\("div"\);([\s\S]{0,900}?)thr\.style\.cssText = "([^"]+)"/.exec(client)?.[2] ?? '';
+ok('解析出 thr 样式', thrCss.length > 0, '未匹配到 thr.style.cssText（改名了？）');
+ok('阈值行不用 ellipsis（宁可折行不静默截断）', !/text-overflow:\s*ellipsis/.test(thrCss),
+  '阈值行又用上 ellipsis ⇒「上限 NN%」会被吃掉');
+ok('阈值行允许换行（white-space:normal）', /white-space:\s*normal/.test(thrCss),
+  '阈值行 nowrap ⇒ 窄弹窗下尾部信息被裁');
+ok('阈值行不禁止汉字断行（不得用 word-break:keep-all）', !/word-break:\s*keep-all/.test(thrCss),
+  'keep-all 会禁止无空格中文折行 ⇒ 反而更容易溢出');
+ok('阈值行字号 ≤ 9px（省宽）', /font-size:\s*(9|8)px/.test(thrCss), '字号未缩小');
+ok('阈值分隔符用半角 ·（全角 ｜ 占一个汉字宽）',
+  /智能压缩线 \$\{pct\(v\.markerMinRatio[^`]*· 强制压缩线/.test(client),
+  '阈值行仍用全角 ｜ 分隔 ⇒ 三个分隔符吃掉约 27px');
+
 /* ═══════════ 7. mergeConfig 读取集 ⊆ schema 键 ═══════════ */
 console.log('\n== 7. mergeConfig 读取集 ⊆ schema 键 ==');
 const mergeList = /const k of \[([^\]]+)\][\s\S]{0,80}?raw\[k\] = live/.exec(host)?.[1];

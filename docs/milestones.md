@@ -282,3 +282,31 @@
 - C-lineage 机制保留（若真出现单会话轮转仍能命中），运行时按真实观察积累边
 - 新增 `m5.hudPoll` 取证字段（actsCount/lineageSize/lastSid/agentSid/chainSize/matched）
   ——同类问题下次直接定位断点，不必再猜
+
+### 阈值速览行截断修复 + 强制线生效实证 —— ✅ 2026-10-07
+
+**用户反馈**：「上限 80% 没显示完整」+「压缩已经生效」。
+
+**① 截断根因（排版层，非数据层）**：阈值行原为 `font-size:10px` + `white-space:nowrap` +
+`text-overflow:ellipsis`。窄弹窗下 `nowrap` 使行宽超出容器，`ellipsis` 把尾部「（上限 80%）」
+裁成「（上限 80...」——**信息静默丢失**（比折行更糟：用户以为上限没配置）。
+- 修复：`9px` + `white-space:normal` + 去掉 ellipsis（宁可折两行，绝不吞信息）；
+  分隔符全角「｜」→ 半角「·」（全角竖线占一个汉字宽，三个分隔符吃掉 ≈27px，是挤掉尾部的直接原因）；
+  「（上限 80%）」→「· 上限 80%」省一对全角括号。
+- **过程中自查修正**：第一版用 `word-break:keep-all` 想「只在分隔符处断行」——但 keep-all
+  **禁止汉字间断行**，对无空格中文串等于完全不能折行 ⇒ 反而更容易溢出。已改 `word-break:normal`
+  + `overflow-wrap:anywhere`，并把该坑写进 `contract.mjs` §6.6 断言（含 6 条防回归）。
+- 断言：`contract.mjs` §6.6 —— 不得用 ellipsis / 必须 normal 换行 / 不得 keep-all /
+  字号 ≤9px / 分隔符必须是半角 ·（**同类「静默截断」以后跑测试就拦住**）。
+
+**② 强制压缩线生效实证（用户设 0.5，本轮结案）**：
+- `m3.lastPreStep 12:50:06`：`ratio 50.7%`、`trigger pressure` ⇒ **越线**；
+- `m3.lastAct 12:51:11`：`reason safety-net`、`shadowedTokens 350454`（省 350K）、
+  sessionId 16616c07 —— idle 兜底路径真实执行；
+- 下一轮用量行 **51% → 16%** ⇒ 压缩确实生效。
+- **关键旁证**：若生效线仍是引擎 0.8，50.7% 的 `safety-net` 会被 `if (d.ratio < min(...)) return;`
+  直接跳过、不会有这次压缩 ⇒ 反证 `min(0.5, 0.8) = 0.5` 的钳制链路真实生效。
+- 后续观察：用户已在面板把线改到 **0.8**（`markerMin` 同步 0.15→0.3，心跳 13:10:51 起
+  `crit/markerMin = 0.8/0.3`）——即 0.8 恰为引擎上限，钳制在此值上**不产生差异**（符合预期）。
+  记录：`crit` 历史轨迹 0.7 → 0.5 → 0.75 → 0.5 → 0.7 → 0.8（面板写入实时到达 host，
+  `mergeConfig` 活引用现读机制再次被验证）。
