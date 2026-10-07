@@ -206,6 +206,28 @@ ok('智能思考组右对齐（margin-left:auto）', /wrapE\.style\.cssText = "[
   '智能思考组未右对齐 ⇒ 用户要求「智能思考+开关右对齐」未满足');
 ok('智能思考标签文本存在', /labE\.textContent = "智能思考"/.test(client));
 
+/* ═══════════ 6.9 输入框档位 chip（conversation.input.right）═══════════ */
+console.log('\n== 6.9 输入框档位 chip（位置/显示条件/文本形态）==');
+// 用户要求（2026-10-07）：输入框模型左侧显示「智能思考档位:XXX」，后改为**不用冒号、用间距**。
+ok('chip 注册到 conversation.input.right（模型选择器左侧）',
+  /ctx\.slots\.inject\("conversation\.input\.right"/.test(client),
+  '未注册到 conversation.input.right ⇒ 位置不对（源码实证该 slot 紧邻 conversation.input.model）');
+ok('chip 注册 id 独立（不与官方条目撞车）', /id:\s*"context-pilot-effort"/.test(client),
+  '未用自有 id ⇒ 可能替换官方条目');
+ok('chip 仅在 effortEnabled 开启时显示（host 只在开启时返回 effort）',
+  /if \(!effort \|\| !effort\.ok \|\| !effort\.current\) return null;/.test(client),
+  '缺少显示条件 ⇒ 开关关闭时仍显示');
+ok('chip 不用冒号分隔（用户要求改间距）', !/智能思考档位:\$\{/.test(client) && !/`智能思考档位:/.test(client),
+  '仍用「智能思考档位:XXX」冒号形态 ⇒ 用户要求改成间距');
+ok('chip 用两个 span + gap 呈现（间距 6px）',
+  /el\("span", \{ style: \{ opacity: "\.75" \} \}, "智能思考档位"\)/.test(client) &&
+  /gap: "6px"/.test(client),
+  '未拆成「标签 + 值」两个 span + 间距');
+ok('chip 数据源复用 getHud（不新开通道）', /hudRemoteSvc\.getHud\(NS\.sid/.test(client),
+  'chip 未复用 getHud ⇒ 多一条通道/轮询');
+ok('chip 轮询在卸载时清理（clearInterval）', /clearInterval\(timer\)/.test(client),
+  'chip 轮询未清理 ⇒ 组件卸载后空转泄漏');
+
 /* ═══════════ 6.8 R1 智能思考字段三端对账 ═══════════ */
 console.log('\n== 6.8 智能思考字段（FIELDS ↔ schema ↔ M3_DEFAULTS）==');
 ok('FIELDS 含 effortEnabled', fieldsKeys.includes('effortEnabled'), '面板缺该字段');

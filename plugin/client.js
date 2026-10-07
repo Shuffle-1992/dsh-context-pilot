@@ -534,7 +534,9 @@ window.__ModuleLoader__.load({
 				} catch { /* 忽略 */ }
 			}, [effort]);
 			if (!effort || !effort.ok || !effort.current) return null;
-			const label = `智能思考档位:${effort.current}`;
+			/* 显示形态（2026-10-07 用户要求）：不用冒号，改成**两个 span + 间距**——
+			 * 「智能思考档位」与档位值视觉分离（冒号在中英混排里偏挤，间距更清爽）。
+			 * 间距 6px（与弹窗内其他 label/开关的 gap 一致）。 */
 			const tip = [
 				`模型：${effort.provider}/${effort.model}`,
 				`当前档位：${effort.current}${effort.adapterDefault ? "（adapter 默认）" : ""}`,
@@ -546,14 +548,17 @@ window.__ModuleLoader__.load({
 				className: "dcp-effort-chip",
 				title: tip,
 				style: {
-					display: "inline-flex", alignItems: "center", flex: "none",
+					display: "inline-flex", alignItems: "center", gap: "6px", flex: "none",
 					marginRight: "8px", padding: "0 8px", height: "24px",
 					borderRadius: "6px", fontSize: "12px", lineHeight: 1,
 					background: "var(--dsw-alias-bg-layer-2, rgba(128,128,128,.14))",
 					color: "var(--dsw-alias-label-secondary, rgba(200,200,200,.9))",
 					whiteSpace: "nowrap", userSelect: "none",
 				},
-			}, label);
+			},
+				el("span", { style: { opacity: ".75" } }, "智能思考档位"),
+				el("span", { style: { fontWeight: "600" } }, effort.current),
+			);
 		}
 		//#endregion
 		//#region apply
