@@ -57,7 +57,6 @@ const DSH_LLM_REL = ['dsh', 'node_modules', '@deepseek-ai', 'dsh-llm', 'lib', 'i
  */
 const M3_DEFAULTS = {
   enabled: true,
-  dryRun: false,
   criticalRatio: 0.85, // 强制压缩线：pre-step/idle 无条件压（官方 pressure 路径）；GLM 等 1:4 档可降 0.80
   markerMinRatio: 0.2, // 智能压缩线：模型标记生效门槛，**同时是决策卡注入门槛**（2026-10-07 起二者统一）
   armedTtlMs: 120_000, // 标记有效期（事件→idle 之间）
@@ -223,11 +222,10 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       const live = (v) => (v !== null && typeof v === 'object' && typeof v.get === 'function' ? v.get() : v);
       if (!config || typeof config !== 'object') return;
       const raw = {};
-      for (const k of ['enabled', 'dryRun', 'criticalRatio', 'marker', 'markerMinRatio', 'armedTtlMs', 'sweepMinIntervalMs']) {
+      for (const k of ['enabled', 'criticalRatio', 'marker', 'markerMinRatio', 'armedTtlMs', 'sweepMinIntervalMs']) {
         raw[k] = live(config[k]);
       }
       if (typeof raw.enabled === 'boolean') M3.enabled = raw.enabled;
-      if (typeof raw.dryRun === 'boolean') M3.dryRun = raw.dryRun;
       if (typeof raw.marker === 'string') M3.marker = raw.marker;
       for (const k of ['criticalRatio', 'markerMinRatio']) {
         if (typeof raw[k] === 'number' && Number.isFinite(raw[k]) && raw[k] >= 0 && raw[k] <= 1) M3[k] = raw[k];
@@ -521,7 +519,6 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     listeners: {},
     m2: { registered: false, injections: 0, briefings: 0, lastText: null, lastAt: null, via: null, skips: {} },
     m3: {
-      // B3：state.m3.dryRun 静态镜像已退役（激活后不再更新、与 m3.eff.dryRun 双轨失真）；真值看快照 eff
       decisions: 0,
       wouldCompact: 0,
       acts: 0,
@@ -980,7 +977,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
    *  - compactNow 必须 idle（runMaintenance），轮内不可用——那是 idle 安全网专用。 */
   const preStepCompaction = async (payload) => {
     try {
-      if (!effEnabled() || M3.dryRun) return; // 总开关活读 + 演习模式
+      if (!effEnabled()) return; // 总开关活读（演习模式已随 2026-10-07 面板精简退役：压缩路径无影子模式）
       const { agent, signal } = payload ?? {};
       if (!agent?.session) return;
       /* A5（审查）：signal 缺失守卫——compactIfNeeded 契约首行 throwIfAborted(signal)，undefined 放行=首跑即败
@@ -1146,7 +1143,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
   const sweepInFlight = new Set();
   const idleSweep = (agent) => {
     try {
-      if (!effEnabled() || M3.dryRun) return; // 总开关活读 + 演习模式
+      if (!effEnabled()) return; // 总开关活读（演习模式已随 2026-10-07 面板精简退役：压缩路径无影子模式）
       const sid = String(pick(agent?.session?.id, agent?.id, 'unknown'));
       /* A2（审查）：TTL 清灯前移到一切早退之前——measure 失败/in-flight 早退也要熄过期武装灯，防 hudArmed 永亮 */
       const armedMark = markerArmed.get(sid);

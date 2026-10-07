@@ -61,7 +61,6 @@ window.__ModuleLoader__.load({
 		 *  备注精简原则（2026-10-07 用户要求）：一行说清用途，不写推荐值枚举（推荐值在计算器里实时算）。 */
 		const FIELDS = [
 			{ key: "enabled", label: "总开关", type: "bool", def: true, hint: "关闭后完全恢复原生 DSH" },
-			{ key: "dryRun", label: "演习模式", type: "bool", def: false, hint: "只记录，不真压缩" },
 			{ key: "markerMinRatio", label: "智能压缩线", type: "num", def: 0.2, hint: "占用达此值时，模型可自行决定压缩并自动续跑" },
 			{ key: "criticalRatio", label: "强制压缩线", type: "num", def: 0.85, hint: "占用达此值无条件强制压缩（先于 DSH 引擎自动压缩触发）" },
 			{ key: "marker", label: "压缩标记", type: "text", def: "[cp:compact]", hint: "模型回复尾行标记；置空则关闭智能压缩" },
@@ -129,6 +128,14 @@ window.__ModuleLoader__.load({
 			".dcp-summary{color:var(--dsw-alias-label-secondary,currentColor);opacity:.85}",
 			".dcp-grid{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l1,rgba(128,128,128,.35));border-radius:8px;background:var(--dsw-alias-bg-layer-1,transparent)}",
 			".dcp-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}",
+			/* 开关滑块（bool 字段）：总开关等 */
+			".dcp-switch{position:relative;display:inline-block;width:34px;height:18px;flex:none;cursor:pointer}",
+			".dcp-switch input{position:absolute;opacity:0;width:0;height:0}",
+			".dcp-switch .dcp-slider{position:absolute;inset:0;border-radius:999px;background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.35));border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.45));transition:background .15s}",
+			".dcp-switch .dcp-slider::before{content:\"\";position:absolute;width:12px;height:12px;left:2px;top:2px;border-radius:50%;background:var(--dsw-alias-label-primary,#fff);transition:transform .15s}",
+			".dcp-switch input:checked + .dcp-slider{background:var(--dsw-alias-brand-primary,rgba(76,125,255,.9));border-color:var(--dsw-alias-brand-primary,rgba(76,125,255,.9))}",
+			".dcp-switch input:checked + .dcp-slider::before{transform:translateX(16px)}",
+			".dcp-switch input:disabled + .dcp-slider{opacity:.5;cursor:not-allowed}",
 			".dcp-label{width:170px;color:var(--dsw-alias-label-secondary,currentColor);flex:none}",
 			".dcp-input{border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.45));border-radius:6px;background:transparent;color:var(--dsw-alias-label-primary,currentColor);padding:3px 8px;font-size:12px;min-width:110px}",
 			".dcp-hint{color:var(--dsw-alias-label-secondary,currentColor);opacity:.75;font-size:11px}",
@@ -330,18 +337,21 @@ window.__ModuleLoader__.load({
 				const crit = Math.round(valueOf(FIELDS.find((f) => f.key === "criticalRatio")) * 100);
 				const marker = valueOf(FIELDS.find((f) => f.key === "marker"));
 				return el("span", { className: "dcp-summary" },
-					`强制压缩线 ${crit}% ｜ 标记 ${marker ? marker : "关闭"} ｜ 演习 ${valueOf(FIELDS.find((f) => f.key === "dryRun")) ? "开" : "关"}`);
+					`强制压缩线 ${crit}% ｜ 标记 ${marker ? marker : "关闭"}`);
 			}
 			return el("div", { className: "dcp-panel" },
 				el("div", { className: "dcp-grid" },
 					FIELDS.map((field) => el("div", { className: "dcp-row", key: field.key },
 						el("label", { className: "dcp-label", title: hintFor(field) }, field.label),
 						field.type === "bool"
-							? el("input", {
-								type: "checkbox", disabled: !writable || saving,
-								checked: valueOf(field) === true,
-								onChange: (e) => setField(field, e.target.checked),
-							})
+							? el("label", { className: "dcp-switch", title: hintFor(field) },
+								el("input", {
+									type: "checkbox", disabled: !writable || saving,
+									checked: valueOf(field) === true,
+									onChange: (e) => setField(field, e.target.checked),
+								}),
+								el("span", { className: "dcp-slider" }),
+							)
 							: el("input", {
 								className: "dcp-input", type: field.type === "text" ? "text" : "number",
 								step: field.type === "num" ? 0.05 : field.type === "int" ? 100 : void 0,
@@ -738,7 +748,6 @@ window.__ModuleLoader__.load({
 								c.title = `压缩后自动恢复执行：${pendingTask}`;
 								chips.appendChild(c);
 							}
-							if (v.dryRun === true) chips.appendChild(chip("演习", "rgba(128,128,128,.9)"));
 							/* 阈值速览：智能压缩线 / 强制压缩线（配置镜像实时跟随）+ 生效上限（C-own） */
 							const pct = (x, d) => `${Math.round((Number.isFinite(Number(x)) ? Number(x) : d) * 100)}%`;
 							const capTxt = typeof NS.engineCap === "number" ? `（上限 ${pct(NS.engineCap)}）` : "";

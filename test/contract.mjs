@@ -130,7 +130,7 @@ for (const k of hostDefaults) {
 
 /* ═══════════ 6. 已删字段不应复活 ═══════════ */
 console.log('\n== 6. 已退役字段（防复活）==');
-for (const dead of ['policyCardMinRatio', 'highRatio', 'lightTaskChars']) {
+for (const dead of ['policyCardMinRatio', 'highRatio', 'lightTaskChars', 'dryRun']) {
   const inFields = fieldsKeys.includes(dead);
   const inSchema = schemaKeys.includes(dead);
   const inDefaults = hostDefaults.includes(dead);

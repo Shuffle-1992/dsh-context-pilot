@@ -231,3 +231,25 @@
   ⇒ 结论：**按各自实测，勿盲目抄**（这条如果没有实测对照，很容易被写成「必须都加 volatile」的错误规则）
 - **漂移检测**：给了手动对比脚本；并说明「跨仓自动断言」属可选增强——
   会引入跨仓路径依赖，两仓不同步时反而误报，故本仓 `test/contract.mjs` 只做**仓内三端对账**
+
+### 方案 C 引擎上限 + 滑块/精简 —— ✅ 2026-10-07
+
+**方案 C（插件线钳制到引擎阈值之下，用户两轮讨论定稿）**：
+- **需求**：插件开启时插件强制线生效、引擎 80% 不抢跑；插件关闭/卸载后引擎 80% 自动恢复。
+  静态改法（patch 写 `auto:false`）无法满足第二条——被用户正确否决。
+- **实现**：`engineThreshold(agent)` 动态读引擎实例 `config.thresholdRatio`
+  （源码实证：compaction-basic L826 `this.config = resolveConfig(config)`，deepFreeze 公开属性）；
+  生效强制线 = `min(用户配置, 引擎阈值)`，三处同源钳制（pre-step / idle sweep / getHud 下发
+  `criticalCap` → client persist 收敛 + HUD 显示「（上限 80%）」+ 面板备注动态标注 + 计算器推荐行收敛显示）。
+- **取证**：`m3.engineCapProbe {at,via,ratio,fallback}` —— 实测 `ratio:0.8, fallback:false`（真实实例属性）。
+- **参数**：用户强制线 0.8 → **0.7**（profile patch + toggle）；顺带清理 patch 里已退役的
+  `policyCardMinRatio` 残留键。生效线 = min(0.7, 0.8) = 0.7。
+- **边界**：引擎服务不可达 → fallback 0.8（同官方默认）；client 未拿到 cap → 不钳（host min() 兜底）。
+- **A5 附带解锁**：把线临时设低于当前占用即可真机验证 pre-step pressure 路径（不再被引擎 0.8 挡）。
+
+**面板滑块 + 演习模式退役（用户截图需求）**：
+- 总开关（bool 字段）改**开关滑块**（纯 CSS `.dcp-switch`，无依赖；label 包裹 input+slider，点击即切换）
+- **演习模式（dryRun）完全退役**：面板行 / schema / M3_DEFAULTS / mergeConfig / 两个压缩门控
+  （`!effEnabled() || M3.dryRun` → `!effEnabled()`）全链路删除；contract 退役清单 +1。
+  语义说明：压缩路径不再有影子模式——观察注入可用 dryRun 之外的手段（报告即全量取证）。
+- 面板字段 **7 → 6**。

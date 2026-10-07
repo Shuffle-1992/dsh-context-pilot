@@ -88,7 +88,7 @@ DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`：**让长�
 - **M5.5** 任务挂起-自动恢复：多通道投递（A sessionController → B remote → C direct-followup），
   **三测复现通过**，实际走通道 C
 - **M5.7** 压缩历史持久化（`hud-acts.json`，cap 50）：跨重启/跨 toggle 存续
-- **配置面**：7 个字段，面板按秒/比率显示；成本阈值计算器（8 个模型预设，一键算推荐值并写入）
+- **配置面**：6 个字段，面板按秒/比率显示（总开关为开关滑块）；成本阈值计算器（8 个模型预设，一键算推荐值并写入）
 - **只读审查落地**：外部审查 23 条，批次 1/2/3 全部实施（含心跳泄漏、`ctx.effect` 语义误用等真 bug）
 
 **未实施（明确挂起）**：D1 模块切分（动骨架，**已有测试护栏 + 任务书，可以做了**）、
@@ -172,8 +172,7 @@ npm run asar -- grep --pattern compactIfNeeded --ext js --ctx 3
 
 | 面板字段 | 配置键 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| 总开关 | `enabled` | true | 关闭后完全恢复原生 DSH |
-| 演习模式 | `dryRun` | false | 只记录，不真压缩 |
+| 总开关 | `enabled` | true | 关闭后完全恢复原生 DSH（面板为开关滑块） |
 | **智能压缩线** | `markerMinRatio` | 0.2 | 占用达此值时模型可自行决定压缩并自动续跑 |
 | **强制压缩线** | `criticalRatio` | 0.85 | 占用达此值无条件强制压缩 |
 | 压缩标记 | `marker` | `[cp:compact]` | 模型回复尾行标记；置空则关闭智能压缩 |

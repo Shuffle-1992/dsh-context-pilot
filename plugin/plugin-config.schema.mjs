@@ -78,7 +78,6 @@ function buildWith(z) {
   try {
     return z.object({
       enabled: z.boolean().default(true).description('总开关（关闭后完全恢复原生 DSH）').volatile(),
-      dryRun: z.boolean().default(false).description('演习模式：只记录，不真压缩').volatile(),
       criticalRatio: z.number().default(0.85).description('强制压缩线：占用达此值无条件强制压缩').volatile(),
       marker: z.string().default('[cp:compact]').description('压缩标记：模型回复尾行标记（置空则关闭智能压缩）').volatile(),
       markerMinRatio: z.number().default(0.2).description('智能压缩线：占用达此值时，模型可自行决定压缩并自动续跑').volatile(),
