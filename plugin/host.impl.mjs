@@ -1762,8 +1762,20 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
             criticalCap: engineThreshold(targetAgent),
             /* R1（2026-10-07）：思考强度快照——供输入框 chip 显示「智能思考档位:<当前档>」。
              * 只在 effortEnabled 开启时返回（关闭 = 不介入，UI 也不显示）。
-             * 异步解析可选档 ⇒ 整个 onGetHud 需为 async（见下方 return Promise.resolve）。 */
-            effort: effOn ? await readEffort(targetAgent) : null,
+             * 异步解析可选档 ⇒ 整个 onGetHud 需为 async（见下方 return Promise.resolve）。
+             * 附**换档冷却**（用户要求「把 30 秒冷却加到档位后面显示」）：
+             * 让用户/模型看得见「现在换档会被冷却挡掉」，而不是写了标记没反应却无提示。
+             * ⚠️ 返回**绝对时间戳** cooldownUntil（而非剩余毫秒）：client 可本地倒计时，
+             * 且 getHud 是低频调用（挂载 + 投影变化时各一次），绝对时间不会因调用间隔而过时。 */
+            effort: effOn
+              ? await readEffort(targetAgent).then((e) => {
+                  if (!e?.ok) return e;
+                  const sidForCool = String(pick(targetAgent?.session?.id, targetAgent?.sessionId, targetAgent?.id, sid, ''));
+                  const lastAt = effortSwitchAtBySid.get(sidForCool) ?? 0;
+                  const until = lastAt ? lastAt + EFFORT_SWITCH_MIN_MS : 0;
+                  return { ...e, cooldownUntil: until > Date.now() ? until : 0, cooldownTotalMs: EFFORT_SWITCH_MIN_MS };
+                })
+              : null,
             at: new Date().toISOString(),
           };
           /* getHud 取证（2026-10-07）：记录不显示时从报告直接看「client 传了什么 sid、host 回了什么」——

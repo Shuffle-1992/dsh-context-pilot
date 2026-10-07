@@ -215,7 +215,7 @@ ok('chip 注册到 conversation.input.right（模型选择器左侧）',
 ok('chip 注册 id 独立（不与官方条目撞车）', /id:\s*"context-pilot-effort"/.test(client),
   '未用自有 id ⇒ 可能替换官方条目');
 ok('chip 仅在 effortEnabled 开启时显示',
-  /if \(!enabled \|\| !effort\) return null;/.test(client),
+  /if \(!hostInfo \|\| !effort\) return null;/.test(client),
   '缺少显示条件 ⇒ 开关关闭时仍显示');
 ok('chip 不用冒号分隔（用户要求改间距）', !/智能思考档位:\$\{/.test(client) && !/`智能思考档位:/.test(client),
   '仍用「智能思考档位:XXX」冒号形态 ⇒ 用户要求改成间距');
@@ -226,19 +226,34 @@ ok('chip 用两个 span + gap 呈现（间距 6px）',
 /* ⚠️ 用户明确要求「不要 5S 轮询」（2026-10-07）。档位必须走**响应式投影**：
  * `useProjection("modelSelection")`（官方 UI 同款，dsh-client-ui-conversation L17240 同形），
  * 投影由会话事件驱动（model/selection、request/header）⇒ 换档落库即重渲染，零轮询。
- * 开关状态只问一次 getHud（挂载时）+ 订阅 settingsScope（事件驱动），也不轮询。 */
+ * 开关状态 + 冷却走 getHud，但只在**挂载时 + 投影变化时**各一次（事件驱动，非定时器）。 */
 ok('档位走响应式投影 useProjection（不是轮询）',
   /up\("modelSelection"\)/.test(client) && /props && props\.useProjection/.test(client),
   '未用 useProjection("modelSelection") ⇒ 又退化成轮询/静态值');
-ok('chip 无 5s 轮询（用户明确要求去掉）',
-  !/setInterval\(/.test(/function EffortChip\([\s\S]*?\n\t\t\}/.exec(client)?.[0] ?? ''),
-  'EffortChip 内仍有 setInterval ⇒ 违反「不要 5S 轮询」要求');
+/* setInterval 只允许用于**冷却倒计时**（本地 1s tick，且冷却结束即停）；
+ * 不得用于「定期问 host 要档位」——那正是用户要去掉的 5s 轮询。
+ * 判据：定时器回调里只能有 setNow，不得出现 getHud/pullOnce。 */
+const chipBody = /function EffortChip\([\s\S]*?\n\t\t\}/.exec(client)?.[0] ?? '';
+ok('解析出 EffortChip 函数体', chipBody.length > 0, '未找到 EffortChip');
+ok('chip 不用定时器轮询 host（用户明确要求去掉 5s 轮询）',
+  !/setInterval\([^)]*(?:getHud|pullOnce)/.test(chipBody),
+  'EffortChip 内用 setInterval 定期拉 host ⇒ 违反「不要 5S 轮询」');
+ok('chip 的定时器仅用于冷却倒计时且冷却结束即停',
+  /if \(!cooling\) return undefined;/.test(chipBody) && /setInterval\(\(\) => setNow\(Date\.now\(\)\), 1000\)/.test(chipBody),
+  '倒计时未按 cooling 条件启停 ⇒ 常驻定时器（变相轮询）');
+ok('冷却显示在档位后面（用户要求）',
+  /冷却 \$\{coolLeft\}s/.test(chipBody) && /coolLeft > 0\s*\n?\s*\?/.test(chipBody),
+  '未在档位后显示冷却剩余秒数');
+ok('冷却只在确实冷却时占位（结束后不显示）',
+  /const cooling = until > now;/.test(chipBody),
+  '未判断 cooling ⇒ 冷却结束后仍显示「冷却 0s」');
 ok('投影 pending 优先显示（已选待生效提前可见）',
   /sel\.pending \|\| sel\.lastUsed/.test(client),
   '未优先取 pending ⇒ 换档后要等下一轮才显示');
-ok('开关状态走一次 getHud + 订阅（事件驱动，非定时器）',
-  /settingsScope\.subscribe\?\.\(\(\) => \{ pullOnce\(\); \}\)/.test(client),
-  '开关状态未订阅 settingsScope ⇒ 面板改动后 chip 不更新');
+ok('host 信息在投影变化时重问（事件驱动，非定时器）',
+  /settingsScope\.subscribe\?\.\(\(\) => \{ pullOnce\(\); \}\)/.test(client) &&
+  /\}, \[effort, pendingNow\]\);/.test(client),
+  '未按投影变化重问 ⇒ 换档后冷却状态不更新');
 
 /* ═══════════ 6.8 R1 智能思考字段三端对账 ═══════════ */
 console.log('\n== 6.8 智能思考字段（FIELDS ↔ schema ↔ M3_DEFAULTS）==');

@@ -502,31 +502,13 @@ window.__ModuleLoader__.load({
 		 *   ⇒ 换档一落库即重渲染，**无需任何轮询**。
 		 *   - lastUsed = 已生效档位（来自 request/header 事件）
 		 *   - pending  = 已选待生效（model/selection 事件）⇒ 优先显示，让用户提前看到
-		 * 开关状态仍走一次 getHud（低频、仅挂载时一次 + 开关变化时），不轮询。
+		 * 开关状态 + **换档冷却**走 getHud，但**只在挂载时 + 投影变化时**各问一次
+		 * （事件驱动，非定时器）——投影一变就重问，拿到新的 cooldownUntil。
 		 * 样式：读邻居（模型选择器按钮）computedStyle 复制圆角/字号——router-laya 同款做法。
 		 * 全函数吞异常：任何失败都不渲染（绝不因 chip 打崩输入框）。
 		 */
 		function EffortChip(props) {
 			const ref = react.useRef(null);
-			/* ① 开关状态：只在挂载时问一次 host（不轮询）；开关变化由 settingsScope 订阅驱动 */
-			const [enabled, setEnabled] = react.useState(false);
-			react.useEffect(() => {
-				let alive = true;
-				const pullOnce = async () => {
-					try {
-						if (!hudRemoteSvc || typeof hudRemoteSvc.getHud !== "function") return;
-						const raw = await hudRemoteSvc.getHud(NS.sid || "");
-						const env = raw && typeof raw === "object" && "value" in raw ? (raw.ok ? raw.value : null) : raw;
-						if (!alive) return;
-						setEnabled(!!(env && env.ok && env.effort && env.effort.ok));
-					} catch { /* 吞 */ }
-				};
-				pullOnce();
-				/* 开关被面板/弹窗改动时立即重问一次（事件驱动，非定时器） */
-				let off;
-				try { off = settingsScope.subscribe?.(() => { pullOnce(); }); } catch { /* 忽略 */ }
-				return () => { alive = false; try { off?.(); } catch { /* 忽略 */ } };
-			}, []);
 			/* ② 档位：响应式投影（事件驱动，零轮询）。useProjection 由 slot 标准 props 提供。 */
 			let sel = null;
 			try {
@@ -537,6 +519,36 @@ window.__ModuleLoader__.load({
 			const shown = (sel && (sel.pending || sel.lastUsed)) || null;
 			const effort = shown && shown.reasoningEffort ? String(shown.reasoningEffort) : null;
 			const pendingNow = !!(sel && sel.pending);
+			/* ① host 侧信息（开关状态 + 换档冷却）：挂载时问一次；**投影变化时再问一次**
+			 * （换档必然改变投影 ⇒ 天然触发重问，拿到新的 cooldownUntil）。
+			 * 依赖数组用 effort/pendingNow：它们变化即代表投影变了。 */
+			const [hostInfo, setHostInfo] = react.useState(null);
+			react.useEffect(() => {
+				let alive = true;
+				const pullOnce = async () => {
+					try {
+						if (!hudRemoteSvc || typeof hudRemoteSvc.getHud !== "function") return;
+						const raw = await hudRemoteSvc.getHud(NS.sid || "");
+						const env = raw && typeof raw === "object" && "value" in raw ? (raw.ok ? raw.value : null) : raw;
+						if (!alive) return;
+						setHostInfo(env && env.ok && env.effort && env.effort.ok ? env.effort : null);
+					} catch { /* 吞 */ }
+				};
+				pullOnce();
+				/* 开关被面板/弹窗改动时立即重问一次（事件驱动，非定时器） */
+				let off;
+				try { off = settingsScope.subscribe?.(() => { pullOnce(); }); } catch { /* 忽略 */ }
+				return () => { alive = false; try { off?.(); } catch { /* 忽略 */ } };
+			}, [effort, pendingNow]);
+			/* 冷却倒计时（本地，仅在确实处于冷却时启用 1s tick；冷却结束自动停） */
+			const [now, setNow] = react.useState(() => Date.now());
+			const until = hostInfo && typeof hostInfo.cooldownUntil === "number" ? hostInfo.cooldownUntil : 0;
+			const cooling = until > now;
+			react.useEffect(() => {
+				if (!cooling) return undefined;
+				const t = setInterval(() => setNow(Date.now()), 1000);
+				return () => clearInterval(t);
+			}, [cooling]);
 			/* 邻居形状复制（一次性，挂在 ref 上）：圆角/字号跟随模型选择器 */
 			react.useEffect(() => {
 				try {
@@ -550,13 +562,19 @@ window.__ModuleLoader__.load({
 					if (cs.fontSize) node.style.fontSize = cs.fontSize;
 				} catch { /* 忽略 */ }
 			}, [effort]);
-			if (!enabled || !effort) return null;
+			if (!hostInfo || !effort) return null;
 			/* 显示形态（2026-10-07 用户要求）：不用冒号，改成**两个 span + 间距**——
 			 * 「智能思考档位」与档位值视觉分离（冒号在中英混排里偏挤，间距更清爽）。
-			 * 间距 6px（与弹窗内其他 label/开关的 gap 一致）。 */
+			 * 间距 6px（与弹窗内其他 label/开关的 gap 一致）。
+			 * 冷却（用户要求「把 30 秒冷却加到档位后面显示」）：紧跟档位值之后，
+			 * 显示剩余秒数「· 冷却 23s」；不在冷却时不占位。 */
+			const coolLeft = cooling ? Math.ceil((until - now) / 1000) : 0;
 			const tip = [
 				`模型：${shown.provider}/${shown.model}`,
 				`当前档位：${effort}${pendingNow ? "（已选，下一步生效）" : ""}`,
+				coolLeft > 0
+					? `换档冷却中：还剩 ${coolLeft}s（冷却 ${Math.round((hostInfo.cooldownTotalMs || 30000) / 1000)}s，防频繁换档打断前缀缓存）`
+					: "换档冷却：已就绪",
 				"Agent 可写 [cp:effort <档>] 自主换档（下一步生效）",
 			].join("\n");
 			return el("div", {
@@ -575,6 +593,9 @@ window.__ModuleLoader__.load({
 				el("span", { style: { opacity: ".75" } }, "智能思考档位"),
 				el("span", { style: { fontWeight: "600" } }, effort),
 				pendingNow ? el("span", { style: { opacity: ".55", fontSize: "11px" } }, "· 下一步") : null,
+				coolLeft > 0
+					? el("span", { style: { opacity: ".5", fontSize: "11px", fontVariantNumeric: "tabular-nums" } }, `· 冷却 ${coolLeft}s`)
+					: null,
 			);
 		}
 		//#endregion
