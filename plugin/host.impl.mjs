@@ -577,6 +577,12 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       markerHits: 0, // B3：keywordHits 恒 0 字段已随审查退役（历史报告条目保持原样，不受影响）
       policyCards: 0,
       engineCapProbe: null, // C-own：引擎阈值探测留痕（via/ratio/fallback），取证「钳制用的是哪个值」
+      // R1 智能思考取证：标记命中/换档应用/跳过原因（cooldown|invalid|foreign|noRoute）
+      effortMarkerHits: 0,
+      effortSwitches: 0,
+      effortSkips: {},
+      lastEffortMarker: null,
+      lastEffortApply: null,
     },
     // M5 HUD 发布取证（entry 查找/edit 结果全程留痕——弹窗侧空态无法区分静默失败）
     // hud.gen = 实例指纹：客户端取到的 gen 应与本实例一致；不一致 = RPC 打到了旧激活的僵尸面
@@ -667,6 +673,119 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       return { ok: false, error: msg(e) };
     }
   };
+
+  /* ═══════════ R1：`[cp:effort <档>]` 标记 → 下一步换档 ═══════════
+   * 设计要点（docs/r1-effort-design.md）：
+   *  ① **独立门控**：只看 effortEnabled，与压缩的 markerMinRatio / M3.marker 完全无关
+   *     （用户要求「全程允许」——低占用也必须能换档）。
+   *  ② **执行 seam = agent/request waterfall**（不是 sessionController.selectModel）：
+   *     后者内部还会 agentDefaultModel.saveSelection() ⇒ **写全局默认模型**（实测会重写 profile）。
+   *  ③ **必须校验档位合法性**：dsh-llm resolveCallWithInfo 对非法档**直接抛错**
+   *     （UNSUPPORTED_REASONING_EFFORT）⇒ 会中断该次请求。不在当前模型可选集内 ⇒ 忽略+留痕。
+   *  ④ **冷却**：换档可能使前缀缓存失效（call-config.js 注明 effort 属 cache-affecting 状态），
+   *     故同一会话两次换档之间有最小间隔，防模型每轮都换。
+   *  ⑤ 标记解析放在 `session/event`（与压缩标记同一事件源），**应用**放在 agent/request。 */
+  const EFFORT_MARKER_RE = /\[cp:effort\s+([A-Za-z0-9_-]+)\s*\]/g;
+  /** sid → { effort, at, reason }：待应用的档位（agent/request 现读现用）。 */
+  const pendingEffortBySid = new Map();
+  /** 换档冷却（默认 30s）：防频繁换档反复打断前缀缓存。 */
+  const EFFORT_SWITCH_MIN_MS = 30_000;
+  const effortSwitchAtBySid = new Map();
+  /** 生效档位的本地记忆：区分「我们写的档」与「他人显式指定」（router-laya isOurRoute 语义）。
+   *  没有它，第二轮起每轮都看起来是「显式指定」，插件会与用户/subagent 的选择打架或自我锁定。 */
+  const appliedEffortBySid = new Map();
+
+  /* ---- R1 执行：agent/request waterfall —— 改请求配置（无全局副作用） ----
+   * 源码依据（dsh-agent-loop lib/index.js L1179）：`waterfall("agent/request", {turn,step,signal}, seed)`
+   * 的返回值直接进 `llm.prepareCall(proposedConfig, signal)` ⇒ 改它就改本轮请求。
+   *
+   * ⚠️ **payload 里没有 agent**（源码实证：只有 {turn,step,signal}）⇒ 不能用 payload 找会话。
+   * 官方 installModelSelection 的做法是注册在 **agent.ctx**（agent 作用域）上
+   * （dsh-agent/lib/types/model-selection.js L45/L61，调用方 api-session-controller L310 传 agent.ctx）。
+   * 故本插件**按 agent 逐个安装**（懒安装，WeakSet 去重），sid 由闭包捕获。
+   *
+   * 校验失败/无待应用档位 ⇒ 原样返回 config（绝不影响请求）。 */
+  const effortHookInstalled = new WeakSet();
+  const installEffortRequestHook = (agent) => {
+    try {
+      if (!agent?.ctx || typeof agent.ctx.on !== 'function') return false;
+      if (effortHookInstalled.has(agent)) return true;
+      const sid = String(pick(agent.session?.id, agent.sessionId, agent.id, ''));
+      if (!sid) return false;
+      effortHookInstalled.add(agent);
+      agent.ctx.on('agent/request', async (payload, next) => {
+        const config = await next();
+        try {
+          if (!effEnabled() || M3.effortEnabled !== true) return config;
+          const pend = pendingEffortBySid.get(sid);
+          if (!pend) return config;
+          /* 尊重「他人显式指定」：若当前 config 带 effort 且**不是我们上次写的**，
+           * 说明是用户手动选档或 subagent 自带 ⇒ 让位（router-laya carriesExplicitRoute 语义）。 */
+          const applied = appliedEffortBySid.get(sid);
+          if (config?.reasoningEffort !== undefined && applied !== undefined && config.reasoningEffort !== applied) {
+            pendingEffortBySid.delete(sid);
+            state.m3.effortSkips = state.m3.effortSkips ?? {};
+            state.m3.effortSkips.foreign = (state.m3.effortSkips.foreign ?? 0) + 1;
+            log('info', `R1 换档让位：当前请求档位 ${config.reasoningEffort} 非本插件所写（他人显式指定）`);
+            return config;
+          }
+          /* 档位合法性校验（**必须**：非法档会让 llm 抛 UNSUPPORTED_REASONING_EFFORT 中断请求） */
+          const eff = await readEffort(agent);
+          const opts = Array.isArray(eff?.efforts) ? eff.efforts : null;
+          if (!eff?.ok) {
+            pendingEffortBySid.delete(sid);
+            state.m3.effortSkips = state.m3.effortSkips ?? {};
+            state.m3.effortSkips.noRoute = (state.m3.effortSkips.noRoute ?? 0) + 1;
+            return config;
+          }
+          if (opts && !opts.includes(pend.effort)) {
+            pendingEffortBySid.delete(sid);
+            state.m3.effortSkips = state.m3.effortSkips ?? {};
+            state.m3.effortSkips.invalid = (state.m3.effortSkips.invalid ?? 0) + 1;
+            state.m3.lastEffortApply = {
+              at: new Date().toISOString(), sessionId: sid, want: pend.effort, applied: false,
+              error: `档位不在当前模型可选集内（可选 ${opts.join('/')}）`,
+            };
+            log('warn', `R1 换档忽略：${pend.effort} 不在 ${eff.provider}/${eff.model} 的可选集（${opts.join('/')}）`);
+            schedule('r1-effort', 400);
+            return config;
+          }
+          /* 应用（去掉 maxTokens：换档不应把上个 adapter 的 cap 钉住——router-laya applyRoute 同款） */
+          const out = { ...config, reasoningEffort: pend.effort };
+          delete out.maxTokens;
+          pendingEffortBySid.delete(sid);
+          effortSwitchAtBySid.set(sid, Date.now());
+          appliedEffortBySid.set(sid, pend.effort);
+          state.m3.effortSwitches = (state.m3.effortSwitches ?? 0) + 1;
+          state.m3.lastEffortApply = {
+            at: new Date().toISOString(), sessionId: sid, want: pend.effort,
+            from: config?.reasoningEffort ?? null, applied: true,
+            provider: eff.provider, model: eff.model, options: opts,
+          };
+          log('info', `R1 换档应用：${config?.reasoningEffort ?? '(默认)'} → ${pend.effort}（${eff.provider}/${eff.model}，下一步生效）`);
+          schedule('r1-effort', 400);
+          return out;
+        } catch (e) {
+          log('warn', `R1 换档应用异常（吞，原样放行）：${msg(e)}`);
+          return config;
+        }
+      });
+      state.m3.effortHooks = (state.m3.effortHooks ?? 0) + 1;
+      return true;
+    } catch (e) {
+      log('warn', `R1 安装 agent/request 钩子失败（吞）：${msg(e)}`);
+      return false;
+    }
+  };
+  /** 懒安装：每次 pre-step / 快照时对可见 agent 补装（新会话自动覆盖）。 */
+  const ensureEffortHooks = () => {
+    try {
+      if (M3.effortEnabled !== true) return;
+      const list = svc('agents')?.list?.() ?? [];
+      for (const a of list) installEffortRequestHook(a);
+    } catch { /* 吞 */ }
+  };
+
 
   /** 提取一条消息的可见文本（复杂度启发 + 关键词检测共用）。 */
   const messageText = (message) => {
@@ -1221,7 +1340,10 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         let eff = null;
         try {
           mergeConfig();
-          if (M3.effortEnabled === true) eff = await readEffort(agent);
+          if (M3.effortEnabled === true) {
+            ensureEffortHooks(); // R1：懒安装 agent/request 钩子（新会话自动覆盖）
+            eff = await readEffort(agent);
+          }
         } catch { /* 读档失败 ⇒ 不注入（绝不因新功能影响主流程） */ }
         const effSuffix = renderEffortSuffix(eff);
         const baseText = effSuffix ? `${r.text} ｜ ${effSuffix}` : r.text;
@@ -1393,12 +1515,42 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     schedule('agent/status', 1500);
   });
 
-  /* ═══════════ M3.6：模型回复尾部标记 → idle 自动压缩 ═══════════
+  /* ---- M3.6：模型回复尾部标记 → idle 自动压缩 ═══════════
    * 事件通道 compaction-basic 官方同款（ctx.on("session/event")，event.type==='assistant/message'）。
    * 解析到标记即武装；竞态处理：消息事件可能晚于 status→idle，武装时查 agent.status，
    * 已 idle 则直接触发扫除。用户零输入——标记本身在回复里可见（透明）。 */
   state.listeners['session/event'] = addListener('session/event', (session, event) => {
     try {
+      /* ── R1：`[cp:effort <档>]` 解析（与压缩标记共用同一事件源，独立门控）──────────
+       * 只看 effortEnabled，与 M3.marker / markerMinRatio 完全无关（用户要求「全程允许」）。 */
+      try {
+        if (effEnabled() && M3.effortEnabled === true && event?.type === 'assistant/message') {
+          const etext = extractEventText(event);
+          if (etext) {
+            const sidE = String(pick(session?.id, session?.header?.id, 'unknown'));
+            const hits = [...etext.matchAll(EFFORT_MARKER_RE)];
+            if (hits.length) {
+              /* 取**最后一个**标记（模型可能先写错再改；与压缩标记的 pop 语义一致） */
+              const want = String(hits[hits.length - 1][1]);
+              state.m3.effortMarkerHits = (state.m3.effortMarkerHits ?? 0) + 1;
+              const lastAt = effortSwitchAtBySid.get(sidE) ?? 0;
+              const since = Date.now() - lastAt;
+              if (since < EFFORT_SWITCH_MIN_MS) {
+                state.m3.effortSkips = state.m3.effortSkips ?? {};
+                state.m3.effortSkips.cooldown = (state.m3.effortSkips.cooldown ?? 0) + 1;
+                log('info', `R1 换档标记 ${want} 被冷却跳过（距上次 ${Math.round(since / 1000)}s < ${EFFORT_SWITCH_MIN_MS / 1000}s）`);
+              } else {
+                pendingEffortBySid.set(sidE, { effort: want, at: Date.now(), source: 'marker' });
+                state.m3.lastEffortMarker = { at: new Date().toISOString(), sessionId: sidE, want, via: 'marker' };
+                log('info', `R1 换档标记命中：[cp:effort ${want}]（session ${sidE.slice(0, 8)}…）→ 下一步应用`);
+              }
+              schedule('r1-effort', 400);
+            }
+          }
+        }
+      } catch (e) {
+        log('warn', `R1 换档标记处理异常（吞）：${msg(e)}`);
+      }
       /* 形状探针先行：无论后续逻辑如何，先记录到达的事件（类型计数 + 前 N 条样本） */
       const probeType = event?.type ?? '(no-type)';
       eventProbe.counts[probeType] = (eventProbe.counts[probeType] ?? 0) + 1;

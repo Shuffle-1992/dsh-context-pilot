@@ -258,7 +258,7 @@ const effInject = (() => {
 })();
 ok('解析出 effort 注入段', effInject.length > 0, '未找到 effort 注入段');
 ok('智能思考注入用独立门控 effortEnabled（不共用 markerMinRatio）',
-  /M3\.effortEnabled === true\) eff = await readEffort\(agent\)/.test(effInject),
+  /if \(M3\.effortEnabled === true\) \{[\s\S]{0,120}?ensureEffortHooks\(\);[\s\S]{0,80}?eff = await readEffort\(agent\)/.test(effInject),
   'effort 注入未走 effortEnabled 独立门控 ⇒ 低占用时被压缩门控挡掉（用户要求全程允许）');
 /* 剥注释后再查：注释里说明「与 markerMinRatio 解耦」是正常文字，代码里引用才是耦合。 */
 const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
@@ -305,6 +305,56 @@ ok(`clearBriefed 在两条压缩路径都被调用（实际 ${clearCalls} 处）
 ok('clearBriefed 声明早于调用点（无 TDZ 风险）',
   host.indexOf('const clearBriefed = ') < host.indexOf('clearBriefed(sid)'),
   'clearBriefed 声明在调用之后 ⇒ const TDZ 会抛 ReferenceError');
+
+/* ═══════════ 6.12 R1 换档执行通道（agent.ctx 作用域，非 global）═══════════ */
+console.log('\n== 6.12 换档执行通道（agent/request 挂在 agent.ctx 上）==');
+// 源码实证（2026-10-07）：`waterfall("agent/request", {turn,step,signal}, seed)` 的 payload
+// **只有 turn/step/signal，没有 agent** ⇒ 不能用 payload 找会话（第一版实现踩了这个坑，
+// 会导致 per-session 查找恒不命中、换档静默失效）。
+// 官方 installModelSelection 的做法：注册在 **agent.ctx**（dsh-agent/lib/types/model-selection.js L45/L61，
+// 调用方 api-session-controller L310 传 agent.ctx）。本插件同款：按 agent 懒安装 + WeakSet 去重。
+ok('换档钩子装在 agent.ctx（不是插件 ctx 的 global）',
+  /agent\.ctx\.on\('agent\/request'/.test(host),
+  '未装在 agent.ctx ⇒ payload 无 agent，per-session 查找恒不命中（换档静默失效）');
+ok('未使用插件级 global agent/request（payload 无 agent 会失效）',
+  !/state\.listeners\['agent\/request'\]\s*=\s*addListener/.test(host),
+  '仍注册插件级 agent/request ⇒ 拿不到 agent');
+ok('钩子按 agent 去重（WeakSet，防重复安装）',
+  /const effortHookInstalled = new WeakSet\(\)/.test(host) && /effortHookInstalled\.has\(agent\)/.test(host),
+  '未去重 ⇒ 每次 pre-step 重复注册，waterfall 回调叠加');
+ok('钩子懒安装（新会话自动覆盖）', /const ensureEffortHooks = \(\) => \{/.test(host) && /for \(const a of list\) installEffortRequestHook\(a\)/.test(host),
+  '无懒安装 ⇒ 新会话拿不到钩子');
+ok('pre-step 会触发懒安装', /if \(M3\.effortEnabled === true\) \{[\s\S]{0,120}?ensureEffortHooks\(\)/.test(host),
+  'pre-step 未调用 ensureEffortHooks ⇒ 钩子永不安装');
+// 声明顺序（const 无提升，TDZ 会抛 ReferenceError）
+for (const [name, def, use] of [
+  ['EFFORT_MARKER_RE', 'const EFFORT_MARKER_RE', 'etext.matchAll(EFFORT_MARKER_RE)'],
+  ['installEffortRequestHook', 'const installEffortRequestHook', 'installEffortRequestHook(a)'],
+  ['ensureEffortHooks', 'const ensureEffortHooks', 'ensureEffortHooks();'],
+]) {
+  ok(`${name} 声明早于使用（防 const TDZ）`, host.indexOf(def) < host.indexOf(use),
+    `${name} 声明在使用之后 ⇒ 运行时 TDZ 抛错`);
+}
+ok('session/event 监听器只有一处（合并而非重复注册）',
+  (host.match(/state\.listeners\['session\/event'\]/g) || []).length === 1,
+  '注册了两处 ⇒ 后注册者覆盖 listeners 记录（压缩标记链路取证丢失）');
+// 三个必备防护
+ok('应用前校验档位合法性（否则 llm 抛 UNSUPPORTED_REASONING_EFFORT 中断请求）',
+  /opts && !opts\.includes\(pend\.effort\)/.test(host),
+  '未校验档位 ⇒ 非法档会中断整个请求');
+ok('非法档只忽略并留痕（不硬送）', /effortSkips\.invalid/.test(host) && /lastEffortApply = \{[\s\S]{0,200}?applied: false/.test(host),
+  '非法档未留痕 ⇒ 无法取证为何没生效');
+ok('有换档冷却（防频繁换档反复打断前缀缓存）',
+  /const EFFORT_SWITCH_MIN_MS = 30_000/.test(host) && /since < EFFORT_SWITCH_MIN_MS/.test(host),
+  '无冷却 ⇒ 模型可每轮换档，反复使缓存失效');
+ok('尊重他人显式指定档位（让位，不覆盖）',
+  /config\?\.reasoningEffort !== undefined && applied !== undefined && config\.reasoningEffort !== applied/.test(host),
+  '未区分「自己写的档」与「他人显式指定」⇒ 与用户/subagent 选择打架或自我锁死');
+ok('应用时删除 maxTokens（不把上个 adapter 的 cap 钉住）',
+  /const out = \{ \.\.\.config, reasoningEffort: pend\.effort \};\s*\n\s*delete out\.maxTokens;/.test(host),
+  '未删 maxTokens ⇒ 换档后沿用旧 adapter 的输出上限（router-laya applyRoute 同款教训）');
+ok('换档异常原样放行（绝不影响请求）', /catch \(e\) \{\s*\n\s*log\('warn', `R1 换档应用异常（吞，原样放行）/.test(host),
+  '异常未吞 ⇒ 新功能可打崩模型请求');
 
 /* ═══════════ 7. mergeConfig 读取集 ⊆ schema 键 ═══════════ */
 console.log('\n== 7. mergeConfig 读取集 ⊆ schema 键 ==');
