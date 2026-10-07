@@ -255,10 +255,18 @@ window.__ModuleLoader__.load({
 			 */
 			const persist = async (values) => {
 				let written = 0;
+				/* C-own：强制压缩线的**生效上限 = 引擎阈值**（方案 C，动态探测不写死 0.8）。
+				 * 插件线必须先行（用户需求：插件开启时插件线生效，引擎只作关闭后的安全网）。
+				 * NS.engineCap 由 HUD 轮询从 host 下发（engineThreshold 实测引擎实例 config）；
+				 * 未拿到（旧 host/引擎未解析）时不钳制——host 侧 pre-step/sweep 还有同一道 min() 兜底。 */
+				const cap = typeof NS.engineCap === "number" && Number.isFinite(NS.engineCap) && NS.engineCap > 0 && NS.engineCap <= 1 ? NS.engineCap : null;
 				for (const field of FIELDS) {
 					if (!Object.prototype.hasOwnProperty.call(values, field.key)) continue;
-					const parsed = parseInput(field, values[field.key]);
+					let parsed = parseInput(field, values[field.key]);
 					if (parsed === null) throw new Error(`${field.label}：输入不是合法的${field.type === "text" ? "字符串" : "数值"}。`);
+					if (field.key === "criticalRatio" && cap !== null && parsed > cap) {
+						parsed = cap; // 超上限自动收到引擎线（而非报错——用户意图是"至少这么晚"，收到上限仍满足）
+					}
 					const base = canon(field, stored[field.key] === void 0 ? field.def : stored[field.key]);
 					if (JSON.stringify(canon(field, parsed)) === JSON.stringify(base)) continue; // 未变不写
 					await writeField(settingsScope, field, parsed);
@@ -293,9 +301,12 @@ window.__ModuleLoader__.load({
 					};
 					const { written } = await persist(values);
 					setDraft(null); // 以写入值清理草稿，避免残留脏值
+					/* C-own：persist 可能已把 criticalRatio 钳到引擎上限——回读真实生效值展示 */
+					const appliedCrit = Math.min(rec.criticalRatio, typeof NS.engineCap === "number" ? NS.engineCap : rec.criticalRatio);
+					const capNote = appliedCrit < rec.criticalRatio ? `（已按引擎上限 ${Math.round(NS.engineCap * 100)}% 收敛）` : "";
 					const text = written === 0
 						? "推荐值与当前配置一致，无需写入。"
-						: `已应用并回读校验通过（${written} 项：智能压缩线 ${rec.markerMinRatio} / 强制压缩线 ${rec.criticalRatio}）`;
+						: `已应用并回读校验通过（${written} 项：智能压缩线 ${rec.markerMinRatio} / 强制压缩线 ${appliedCrit}${capNote}）`;
 					setMessage({ kind: "ok", text: `${text}。` });
 					return { ok: true, text };
 				} catch (error) {
@@ -711,9 +722,10 @@ window.__ModuleLoader__.load({
 								chips.appendChild(c);
 							}
 							if (v.dryRun === true) chips.appendChild(chip("演习", "rgba(128,128,128,.9)"));
-							/* 阈值速览：智能压缩线 / 强制压缩线（配置镜像实时跟随） */
+							/* 阈值速览：智能压缩线 / 强制压缩线（配置镜像实时跟随）+ 生效上限（C-own） */
 							const pct = (x, d) => `${Math.round((Number.isFinite(Number(x)) ? Number(x) : d) * 100)}%`;
-							thr.textContent = `智能压缩线 ${pct(v.markerMinRatio, 0.2)} ｜ 强制压缩线 ${pct(v.criticalRatio, 0.85)}`;
+							const capTxt = typeof NS.engineCap === "number" ? `（上限 ${pct(NS.engineCap)}）` : "";
+							thr.textContent = `智能压缩线 ${pct(v.markerMinRatio, 0.2)} ｜ 强制压缩线 ${pct(v.criticalRatio, 0.85)}${capTxt}`;
 							/* 「距离触发还差多少」——弹窗已在顶部显示当前占用，这里补最有决策价值的一行：
 							 * 距智能压缩线还有多少（达线后模型可自行决定压缩），以及是否已越线。 */
 							const num = (x, d) => (Number.isFinite(Number(x)) ? Number(x) : d);
@@ -780,6 +792,10 @@ window.__ModuleLoader__.load({
 									gen: r.gen || "",
 									acts: Array.isArray(r.acts) ? r.acts : null,
 								};
+								/* C-own：引擎阈值上限（host 动态探测，方案 C 钳制用）——存 NS 供保存路径读取 */
+								if (typeof r.criticalCap === "number" && Number.isFinite(r.criticalCap) && r.criticalCap > 0 && r.criticalCap <= 1) {
+									NS.engineCap = r.criticalCap;
+								}
 								NS.hudDebug = { svc: true, ok: true, act: r.hudLastAct ?? null, gen: r.gen ?? null, acts: Array.isArray(r.acts) ? r.acts.length : null, sid: (NS.sid || "").slice(0, 13) || null, at: Date.now() };
 								renderHud();
 							} else {

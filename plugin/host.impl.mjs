@@ -538,6 +538,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       preStepErrors: {},
       markerHits: 0, // B3：keywordHits 恒 0 字段已随审查退役（历史报告条目保持原样，不受影响）
       policyCards: 0,
+      engineCapProbe: null, // C-own：引擎阈值探测留痕（via/ratio/fallback），取证「钳制用的是哪个值」
     },
     // M5 HUD 发布取证（entry 查找/edit 结果全程留痕——弹窗侧空态无法区分静默失败）
     // hud.gen = 实例指纹：客户端取到的 gen 应与本实例一致；不一致 = RPC 打到了旧激活的僵尸面
@@ -565,6 +566,22 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       via: 'unresolved',
       probe: { ctxError: viaCtx.error ?? null, ctxType: viaCtx.value ? typeof viaCtx.value : null, presetsError: viaPresets.error ?? null },
     };
+  };
+
+  /** C-own（2026-10-07，方案 C）：读引擎（compaction-basic）的自动压缩阈值——插件强制线的**动态上限**。
+   *  依据（源码实证）：服务实例公开属性 `config`（resolveConfig 产出的 deepFreeze 对象，含
+   *  thresholdRatio / auto / modelPolicies），见 dsh-compaction-basic lib/index.js L826/L75。
+   *  语义（用户需求）：插件开启时插件线先行（必须 ≤ 引擎线），插件关闭/卸载后引擎 80% 自然恢复——
+   *  故**不改引擎配置**，只在插件侧钳制：生效强制线 = min(用户配置, 引擎阈值)。
+   *  拿不到（服务未解析/旧版本无该属性）时回退官方默认 0.8；每次现取不缓存（配置可能被改）。 */
+  const DEFAULT_ENGINE_THRESHOLD = 0.8;
+  const engineThreshold = (agent) => {
+    const r = resolveCompactionFor(agent);
+    const t = tryOf(() => r.service?.config?.thresholdRatio);
+    const v = t.value;
+    const ok = typeof v === 'number' && Number.isFinite(v) && v > 0 && v <= 1;
+    state.m3.engineCapProbe = { at: new Date().toISOString(), via: r.via, ratio: ok ? v : null, fallback: !ok };
+    return ok ? v : DEFAULT_ENGINE_THRESHOLD;
   };
 
   /** 提取一条消息的可见文本（复杂度启发 + 关键词检测共用）。 */
@@ -974,7 +991,9 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       const mr = measureRatio(agent.session); // B2：读取收敛
       if (!mr.ok || mr.ratio == null) return;
       const ratio = mr.ratio;
-      if (ratio < M3.criticalRatio) return; // 关键词通道已裁撤（用户决定）：pre-step 仅剩 critical 兜底
+      /* C-own：生效强制线 = min(用户配置, 引擎阈值)——插件线必须先行，引擎只作卸载后的安全网 */
+      const effCritical = Math.min(M3.criticalRatio, engineThreshold(agent));
+      if (ratio < effCritical) return; // 关键词通道已裁撤（用户决定）：pre-step 仅剩 critical 兜底
       const trigger = 'pressure';
       const compaction = resolveCompactionFor(agent);
       if (!compaction.service) {
@@ -1143,7 +1162,8 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       if (markerShot) markerArmed.delete(sid);
       const now = Date.now();
       if (!markerShot) {
-        if (d.ratio < M3.criticalRatio) return; // safety-net：仅 critical
+        /* C-own：safety-net 同样钳到引擎阈值之下（同 pre-step，理由见 engineThreshold） */
+        if (d.ratio < Math.min(M3.criticalRatio, engineThreshold(agent))) return; // safety-net：仅 critical
         if (now - (state.m3.sweeps[sid] ?? 0) < M3.sweepMinIntervalMs) return; // 兜底受冷却限制
       }
       const reason = markerShot ? 'marker' : 'safety-net';
@@ -1345,6 +1365,9 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
             acts: filtered.slice(0, 8).map((a) => a.text),
             occupancyRatio: occ.ratio,
             occupancyWindow: occ.window,
+            /* C-own：生效强制线上限（用户配置与引擎阈值取小）——client 保存时钳制用。
+             * 引擎阈值与具体会话无关（服务实例级配置），但解析需一个 agent 作用域 ⇒ 有 sid 用该会话，否则用首个 agent。 */
+            criticalCap: engineThreshold((sid && agents.find((x) => String(pick(x?.session?.id, x?.sessionId, x?.id)) === sid)?.session) || agents[0]?.session || agents[0] || null),
             at: new Date().toISOString(),
           };
         },
