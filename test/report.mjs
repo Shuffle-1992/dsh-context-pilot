@@ -110,7 +110,7 @@ ok('getHud 有常驻取证字段 hudPollReq', /state\.m5\.hudPollReq = \{/.test(
  * ⇒ 每次 5s 轮询都写 via:unresolved/fallback:true，criticalCap 恒为兜底 0.8。
  * 证据：getHud 的 engineCapProbe 时间戳与 hudPollReq 逐次吻合，而 pre-step 全部解析成功。
  * ⚠️ 2026-10-08：下发点由 `engineThreshold(targetAgent)` 改为 `criticalCapOf(targetAgent)`
- *    （用户要求强制线恒低于引擎阈值 0.5pp，上限计算收敛到单一函数）；**传 Agent 本体的要求不变**，
+ *    （用户要求强制线恒低于引擎阈值 5pp，上限计算收敛到单一函数）；**传 Agent 本体的要求不变**，
  *    且现在多了一层：实参若变成 `targetAgent.session`，engineThreshold 内部就会 unresolved。 */
 const capArg = /criticalCap:\s*criticalCapOf\(([^)]*)\)/.exec(getHudBody)?.[1] ?? '';
 ok('解析出 criticalCap 的实参（上限函数）', capArg.length > 0, '未匹配到 criticalCap 实参');

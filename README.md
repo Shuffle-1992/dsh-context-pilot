@@ -42,7 +42,7 @@ DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`（面板名�
 | 面板名 | 配置键 | 含义 |
 | --- | --- | --- |
 | **智能压缩线** | `markerMinRatio` | 占用达此值时注入决策卡，**模型可自行决定压缩**并自动续跑 |
-| **强制压缩线** | `criticalRatio` | 占用达此值**无条件强制压缩**（pre-step / idle 兜底）。**生效值 = min(配置, DSH 引擎阈值 − 0.5pp)**，即内置 80% ⇒ 上限 **79.5%** |
+| **强制压缩线** | `criticalRatio` | 占用达此值**无条件强制压缩**（pre-step / idle 兜底）。**生效值 = min(配置, DSH 引擎阈值 − 5pp)**，即内置 80% ⇒ 上限 **75%** |
 
 推荐值（按计费口径，计算器可按实价实时推导）：
 
@@ -67,7 +67,7 @@ DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`（面板名�
 > 而 pre-step 天然在下一步请求之前。压缩与「叫醒」因此解耦——**不需要叫醒**。
 > 详见 [`docs/r4-compaction-tool-design.md`](docs/r4-compaction-tool-design.md)。
 >
-> 占用达强制压缩线（生效值 = min(配置, DSH 引擎阈值 − 0.5pp)；内置 80% ⇒ 79.5%）时，
+> 占用达强制压缩线（生效值 = min(配置, DSH 引擎阈值 − 5pp)；内置 80% ⇒ 75%）时，
 > 仍由既有 pre-step / idle 安全网自动压缩，无需模型操作。
 
 ### 2.2b 智能思考（可选，默认关闭）
@@ -291,7 +291,7 @@ npm run asar -- grep --pattern compactIfNeeded --ext js --ctx 3
 | **智能思考** | `effortEnabled` | false | 开=暴露思考档位 + 注册 `set_reasoning_effort` 工具；关=提示词不注入、工具也不注册 |
 | **换档冷却(秒)** | `effortCooldownMs` | 30 | 两次换档的最小间隔（存储为 ms）。**换档会使前缀缓存失效 ⇒ 计费敏感**，故可配（R3-S7） |
 | **智能压缩线** | `markerMinRatio` | 0.2 | 占用达此值时模型可自行决定压缩并自动续跑 |
-| **强制压缩线** | `criticalRatio` | 0.85 | 占用达此值无条件强制压缩；**生效值 = min(配置, 引擎阈值 − 0.5pp)** |
+| **强制压缩线** | `criticalRatio` | 0.85 | 占用达此值无条件强制压缩；**生效值 = min(配置, 引擎阈值 − 5pp)**（内置 80% ⇒ 75%） |
 | 压缩标记 | `marker` | `[cp:compact]` | 模型回复尾行标记；置空则关闭智能压缩 |
 | 标记有效期(秒) | `armedTtlMs` | 120 | 标记后多久内有效（存储为 ms） |
 | 强制压缩冷却(秒) | `sweepMinIntervalMs` | 600 | 两次强制压缩的最小间隔（存储为 ms） |

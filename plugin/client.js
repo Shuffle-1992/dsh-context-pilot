@@ -270,16 +270,16 @@ window.__ModuleLoader__.load({
 			};
 			/** 字段备注：criticalRatio 动态追加**生效上限**（C-own，NS.engineCap 由 HUD 轮询下发）。
 			 *  上限值不写死（DSH 未来改 thresholdRatio 时自动跟随）；未探测到时只显示静态规则。
-			 *  用户要求（2026-10-08）：上限 = DSH 内置阈值 **− 0.5 个百分点**（内置 80% ⇒ 79.5%），
+			 *  用户要求（2026-10-08）：上限 = DSH 内置阈值 **− 5 个百分点**（内置 80% ⇒ 75%），
 			 *  确保插件线确定性地先于引擎自动压缩触发。 */
 			const hintFor = (field) => {
 				if (field.key !== "criticalRatio") return field.hint ?? "";
 				const cap = typeof NS.engineCap === "number" && Number.isFinite(NS.engineCap) ? NS.engineCap : null;
-				/* 一位小数：0.795 → 79.5%（四舍五入成 80% 就完全看不出那 0.5 个百分点了） */
+				/* 一位小数：0.75 → 75%、0.745 → 74.5%（四舍五入到整数就看不到余量的实际落点） */
 				const pct1 = (x) => `${Math.round(Number(x) * 1000) / 10}%`;
 				return cap === null
-					? `${field.hint}；上限 = DSH 内置阈值 − 0.5 个百分点（待探测，见弹窗阈值行）`
-					: `${field.hint}；上限 = DSH 内置阈值 − 0.5 个百分点（当前 ${pct1(cap)}），超出自动钳到该值`;
+					? `${field.hint}；上限 = DSH 内置阈值 − 5 个百分点（待探测，见弹窗阈值行）`
+					: `${field.hint}；上限 = DSH 内置阈值 − 5 个百分点（当前 ${pct1(cap)}），超出自动钳到该值`;
 			};
 			const dirty = draft !== null && FIELDS.some((f) => {
 				const cur = parseInput(f, valueOf(f));
@@ -344,7 +344,7 @@ window.__ModuleLoader__.load({
 					};
 					const { written } = await persist(values);
 					setDraft(null); // 以写入值清理草稿，避免残留脏值
-					/* C-own：persist 可能已把 criticalRatio 钳到**生效上限**（引擎阈值 − 0.5pp）——回读真实生效值展示 */
+					/* C-own：persist 可能已把 criticalRatio 钳到**生效上限**（引擎阈值 − 5pp）——回读真实生效值展示 */
 					const appliedCrit = Math.min(rec.criticalRatio, typeof NS.engineCap === "number" ? NS.engineCap : rec.criticalRatio);
 					const capNote = appliedCrit < rec.criticalRatio
 						? `（已按生效上限 ${Math.round(NS.engineCap * 1000) / 10}% 收敛）` : "";
@@ -1053,14 +1053,14 @@ window.__ModuleLoader__.load({
 							 * 同时字号 9px → 11px（用户要求「字体改大一些」）——删掉上限后行更短，
 							 * 11px 仍能一行放下，无需再靠缩小字号换空间。 */
 							const pct = (x, d) => `${Math.round((Number.isFinite(Number(x)) ? Number(x) : d) * 100)}%`;
-							/* 一位小数百分比：79.5% 这种值四舍五入到 80% 就看不出 0.5pp 余量了。 */
+							/* 一位小数百分比：0.745 → 74.5%（四舍五入到整数就看不到余量的实际落点）。 */
 							const pct1 = (x) => `${Math.round(Number(x) * 1000) / 10}%`;
 							const num = (x, d) => (Number.isFinite(Number(x)) ? Number(x) : d);
-							/* 用户要求（2026-10-08）：强制线**永远比 DSH 内置阈值低 0.5 个百分点**
-							 * （内置 80% ⇒ 上限 79.5%）。弹窗显示**生效值**（= min(配置, 上限)），
-							 * 否则用户看到 80% 却在实际 79.5% 触发。
+							/* 用户要求（2026-10-08）：强制线**永远比 DSH 内置阈值低 5 个百分点**
+							 * （内置 80% ⇒ 上限 75%）。弹窗显示**生效值**（= min(配置, 上限)），
+							 * 否则用户看到 80% 却在实际 75% 触发。
 							 * 仅当配置高于上限时追加「已按上限收敛」——这是**过渡态**（用户下次保存即被钳到
-							 * 79.5%），不是 2026-10-07 删掉的那种「恒定显示上限」的噪声。 */
+							 * 75%），不是 2026-10-07 删掉的那种「恒定显示上限」的噪声。 */
 							const critCap = num(v.criticalCap, null);
 							const critCfg = num(v.criticalRatio, 0.85);
 							const critEff = critCap != null ? Math.min(critCfg, critCap) : critCfg;
@@ -1131,8 +1131,8 @@ window.__ModuleLoader__.load({
 									gen: r.gen || "",
 									/* 本会话压缩记录明细（host 严格按 sid 过滤）：{at, text}[] */
 									actsDetail: Array.isArray(r.actsDetail) ? r.actsDetail : null,
-									/* 生效强制线上限（= 引擎阈值 − 0.5pp）：既给保存路径钳制用（NS.engineCap），
-									 * 也给弹窗阈值行显示**生效值**用（否则用户看到 80%、实际 79.5% 触发）。 */
+									/* 生效强制线上限（= 引擎阈值 − 5pp）：既给保存路径钳制用（NS.engineCap），
+									 * 也给弹窗阈值行显示**生效值**用（否则用户看到 80%、实际 75% 触发）。 */
 									criticalCap: typeof r.criticalCap === "number" && Number.isFinite(r.criticalCap) ? r.criticalCap : null,
 								};
 								/* C-own：引擎阈值上限（host 动态探测，方案 C 钳制用）——存 NS 供保存路径读取 */
