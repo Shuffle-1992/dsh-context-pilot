@@ -58,15 +58,14 @@ const DSH_LLM_REL = ['dsh', 'node_modules', '@deepseek-ai', 'dsh-llm', 'lib', 'i
 const M3_DEFAULTS = {
   enabled: true,
   dryRun: false,
-  highRatio: 0.6, // 审计参考线（决策主体已移交给模型，此值仅用于审计口径）
-  criticalRatio: 0.85, // 危险线：pre-step 无条件压（官方 pressure 路径）；GLM 套餐可降 0.80
-  lightTaskChars: 4000, // 轻任务字符阈值（仅 inbox 审计口径）
-  markerMinRatio: 0.2, // 标记通道最低占用，**同时是决策卡门槛**（2026-10-07 起二者统一）；DS 建议 0.30／GLM 等 1:4 档建议 0.15–0.20
-  armedTtlMs: 120_000, // 标记武装有效期（事件→idle 之间）
+  criticalRatio: 0.85, // 强制压缩线：pre-step/idle 无条件压（官方 pressure 路径）；GLM 等 1:4 档可降 0.80
+  markerMinRatio: 0.2, // 智能压缩线：模型标记生效门槛，**同时是决策卡注入门槛**（2026-10-07 起二者统一）
+  armedTtlMs: 120_000, // 标记有效期（事件→idle 之间）
   marker: '[cp:compact]', // M3.6：模型回复尾部标记 → idle 后自动压缩（用户零输入，标记在回复里可见）
-  // policyCardMinRatio 已于 2026-10-07 退役（用户决定）：决策卡门槛 = markerMinRatio，见 renderPolicyCard。
-  // 旧 config 里若仍有该键，mergeConfig 不再读取，面板也不再显示（不删除键以免报错，静默忽略）。
-  sweepMinIntervalMs: 600_000, // safety-net 两次 idle 扫除最小间隔（marker 模式不受限）
+  // policyCardMinRatio / highRatio / lightTaskChars 已于 2026-10-07 退役（用户决定）：
+  //   - 决策卡门槛 = markerMinRatio（消除「卡未教/标记不可达」死区）
+  //   - highRatio/lightTaskChars 是「高风险+轻任务建议压缩」的旧审计参数，决策主体移交模型后已无触发作用
+  sweepMinIntervalMs: 600_000, // 强制压缩冷却：两次兜底压缩的最小间隔（标记模式不受限）
 };
 // 注：关键词「先压缩」通道已按用户决定裁撤（2026-10-06）——"要写先压缩不如直接手动执行压缩指令"。
 
@@ -224,16 +223,16 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       const live = (v) => (v !== null && typeof v === 'object' && typeof v.get === 'function' ? v.get() : v);
       if (!config || typeof config !== 'object') return;
       const raw = {};
-      for (const k of ['enabled', 'dryRun', 'highRatio', 'criticalRatio', 'lightTaskChars', 'marker', 'markerMinRatio', 'armedTtlMs', 'sweepMinIntervalMs']) {
+      for (const k of ['enabled', 'dryRun', 'criticalRatio', 'marker', 'markerMinRatio', 'armedTtlMs', 'sweepMinIntervalMs']) {
         raw[k] = live(config[k]);
       }
       if (typeof raw.enabled === 'boolean') M3.enabled = raw.enabled;
       if (typeof raw.dryRun === 'boolean') M3.dryRun = raw.dryRun;
       if (typeof raw.marker === 'string') M3.marker = raw.marker;
-      for (const k of ['highRatio', 'criticalRatio', 'markerMinRatio']) {
+      for (const k of ['criticalRatio', 'markerMinRatio']) {
         if (typeof raw[k] === 'number' && Number.isFinite(raw[k]) && raw[k] >= 0 && raw[k] <= 1) M3[k] = raw[k];
       }
-      for (const k of ['lightTaskChars', 'armedTtlMs', 'sweepMinIntervalMs']) {
+      for (const k of ['armedTtlMs', 'sweepMinIntervalMs']) {
         if (typeof raw[k] === 'number' && Number.isFinite(raw[k]) && raw[k] >= 0) M3[k] = raw[k];
       }
     } catch (e) {
@@ -264,7 +263,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
    *  （面板保存能成是因为 client→remote 不经插件 apply scope）⇒ 旧推送通道结构性不可用。
    *  现改为：压缩/武装事件写 state.m5.hud，client 半经 wire.host.mjs 的 getHud() 每 5s 拉取；
    *  跨重启显示由启动回填（读报告最近一次 m3-act）补齐。 */
-  const hudReasonLabel = (reason) => (reason === 'marker' ? '标记' : reason === 'safety-net' ? '兜底' : reason === 'pressure' ? '危险线' : String(reason ?? ''));
+  const hudReasonLabel = (reason) => (reason === 'marker' ? '智能压缩' : reason === 'safety-net' ? '兜底' : reason === 'pressure' ? '强制压缩' : String(reason ?? ''));
   /* B1（审查）：formatAct 统一「hh:mm · 原因 · 省 xK」模板——运行期（at 缺省=现在）与启动回填（at=记录时刻）共用 */
   const formatAct = (reason, tokens, at) => {
     const d = at != null ? new Date(at) : new Date();
@@ -360,7 +359,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
   };
   const maybeResumeAfterMarker = (sid, reason) => {
     try {
-      if (reason !== 'marker') return; // 仅显式标记触发恢复（兜底/危险线是无人值守场景，无挂起任务）
+      if (reason !== 'marker') return; // 仅显式标记触发恢复（兜底/强制压缩是无人值守场景，无挂起任务）
       /* A6（审查）：上限判定前置——不先删 pending/熄灯，保留「待执行」可见性，徽章改文案请用户手动接管 */
       const done = resumeCountBySid.get(sid) ?? 0;
       if (done >= M5_RESUME_MAX) {
@@ -597,25 +596,18 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     return { ok: true, used, surface, window, ratio };
   };
 
-  /** M3 决策：高占用 + 轻任务（或危险占用）→ 建议先压缩。 */
-  const decideCompaction = (agent, taskChars) => {
+  /** M3 决策：仅剩强制压缩线（决策主体是模型标记，此函数供 pre-step/idle 兜底与审计）。 */
+  const decideCompaction = (agent) => {
     const mr = measureRatio(agent?.session);
     if (!mr.ok) return { ok: false, error: mr.error };
     const { used, window, ratio } = mr;
     if (ratio == null) return { ok: false, error: 'no window/ratio' };
 
-    let compact = false;
-    let reason = 'no';
+    // 2026-10-07：highRatio/lightTaskChars 审计分支已删除（决策主体移交模型后无触发作用）
     if (ratio >= M3.criticalRatio) {
-      compact = true;
-      reason = `critical-usage(${(ratio * 100).toFixed(1)}%)`;
-    } else if (ratio >= M3.highRatio && taskChars <= M3.lightTaskChars) {
-      compact = true;
-      reason = `high-usage-light-task(${(ratio * 100).toFixed(1)}%, ${taskChars}ch)`;
-    } else if (ratio >= M3.highRatio) {
-      reason = `high-usage-heavy-task(${(ratio * 100).toFixed(1)}%, ${taskChars}ch): 场景2 可建议先压缩腾空间（决策归模型/用户）`;
+      return { ok: true, compact: true, reason: `critical-usage(${(ratio * 100).toFixed(1)}%)`, ratio, used, window };
     }
-    return { ok: true, compact, reason, ratio, used, window, taskChars };
+    return { ok: true, compact: false, reason: 'no', ratio, used, window };
   };
 
   /* ---- 报告落盘（追加式 history，重启取证入口） ----
@@ -964,7 +956,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     '【context-pilot 插件说明（本会话仅此一次）】每轮开头的「Context usage」行就是本插件在测量上下文占用。',
     '占用达到阈值时，该行下方会附「压缩决策卡」：若接下来的任务不依赖更早的对话细节，可本轮挂起——写一行「待执行：<任务>」，并在回复最后一行单独写 ' + M3.marker + '；',
     '回合结束后插件自动压缩上下文（旧对话收为摘要），并自动拉起新一轮让你继续该任务（以「(context-pilot 自动恢复)」开头），用户无需重发。',
-    '若任务依赖细节则照常执行、勿写标记；占用达 ' + Math.round(M3.criticalRatio * 100) + '% 危险线时系统自动压缩。标记不要连续多轮写（压缩后占用需重新累积）。',
+    '若任务依赖细节则照常执行、勿写标记；占用达 ' + Math.round(M3.criticalRatio * 100) + '% 强制压缩线时系统自动压缩。标记不要连续多轮写（压缩后占用需重新累积）。',
   ].join('');
 
   state.listeners['agent/pre-step'] = addListener(
@@ -1039,7 +1031,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       const sid0 = String(pick(agent.session.id, agent.sessionId, 'unknown'));
       if (text) lastUserTextBySid.set(sid0, text.slice(0, 500)); // M5.5：记住最近任务文本（恢复兜底）
       const taskChars = text.length;
-      const d = decideCompaction(agent, taskChars);
+      const d = decideCompaction(agent);
       state.m3.decisions += 1;
       state.m3.lastDecision = {
         at: new Date().toISOString(),
@@ -1077,7 +1069,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         publishHud({ hudArmed: '' }); // M5：武装过期即熄灯
       }
       if (sweepInFlight.has(sid)) return;
-      const d = decideCompaction(agent, 0); // idle，无任务文本
+      const d = decideCompaction(agent); // idle，无任务文本
       if (!d.ok || d.ratio == null) return;
       const armedAt = armedMark?.at ?? null; // A2：失败重武装保原始时刻（TTL 自然封顶重试窗口）
       const markerShot = !!(armedMark && d.ratio >= M3.markerMinRatio); // 过期项已被上面清除，无需再比 TTL

@@ -61,15 +61,13 @@ window.__ModuleLoader__.load({
 		 *   - GLM Coding Plan：缓存命中 1.7 vs 输入 6.9（1:4.1，命中仍计费）⇒ 上下文是持续失血，压早更省额度。
 		 *  两者「压低绝对值都省钱」，但 GLM 收益约 2 倍于 DeepSeek（上下文成本占比 ~6.5x vs ~2x）。 */
 		const FIELDS = [
-			{ key: "enabled", label: "总开关", type: "bool", def: true, hint: "关闭后不注入、不决策、不压缩（完全恢复原生 DSH）" },
-			{ key: "dryRun", label: "演习模式", type: "bool", def: false, hint: "只记录决策，不真执行压缩" },
-			{ key: "criticalRatio", label: "危险线", type: "num", def: 0.85, hint: "达此值无条件强制压缩。推荐 0.85（DeepSeek）／0.80（GLM 套餐）" },
-			{ key: "marker", label: "压缩标记", type: "text", def: "[cp:compact]", hint: "模型回复尾行标记；置空字符串关闭标记通道" },
-			{ key: "markerMinRatio", label: "标记最低占用", type: "num", def: 0.2, hint: "标记生效门槛，**同时决定何时注入决策卡**（2026-10-07 起两者统一）。推荐 0.30（DeepSeek 1:50）／0.22（1:20）／0.17（1:8）／0.15（1:4）" },
-			{ key: "armedTtlMs", label: "标记武装有效期(ms)", type: "int", def: 120000, hint: "标记→空闲超过此值失效；120000（2 分钟）够用" },
-			{ key: "highRatio", label: "审计参考线", type: "num", def: 0.6, hint: "仅审计口径，不参与压缩触发（原始设计：占用≥0.6 且任务轻时曾建议压缩）" },
-			{ key: "lightTaskChars", label: "轻任务字符阈值", type: "int", def: 4000, hint: "仅审计口径，不参与压缩触发（原始设计：任务字符数≤此值算轻任务）" },
-			{ key: "sweepMinIntervalMs", label: "兜底扫除最小间隔(ms)", type: "int", def: 600000, hint: "危险线兜底的最小间隔；标记模式不受限" },
+			{ key: "enabled", label: "总开关", type: "bool", def: true, hint: "关闭后完全恢复原生 DSH" },
+			{ key: "dryRun", label: "演习模式", type: "bool", def: false, hint: "只记录，不真压缩" },
+			{ key: "markerMinRatio", label: "智能压缩线", type: "num", def: 0.2, hint: "占用达此值时，模型可自行决定压缩并自动续跑" },
+			{ key: "criticalRatio", label: "强制压缩线", type: "num", def: 0.85, hint: "占用达此值无条件强制压缩" },
+			{ key: "marker", label: "压缩标记", type: "text", def: "[cp:compact]", hint: "模型回复尾行标记；置空则关闭智能压缩" },
+			{ key: "armedTtlMs", label: "标记有效期(ms)", type: "int", def: 120000, hint: "标记后多久内有效" },
+			{ key: "sweepMinIntervalMs", label: "强制压缩冷却(ms)", type: "int", def: 600000, hint: "两次强制压缩的最小间隔" },
 		];
 
 		//#region helpers
@@ -289,7 +287,7 @@ window.__ModuleLoader__.load({
 					setDraft(null); // 以写入值清理草稿，避免残留脏值
 					const text = written === 0
 						? "推荐值与当前配置一致，无需写入。"
-						: `已应用并回读校验通过（${written} 项：标记最低占用(含决策卡) ${rec.markerMinRatio} / 危险线 ${rec.criticalRatio}）`;
+						: `已应用并回读校验通过（${written} 项：智能压缩线 ${rec.markerMinRatio} / 强制压缩线 ${rec.criticalRatio}）`;
 					setMessage({ kind: "ok", text: `${text}。` });
 					return { ok: true, text };
 				} catch (error) {
@@ -304,7 +302,7 @@ window.__ModuleLoader__.load({
 				const crit = Math.round(valueOf(FIELDS.find((f) => f.key === "criticalRatio")) * 100);
 				const marker = valueOf(FIELDS.find((f) => f.key === "marker"));
 				return el("span", { className: "dcp-summary" },
-					`危险线 ${crit}% ｜ 标记 ${marker ? marker : "关闭"} ｜ 演习 ${valueOf(FIELDS.find((f) => f.key === "dryRun")) ? "开" : "关"}`);
+					`强制压缩线 ${crit}% ｜ 标记 ${marker ? marker : "关闭"} ｜ 演习 ${valueOf(FIELDS.find((f) => f.key === "dryRun")) ? "开" : "关"}`);
 			}
 			return el("div", { className: "dcp-panel" },
 				el("div", { className: "dcp-grid" },
@@ -403,8 +401,8 @@ window.__ModuleLoader__.load({
 				) : el("div", { className: "dcp-hint" }, "请输入有效的正数价格。"),
 				rec ? el("div", { className: "dcp-rec" },
 					el("span", null, "推荐："),
-					el("span", null, "标记最低占用(含决策卡) ", el("b", null, rec.markerMinRatio)),
-					el("span", null, "危险线 ", el("b", null, rec.criticalRatio)),
+					el("span", null, "智能压缩线 ", el("b", null, rec.markerMinRatio)),
+					el("span", null, "强制压缩线 ", el("b", null, rec.criticalRatio)),
 				) : null,
 				rec ? el("div", { className: "dcp-hint" }, rec.verdict) : null,
 				rec ? el("div", { className: "dcp-actions" },
@@ -669,7 +667,7 @@ window.__ModuleLoader__.load({
 				const buildHudRow = () => {
 					const row = document.createElement("div");
 					row.dataset.dcpHud = "1";
-					/* 行结构：line1 = 压缩记录+徽章（居中），line2 = 阈值速览（标记/决策卡/危险线，配置镜像实时跟随） */
+					/* 行结构：line1 = 压缩记录+徽章（居中），line2 = 阈值速览（智能压缩线/强制压缩线，配置镜像实时跟随） */
 					row.style.cssText = "display:flex;flex-direction:column;align-items:center;gap:1px;padding:2px 12px 8px;text-align:center;";
 					const line1 = document.createElement("div");
 					line1.style.cssText = "display:flex;align-items:center;justify-content:center;gap:8px;";
@@ -705,9 +703,9 @@ window.__ModuleLoader__.load({
 								chips.appendChild(c);
 							}
 							if (v.dryRun === true) chips.appendChild(chip("演习", "rgba(128,128,128,.9)"));
-							/* 阈值速览：标记最低占用（含决策卡）/ 危险线（来自配置镜像，面板改值即跟随） */
+							/* 阈值速览：智能压缩线 / 强制压缩线（配置镜像实时跟随） */
 							const pct = (x, d) => `${Math.round((Number.isFinite(Number(x)) ? Number(x) : d) * 100)}%`;
-							thr.textContent = `标记最低占用(含决策卡) ${pct(v.markerMinRatio, 0.2)} ｜ 危险线 ${pct(v.criticalRatio, 0.85)}`;
+							thr.textContent = `智能压缩线 ${pct(v.markerMinRatio, 0.2)} ｜ 强制压缩线 ${pct(v.criticalRatio, 0.85)}`;
 						} catch { /* 快照失败保持现状 */ }
 					};
 					if (typeof settingsScope.subscribe === "function") liveRows.push({ row, off: settingsScope.subscribe(renderHud) }); // C4：off 在册

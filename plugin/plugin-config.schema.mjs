@@ -77,16 +77,16 @@ export async function resolveSchemastery() {
 function buildWith(z) {
   try {
     return z.object({
-      enabled: z.boolean().default(true).description('总开关（关闭后不注入、不决策、不压缩，完全恢复原生 DSH）').volatile(),
-      dryRun: z.boolean().default(false).description('演习模式：只记录决策不真执行压缩').volatile(),
-      highRatio: z.number().default(0.6).description('审计参考线（决策主体是模型标记，此值仅用于审计口径）').volatile(),
-      criticalRatio: z.number().default(0.85).description('危险线：达此值无条件强制压缩。推荐 0.85（DeepSeek）／0.80（GLM 套餐）').volatile(),
-      lightTaskChars: z.number().default(4000).description('轻任务字符阈值（仅审计口径，不参与触发）').volatile(),
-      marker: z.string().default('[cp:compact]').description('模型回复尾部标记（置空字符串关闭标记通道）').volatile(),
-      markerMinRatio: z.number().default(0.2).description('标记通道最低占用，**同时是决策卡注入门槛**（2026-10-07 起二者统一）。推荐 0.30(1:50)／0.22(1:20)／0.17(1:8)／0.15(1:4)').volatile(),
-      armedTtlMs: z.number().default(120000).description('标记武装有效期（毫秒）：标记→空闲超过此值失效，120000（2 分钟）够用').volatile(),
-      // policyCardMinRatio 已于 2026-10-07 退役（用户决定）：决策卡门槛 = markerMinRatio，消除「卡未教/标记不可达」死区
-      sweepMinIntervalMs: z.number().default(600000).description('危险线兜底扫除的最小间隔（毫秒；标记模式不受限）').volatile(),
+      enabled: z.boolean().default(true).description('总开关（关闭后完全恢复原生 DSH）').volatile(),
+      dryRun: z.boolean().default(false).description('演习模式：只记录，不真压缩').volatile(),
+      criticalRatio: z.number().default(0.85).description('强制压缩线：占用达此值无条件强制压缩').volatile(),
+      marker: z.string().default('[cp:compact]').description('压缩标记：模型回复尾行标记（置空则关闭智能压缩）').volatile(),
+      markerMinRatio: z.number().default(0.2).description('智能压缩线：占用达此值时，模型可自行决定压缩并自动续跑').volatile(),
+      armedTtlMs: z.number().default(120000).description('标记有效期（毫秒）：标记后多久内有效').volatile(),
+      // policyCardMinRatio / highRatio / lightTaskChars 已于 2026-10-07 退役（用户决定）：
+      // 决策卡门槛 = markerMinRatio；highRatio/lightTaskChars 曾是「高风险+轻任务建议压缩」的审计参数，
+      // 决策主体移交模型后已无触发作用，删除以免误导。
+      sweepMinIntervalMs: z.number().default(600000).description('强制压缩冷却（毫秒）：两次强制压缩的最小间隔').volatile(),
       hudLastAct: z.string().default('').description('M5 状态：最近一次压缩摘要（host 自动写入，无需手改）').volatile(),
       hudArmed: z.string().default('').description('M5 状态：标记武装中时为 "armed"（host 自动写入）').volatile(),
       hudPending: z.string().default('').description('M5.5 状态：挂起待恢复的任务（JSON，host 自动写入）').volatile(),
