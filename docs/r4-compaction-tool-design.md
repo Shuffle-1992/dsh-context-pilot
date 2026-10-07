@@ -166,16 +166,38 @@ if (wanted) {
 
 ## 7. 待办
 
-1. **真机 E2E**：让模型调用 `compact_context`，核对 `m3.compactToolCalls` /
-   `m3.compactIntents` / `m3.lastCompactIntent.trigger`（应为 `pressure` 或 `context-overflow`）
-   / `preStepOk`，并确认**本轮没有中断**、**没有任何消息注入**。
+1. **真机 E2E**：让模型调用 `compact_context` —— 见下方 §7.1 验收清单。
 2. **marker 通道彻底退役**：删 `M3.marker` / `armedTtlMs` / `agent/inbox/inserted` 的标记解析 /
    武装灯 / 「待执行」徽章 / `pendingBySid` / `lastUserTextBySid` / `state.m55` / 面板两个字段。
    （`markerMinRatio` 需保留——它同时是**决策卡注入门槛**。）
-3. **保留策略可选**：`context-overflow` 的 retain=0 较激进。若真机体验显示「压太狠」，
-   可由插件自行计算范围后调 `compactRegion(start, end, agent, signal)`，
-   按引擎 `retainRatio` 复刻保留预算（需复刻 `toolPairingBalancedBefore` 的回退逻辑，
-   或在越界时捕获异常回退 overflow）。
+3. **保留策略可选（用户已确认要做）**：`context-overflow` 的 `retainTokens = 0` 较激进
+   （只保留最后一个节点）。E2E 通过后改为「**自己算范围 + 沿用官方兜底**」：
+   - 自己算：按引擎 `retainRatio`（默认 0.16）算出保留预算，从尾部回退选范围，调
+     `compactRegion(start, end, agent, signal)`；
+   - 兜底：自选范围若被引擎校验拒绝（**切断 tool-call/result 配对**是最可能的失败模式，
+     `validateSurfaceRegion` 会抛），则 `catch` 后回退 `compactIfNeeded(agent, 'context-overflow', signal)`；
+   - 这样在「保留近端细节」与「低占用强制压缩」之间取得可控性，同时不依赖复刻引擎的
+     `toolPairingBalancedBefore`（内部函数，不导出）。
+
+### 7.1 E2E 验收清单（调用 `compact_context` 后**从报告核对**）
+
+模型侧动作：调用一次 `compact_context`（可带 `reason`），**然后直接继续干活，不要停**。
+下一步的 `agent/pre-step` 应当执行压缩，之后所有步骤跑在压缩后的上下文上。
+
+| 核对项 | 期望 | 失败含义 |
+|---|---|---|
+| `m3.compactToolCalls` | **+1** | 工具没被执行（注册/作用域问题） |
+| `m3.compactIntents` | **+1** | 意图登记了但 pre-step 没消费（懒安装顺序 / sid 不一致） |
+| `m3.lastCompactIntent.trigger` | `pressure` 或 `context-overflow` | 走了别的路径 |
+| `m3.lastCompactIntent.acted` | **true** | 压缩未真正发生 |
+| `m3.lastCompactIntent.shadowedTokens` | > 0 | 压了个空 |
+| `m3.preStepActs` / `preStepOk` | 各 **+1** | pre-step 路径没跑到 |
+| `m3.lastPreStepError` | `null` | 有错误 → 立即看 stack |
+| **本轮是否中断** | **否**——工具返回后模型继续到下一步 | 若中断，说明「工具调用保持本轮」的假设不成立 |
+| **是否有消息注入** | **无**（`agent/inbox/inserted` 事件不应因恢复而产生） | 有 ⇒ 伪造恢复残留 |
+
+⚠️ 压缩会走 `context-overflow`（当前占用 < 80%，`pressure` 会返回 null）⇒ 保留近端 ≈0，
+本次对话会被大幅收掉。**验收所需的全部信息都在 host 侧报告里**，模型侧上下文丢了不影响核对。
 
 ## 8. 教训
 
