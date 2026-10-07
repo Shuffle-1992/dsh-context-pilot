@@ -184,9 +184,12 @@ export function createCompactTool(deps) {
         + '占用偏高、或接下来的任务繁重需要预留空间、且不再依赖更早的对话细节时使用；'
         + '若仍需引用之前的文件路径/结论/报错现场/长推理链中间量，先不要调用。',
       parameters: {
+        /* ⚠️ 可选参数必须**省略** `required`——写成 `required: false` 会被 defineTool 拒绝：
+         * 实测 `unsupported JSON schema: parameters.reason.required must be true when present`
+         * ⇒ 工具**静默不注册**、模型看不到它。此坑由 m3.compactTool 取证字段当场暴露
+         * （若无该字段，现象只是「模型从不用这个工具」，无从定位）。 */
         reason: {
           type: 'string',
-          required: false,
           description: '（可选）为什么现在压缩，便于用户在报告里核查决策。',
         },
       },

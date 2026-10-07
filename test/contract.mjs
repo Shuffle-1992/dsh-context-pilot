@@ -385,6 +385,13 @@ ok('工具 output schema 三字段且 additionalProperties:false',
   /additionalProperties: false/.test(ct) && /ok: \{ type: 'boolean', required: true/.test(ct)
   && /scheduled: \{ type: 'string'/.test(ct) && /error: \{ type: 'string'/.test(ct),
   'output schema 与实现漂移');
+/* ⚠️ 真机踩过的坑（2026-10-08，部署后由 m3.compactTool 当场暴露）：
+ * 可选参数写 `required: false` 会被 defineTool 拒绝——
+ * `unsupported JSON schema: parameters.reason.required must be true when present`
+ * ⇒ 工具**静默不注册**，现象只是「模型从不用它」。可选参数必须**省略** required。 */
+ok('可选参数不写 required:false（defineTool 会拒收 ⇒ 工具静默不注册）',
+  !/required: false/.test(ctNoComment),
+  'parameters 里出现 required:false ⇒ defineTool 报 unsupported JSON schema，工具注册失败');
 ok('意图有 TTL（防陈旧意图在下一轮任务里突然触发）',
   /export const INTENT_TTL_MS = 120_000;/.test(ct) && /Date\.now\(\) - it\.at > INTENT_TTL_MS/.test(ct),
   '意图永不过期 ⇒ 登记后隔很久仍会触发压缩');
