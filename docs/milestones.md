@@ -895,15 +895,29 @@ progress 不收敛 / 不用完整时间 / 恢复无参回退 / 过滤退回全�
 1. **弹窗「智能思考」行补色块**：原本只有「智能压缩」行有 8px 圆角色块（`#4c7dff`），
    右侧「智能思考」组只有文字标签 ⇒ 两行视觉不成对。现补同款色块（8px / 圆角 2px / 同色）。
    刻意与「智能压缩」同色（本插件的强调色）；若想区分两个开关的色相，改一处即可。
-2. **chip 就绪色 绿 → 品牌蓝**（用户要求「参考输入框的发送按钮」）：
-   `--dsw-alias-state-success-primary` → **`--dsw-alias-brand-primary`**。
-   佐证该 token 就是发送按钮蓝：本仓既有回退值 `rgba(76,125,255,.9)` = **`#4c7dff`**
-   （client.css 的 `.dcp-switch:has(input:checked)`），与弹窗行色块同源，故回退取同值。
-   冷却态仍是 `--dsw-alias-state-warn-primary`（琥珀），两态对比更清晰。
+2. **chip 就绪色 绿 → 发送按钮蓝**（用户要求「参考输入框的发送按钮」）。
+   ⚠️ **这一步真机返工过一次，教训值得记**：
+   第一版我**按 token 名字**选了 `--dsw-alias-brand-primary`，结果 chip 渲染成**灰白色**（用户截图反馈）。
+   去 `app.asar` 用 `asar-query` 查真值才发现：
+   - `--dsw-alias-brand-primary` = `--dsw-static-neutral-bluish-1000`（深色）/ `neutral-bluish-50`（浅色 = #f9fafb）
+     —— 它是**随主题反转的中性高对比色**（`--dsw-alias-button-primary-fill` 正是它，即「白底黑字」那类主按钮），**根本不是蓝**；
+   - 真正的发送按钮在 `dsh-client-ui-conversation/lib/client.js`：
+     ```css
+     .RlGAzG_primary{ background: var(--dsw-alias-button-info-fill); border-radius:999px; width:34px; height:34px; }
+     ```
+     （该按钮的 i18n 键是 `input.send` = 「发送消息」）
+   - 而 `--dsw-alias-button-info-fill: var(--dsw-static-deepseek-500)` ≈ **#4176e6**。
+   ⇒ 最终**复用同一个 token**（`--dsw-alias-button-info-fill`）而非近似色值，
+   chip 与发送按钮在任何主题下都自动一致；回退值取该 token 的真值 `#4176e6`。
+   **教训：按名字挑 token 等于猜。** 色值必须从源码/计算样式里**查证**——
+   同一轮里我用 `getComputedStyle` 复制邻居圆角/字号是对的，这次却偷懒按名字选了。
 
-**防回归**：contract §6.5/§6.9 各补绊线（色块存在 + 尺寸色值一致 / 就绪色是品牌 token 且不含绿），
-**5 项变异全部被抓住**（含「退回硬编码绿」「色块尺寸不一致」「色块颜色不一致」）。
-总计 **324 断言全通过**。
+**防回归**：contract §6.5/§6.9 各补绊线（色块存在 + 尺寸色值一致 / 就绪色必须是 **button-info-fill**
+且不得含绿、不得退回 `brand-primary`），**9 项变异全部被抓住**
+（含「退回硬编码绿」「退回中性 brand-primary」「换成非发送按钮 token」「色块尺寸/颜色不一致」）。
+色值判据改为**精确抽取 `C_OK`/`C_WARN` 声明行**，不扫整段——本轮又栽在「注释里引用了错误 token 当反例」
+导致「不得出现」断言被注释判失败（**第二次**同类问题）。
+总计 **325 断言全通过**。
 
 #### 真机部署当场抓到一个真 bug（懒安装留痕的又一次回报）
 

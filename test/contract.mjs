@@ -301,15 +301,22 @@ ok('chip 不再内联显示冷却秒数（用户要求删除）',
 ok('chip 两态用 data-state 标记（cooling / ready）',
   /"data-state": cooling \? "cooling" : "ready"/.test(chipBody),
   '缺 data-state ⇒ 两态不可区分（也失去可测锚点）');
-ok('chip 两态用主题 token（冷却=warn / 就绪=品牌蓝）',
-  /--dsw-alias-state-warn-primary/.test(chipBody) && /--dsw-alias-brand-primary/.test(chipBody),
-  '未用主题状态 token ⇒ 两态颜色不跟随主题');
+/* chipBody 含**大段说明注释**（里面会引用错误 token 作为反例）⇒ 判颜色必须只看**声明行本身**，
+ * 否则「不得出现某 token」会被注释判失败（本轮第二次栽在这点：前一次是 ctNoComment）。 */
+const cOkDecl = /const C_OK = "([^"]+)"/.exec(chipBody)?.[1] ?? '';
+const cWarnDecl = /const C_WARN = "([^"]+)"/.exec(chipBody)?.[1] ?? '';
+ok('解析出 chip 两态颜色声明', cOkDecl.length > 0 && cWarnDecl.length > 0, '未匹配到 C_OK / C_WARN 声明');
+ok('chip 两态用主题 token（冷却=warn / 就绪=发送按钮填充色）',
+  /--dsw-alias-state-warn-primary/.test(cWarnDecl) && /--dsw-alias-button-info-fill/.test(cOkDecl),
+  '未用主题 token ⇒ 两态颜色不跟随主题');
 /* 用户要求（2026-10-08）：「智能思考就绪的绿色改成蓝色，参考输入框的发送按钮」。
- * 发送按钮是主操作色 = --dsw-alias-brand-primary；本仓既有回退值 rgba(76,125,255,.9)=#4c7dff
- * 正好与弹窗行内色块同源（见 client.css 的 .dcp-switch:has(input:checked)），故回退取同值。 */
-ok('chip 就绪色是品牌蓝而非绿色（用户要求对齐发送按钮）',
-  !/--dsw-alias-state-success-primary/.test(chipBody) && !/#34c759/.test(chipBody),
-  '仍是绿色 success token ⇒ 用户要求改成输入框发送按钮的蓝色');
+ * ⚠️ 本断言经历过一次真机返工：第一版按**名字**选了 `--dsw-alias-brand-primary`，chip 渲染成**灰白**。
+ *    查 asar 真值才发现 brand-primary = `--dsw-static-neutral-bluish-1000/50`（随主题反转的中性色，非蓝）；
+ *    真正对的是发送按钮本体的 `.RlGAzG_primary{background:var(--dsw-alias-button-info-fill)}`。 */
+ok('chip 就绪色 = 发送按钮的填充 token（不含绿 / 不含 brand-primary）',
+  !/--dsw-alias-state-success-primary/.test(cOkDecl) && !/#34c759/.test(cOkDecl)
+  && !/--dsw-alias-brand-primary/.test(cOkDecl),
+  '就绪色不是发送按钮的 token（绿色残留，或退回了中性反转的 brand-primary）');
 ok('chip 进度条宽度由冷却进度驱动',
   /const progress = cooling \? Math\.min\(1, Math\.max\(0, \(totalMs - remainMs\) \/ totalMs\)\) : 1;/.test(chipBody) &&
   /width: `\$\{progress \* 100\}%`/.test(chipBody),

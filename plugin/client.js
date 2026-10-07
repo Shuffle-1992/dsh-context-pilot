@@ -610,10 +610,18 @@ window.__ModuleLoader__.load({
 			const progress = cooling ? Math.min(1, Math.max(0, (totalMs - remainMs) / totalMs)) : 1;
 			const coolLeft = Math.ceil(remainMs / 1000);
 			const C_WARN = "var(--dsw-alias-state-warn-primary, #ff9f0a)";
-			/* 2026-10-08 用户要求：就绪态由**绿色**改为**品牌蓝**（「参考输入框的发送按钮」）——
-			 * 发送按钮是主操作色，用的就是 --dsw-alias-brand-primary；回退值与弹窗行色块 #4c7dff 同源，
-			 * 保证「行内色块 ↔ chip 就绪色」在 token 缺失时仍一致。 */
-			const C_OK = "var(--dsw-alias-brand-primary, #4c7dff)";
+			/* 2026-10-08 用户要求：就绪态由**绿色**改为**发送按钮的蓝色**。
+			 * ⚠️ 第一次改错了 token，教训记在这里：
+			 *   我先按名字选了 `--dsw-alias-brand-primary`，结果 chip 渲染成**灰白色**。
+			 *   去 app.asar 查真值才发现：`--dsw-alias-brand-primary` = `--dsw-static-neutral-bluish-1000`
+			 *   （深色）/ `neutral-bluish-50`（浅色，= #f9fafb）——它是**随主题反转的中性高对比色**
+			 *   （`--dsw-alias-button-primary-fill` 就是它，即「白底黑字」那类主按钮），**根本不是蓝**。
+			 *   真正的发送按钮在 `.../dsh-client-ui-conversation/lib/client.js`：
+			 *     `.RlGAzG_primary{background:var(--dsw-alias-button-info-fill);border-radius:999px;width:34px;height:34px}`（"发送消息" 键 input.send）
+			 *   而 `--dsw-alias-button-info-fill: var(--dsw-static-deepseek-500)`。
+			 * ⇒ 直接复用**同一个 token**（而非近似色值），chip 与发送按钮在任何主题下都自动一致。
+			 *   回退值取该 token 的真值 #4176e6。 */
+			const C_OK = "var(--dsw-alias-button-info-fill, #4176e6)";
 			const accent = cooling ? C_WARN : C_OK;
 			const tip = [
 				`模型：${shown.provider}/${shown.model}`,
