@@ -263,23 +263,49 @@ window.__ModuleLoader__.load({
 				if (settingsScope.subscribe === void 0) return void 0;
 				return settingsScope.subscribe(() => setRev((v) => v + 1));
 			}, [settingsScope]);
+			/**
+			 * 生效强制线上限（= 引擎阈值 − 5pp）。
+			 * ⚠️ 真 bug（2026-10-08 用户实测）：上限原先**只由悬浮弹窗的 pullHud 写入 `NS.engineCap`**，
+			 *    而面板是**独立表面**——用户没开过弹窗时 `NS.engineCap` 恒为 null ⇒
+			 *    ① 备注一直显示「待探测」② 保存时**不钳制**，设 0.8 就真存成 0.8（用户截图所见）。
+			 *    另外 `NS.engineCap` 是普通对象属性，改了不会触发重渲染 ⇒ 必须用 React state。
+			 *    面板于是**自己拉一次**（无参查询即返回 criticalCap）。
+			 */
+			const [engineCap, setEngineCap] = react.useState(
+				() => (typeof NS.engineCap === "number" && Number.isFinite(NS.engineCap) ? NS.engineCap : null),
+			);
+			react.useEffect(() => {
+				let alive = true;
+				const pullCap = async () => {
+					try {
+						if (!hudRemoteSvc || typeof hudRemoteSvc.getHud !== "function") return;
+						const raw = await hudRemoteSvc.getHud("");
+						const env = raw && typeof raw === "object" && "value" in raw ? (raw.ok ? raw.value : null) : raw;
+						const c = env && typeof env.criticalCap === "number" && Number.isFinite(env.criticalCap) ? env.criticalCap : null;
+						if (!alive || c === null) return;
+						NS.engineCap = c; // 同步给弹窗面板共用（保存路径同源）
+						setEngineCap(c);
+					} catch { /* 吞：拿不到上限时按下限逻辑运行，host 侧还有同一道 min() 兜底 */ }
+				};
+				pullCap();
+				return () => { alive = false; };
+			}, []);
 			/** 取字段的 **UI 口径**值：草稿已是 UI 串（秒），存储值经 toUi 转成 UI 口径（毫秒→秒）。 */
 			const valueOf = (field) => {
 				if (draft !== null && Object.prototype.hasOwnProperty.call(draft, field.key)) return draft[field.key];
 				return toUi(field, stored[field.key]);
 			};
-			/** 字段备注：criticalRatio 动态追加**生效上限**（C-own，NS.engineCap 由 HUD 轮询下发）。
-			 *  上限值不写死（DSH 未来改 thresholdRatio 时自动跟随）；未探测到时只显示静态规则。
+			/** 字段备注：criticalRatio 动态追加**生效上限**（C-own）。
+			 *  ⚠️ 上限必须用**面板自己拉的 state**（`engineCap`），不能用 `NS.engineCap`——
+			 *     后者只有开过悬浮弹窗才有值（真 bug：用户没开弹窗 ⇒ 备注「待探测」+ 保存不钳制）。
 			 *  用户要求（2026-10-08）：上限 = DSH 内置阈值 **− 5 个百分点**（内置 80% ⇒ 75%），
 			 *  确保插件线确定性地先于引擎自动压缩触发。 */
 			const hintFor = (field) => {
 				if (field.key !== "criticalRatio") return field.hint ?? "";
-				const cap = typeof NS.engineCap === "number" && Number.isFinite(NS.engineCap) ? NS.engineCap : null;
-				/* 一位小数：0.75 → 75%、0.745 → 74.5%（四舍五入到整数就看不到余量的实际落点） */
 				const pct1 = (x) => `${Math.round(Number(x) * 1000) / 10}%`;
-				return cap === null
+				return engineCap === null
 					? `${field.hint}；上限 = DSH 内置阈值 − 5 个百分点（待探测，见弹窗阈值行）`
-					: `${field.hint}；上限 = DSH 内置阈值 − 5 个百分点（当前 ${pct1(cap)}），超出自动钳到该值`;
+					: `${field.hint}；上限 = DSH 内置阈值 − 5 个百分点（当前 ${pct1(engineCap)}），超出自动钳到该值`;
 			};
 			const dirty = draft !== null && FIELDS.some((f) => {
 				const cur = parseInput(f, valueOf(f));
@@ -298,17 +324,19 @@ window.__ModuleLoader__.load({
 			 */
 			const persist = async (values) => {
 				let written = 0;
-				/* C-own：强制压缩线的**生效上限 = 引擎阈值**（方案 C，动态探测不写死 0.8）。
+				/* C-own：强制压缩线的**生效上限 = 引擎阈值 − 5pp**（动态探测，不写死 0.8）。
 				 * 插件线必须先行（用户需求：插件开启时插件线生效，引擎只作关闭后的安全网）。
-				 * NS.engineCap 由 HUD 轮询从 host 下发（engineThreshold 实测引擎实例 config）；
-				 * 未拿到（旧 host/引擎未解析）时不钳制——host 侧 pre-step/sweep 还有同一道 min() 兜底。 */
-				const cap = typeof NS.engineCap === "number" && Number.isFinite(NS.engineCap) && NS.engineCap > 0 && NS.engineCap <= 1 ? NS.engineCap : null;
+				 * ⚠️ 上限取**面板自己的 state**（`engineCap`，挂载时自取），不用 `NS.engineCap`——
+				 *    后者只有开过悬浮弹窗才有值。真 bug：用户没开弹窗 ⇒ 保存**不钳制**，
+				 *    设 0.8 就真存成 0.8（2026-10-08 用户截图实测）。
+				 * 仍拿不到时不钳制——host 侧 pre-step/sweep 还有同一道 min() 兜底。 */
+				const cap = engineCap !== null && engineCap > 0 && engineCap <= 1 ? engineCap : null;
 				for (const field of FIELDS) {
 					if (!Object.prototype.hasOwnProperty.call(values, field.key)) continue;
 					let parsed = parseInput(field, values[field.key]);
 					if (parsed === null) throw new Error(`${field.label}：输入不是合法的${field.type === "text" ? "字符串" : "数值"}。`);
 					if (field.key === "criticalRatio" && cap !== null && parsed > cap) {
-						parsed = cap; // 超上限自动收到引擎线（而非报错——用户意图是"至少这么晚"，收到上限仍满足）
+						parsed = cap; // 超上限自动收到生效线（而非报错——用户意图是"至少这么晚"，收到上限仍满足）
 					}
 					const base = canon(field, stored[field.key] === void 0 ? field.def : stored[field.key]);
 					if (JSON.stringify(canon(field, parsed)) === JSON.stringify(base)) continue; // 未变不写
@@ -345,9 +373,9 @@ window.__ModuleLoader__.load({
 					const { written } = await persist(values);
 					setDraft(null); // 以写入值清理草稿，避免残留脏值
 					/* C-own：persist 可能已把 criticalRatio 钳到**生效上限**（引擎阈值 − 5pp）——回读真实生效值展示 */
-					const appliedCrit = Math.min(rec.criticalRatio, typeof NS.engineCap === "number" ? NS.engineCap : rec.criticalRatio);
+					const appliedCrit = Math.min(rec.criticalRatio, engineCap !== null ? engineCap : rec.criticalRatio);
 					const capNote = appliedCrit < rec.criticalRatio
-						? `（已按生效上限 ${Math.round(NS.engineCap * 1000) / 10}% 收敛）` : "";
+						? `（已按生效上限 ${Math.round(engineCap * 1000) / 10}% 收敛）` : "";
 					const text = written === 0
 						? "推荐值与当前配置一致，无需写入。"
 						: `已应用并回读校验通过（${written} 项：智能压缩线 ${rec.markerMinRatio} / 强制压缩线 ${appliedCrit}${capNote}）`;
@@ -481,8 +509,9 @@ window.__ModuleLoader__.load({
 					el("span", null, "推荐："),
 					el("span", null, "智能压缩线 ", el("b", null, rec.markerMinRatio)),
 					(() => {
-						/* C-own：推荐强制线同样不得越过引擎上限——超出则按上限收敛并注明 */
-						const cap = typeof NS.engineCap === "number" && Number.isFinite(NS.engineCap) && NS.engineCap > 0 && NS.engineCap <= 1 ? NS.engineCap : null;
+						/* C-own：推荐强制线同样不得越过**生效上限**（引擎阈值 − 5pp）——超出则按上限收敛并注明。
+						 * 上限取面板自己的 state（`engineCap`），而非只有开过弹窗才有的 `NS.engineCap`。 */
+						const cap = engineCap !== null && engineCap > 0 && engineCap <= 1 ? engineCap : null;
 						const eff = cap !== null && rec.criticalRatio > cap ? cap : rec.criticalRatio;
 						return el("span", null,
 							"强制压缩线 ", el("b", null, eff),
@@ -1053,19 +1082,17 @@ window.__ModuleLoader__.load({
 							 * 同时字号 9px → 11px（用户要求「字体改大一些」）——删掉上限后行更短，
 							 * 11px 仍能一行放下，无需再靠缩小字号换空间。 */
 							const pct = (x, d) => `${Math.round((Number.isFinite(Number(x)) ? Number(x) : d) * 100)}%`;
-							/* 一位小数百分比：0.745 → 74.5%（四舍五入到整数就看不到余量的实际落点）。 */
-							const pct1 = (x) => `${Math.round(Number(x) * 1000) / 10}%`;
 							const num = (x, d) => (Number.isFinite(Number(x)) ? Number(x) : d);
 							/* 用户要求（2026-10-08）：强制线**永远比 DSH 内置阈值低 5 个百分点**
 							 * （内置 80% ⇒ 上限 75%）。弹窗显示**生效值**（= min(配置, 上限)），
 							 * 否则用户看到 80% 却在实际 75% 触发。
-							 * 仅当配置高于上限时追加「已按上限收敛」——这是**过渡态**（用户下次保存即被钳到
-							 * 75%），不是 2026-10-07 删掉的那种「恒定显示上限」的噪声。 */
+							 * ⚠️ 用户随后明确要求**删掉「（已按上限 75% 收敛）」这层注释**——显示生效值本身
+							 * 已经说清事实，再加一句解释就是噪声（与 2026-10-07 删「上限 80%」同一取向）。
+							 * 且面板修好后保存即被钳到上限，该过渡态基本不再出现。 */
 							const critCap = num(v.criticalCap, null);
 							const critCfg = num(v.criticalRatio, 0.85);
 							const critEff = critCap != null ? Math.min(critCfg, critCap) : critCfg;
-							thr.textContent = `智能压缩线 ${pct(v.markerMinRatio, 0.2)} · 强制压缩线 ${pct(critEff, 0.85)}`
-								+ (critCap != null && critEff < critCfg ? `（已按上限 ${pct1(critCap)} 收敛）` : "");
+							thr.textContent = `智能压缩线 ${pct(v.markerMinRatio, 0.2)} · 强制压缩线 ${pct(critEff, 0.85)}`;
 							/* 「距离触发还差多少」——弹窗已在顶部显示当前占用，这里补最有决策价值的一行：
 							 * 距智能压缩线还有多少（达线后模型可自行决定压缩），以及是否已越线。 */
 							const occ = num(v.occupancyRatio, null); // host 侧未提供时跳过（保持向后兼容）

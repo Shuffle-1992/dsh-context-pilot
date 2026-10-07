@@ -344,6 +344,9 @@ console.log('\n== 6.14 压缩记录弹窗（会话过滤 / 完整时间 / 血统
  * 取证：hud-acts.json 含 3 个 sid，lineage 链 16616c07 → f4154f01（已成环）使 4/5 条被
  * 「本会话」命中，其中 f4154f01 属 `keysion-dac-vue` workspace ⇒ 这就是串会话的机制。 */
 const hostNoComment = host.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+/* client 也常需要在「不得出现某字符串」类断言里剥注释——本轮已两次栽在这一点上：
+ * 解释性注释里引用了被禁的 token/文案，导致断言被自己的说明判失败。 */
+const clientNoComment = client.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 ok('getHud 按 sid 精确过滤（不再走血统链）',
   /const filtered = sid \? list\.filter\(\(a\) => a\.sid === sid\) : list;/.test(host),
   '过滤仍走 lineage 链 ⇒ 会命中别的会话的记录');
@@ -366,8 +369,10 @@ ok('client 渲染完整日期时间（YYYY-MM-DD HH:MM:SS）',
 ok('client 剥掉 host 文本里的前导 hh:mm（避免两个时间）',
   /const stripHhmm = \(text\) =>/.test(client) && /stripHhmm\(x && x\.text\)/.test(client),
   '未剥前导 hh:mm ⇒ 同一行出现两个时间');
-ok('client 删除了「带参失败退回无参全局查询」的回退',
-  !/getHud\(""\)/.test(client),
+ok('client 删除了「带参失败退回无参全局查询」的**记录**回退',
+  /* ⚠️ 只针对**弹窗记录**路径的兜底（`(!r || !r.ok) && sidNow` → 无参查询）；
+   * 面板为取「生效上限」而发起的无参查询是另一回事（上限与会话无关），不能一并禁掉。 */
+  !/\(!r \|\| !r\.ok\)[^;]{0,80}getHud\(""\)/.test(client),
   '仍回退无参查询 ⇒ 协议不匹配时显示全 DSH 记录');
 /* wire 的**类型声明**不得再含全局兜底字段（签名里的散文可以叙述其退役，故只查声明形态）。 */
 ok('wire 签名与 host 返回一致（actsDetail / 无全局兜底声明）',
@@ -468,7 +473,7 @@ ok('教学不再教「本轮先不执行任务 + 写标记」（旧机制已废�
  * 漏改的后果不是报错，而是模型**写标记后等一个永远不来的自动恢复**（静默失效）。 */
 ok('新会话一次性说明本体已搬进模块（host 只做出口）',
   /function renderBrief\(\{ criticalRatio \} = \{\}\) \{/.test(ct)
-  && /return api\.renderBrief\(\{ criticalRatio: M3\.criticalRatio \}\);/.test(host),
+  && /return api\.renderBrief\(\{ criticalRatio: crit \}\);/.test(host),
   '说明文本仍散在 host ⇒ 与工具名/文案两处漂移');
 ok('一次性说明不再承诺「自动拉起」（已无该机制）',
   !/自动拉起|自动恢复/.test(ct) || /没有\*\*任何自动拉起动作|不需要\*\*任何「待执行」占位/.test(ct),
@@ -504,7 +509,7 @@ ok('client 提示语说明「DSH 内置阈值 − 5 个百分点」（未探测�
   /DSH 内置阈值 − 5 个百分点/.test(client),
   '提示未说明余量规则 ⇒ 用户以为上限还是 80%');
 ok('client 用一位小数显示上限（0.745 不能被四舍五入掉小数）',
-  /Math\.round\(Number\(x\) \* 1000\) \/ 10/.test(client) && /Math\.round\(NS\.engineCap \* 1000\) \/ 10/.test(client),
+  /Math\.round\(Number\(x\) \* 1000\) \/ 10/.test(client) && /Math\.round\(engineCap \* 1000\) \/ 10/.test(client),
   '用 Math.round(x*100) ⇒ 余量的实际落点不可见');
 ok('弹窗阈值行显示**生效值** min(配置, 上限) 而非裸配置',
   /const critEff = critCap != null \? Math\.min\(critCfg, critCap\) : critCfg;/.test(client)
@@ -516,6 +521,39 @@ ok('弹窗「距强制线」也用生效值（否则在不会触发的线上报�
 ok('hudRemote 带上 criticalCap（弹窗才能算生效值）',
   /criticalCap: typeof r\.criticalCap === "number"/.test(client),
   'hudRemote 缺 criticalCap ⇒ 弹窗拿不到上限');
+/* ═══ 2026-10-08 用户实测的真 bug ═══
+ * 「设置 0.8，没有钳回 0.75」：生效上限原先**只由悬浮弹窗的 pullHud 写入 `NS.engineCap`**，
+ * 而设置面板是**独立表面** —— 用户没开过弹窗时 `NS.engineCap` 恒为 null ⇒
+ * ① 备注一直显示「待探测」② 保存时**不钳制**。另：NS 属性变化不触发重渲染，必须用 React state。 */
+ok('面板**自己拉取**生效上限：真的从 getHud 的 criticalCap 取值',
+  /const \[engineCap, setEngineCap\] = react\.useState/.test(client)
+  && /const pullCap = async \(\) => \{/.test(client)
+  /* ⚠️ 必须断言**取值表达式本身**：只查「有 pullCap / 有 setEngineCap」会被
+   * 「写了函数但 `const c = null`」蒙混过关（变异实测：弱版断言未抓住）。 */
+  && /const c = env && typeof env\.criticalCap === "number" && Number\.isFinite\(env\.criticalCap\) \? env\.criticalCap : null;/.test(client)
+  && /NS\.engineCap = c;/.test(client) && /setEngineCap\(c\);/.test(client),
+  '面板仍只读 NS.engineCap / 未真正取 criticalCap ⇒ 没开过弹窗时上限恒 null（备注「待探测」+ 保存不钳制）');
+ok('面板保存路径用面板 state 钳制（不用 NS.engineCap）',
+  /const cap = engineCap !== null && engineCap > 0 && engineCap <= 1 \? engineCap : null;/.test(client),
+  '仍读 NS.engineCap ⇒ 没开弹窗时保存不钳制（设 0.8 就真存成 0.8）');
+ok('面板计算器/回读提示同样用面板 state（三处同源）',
+  /const cap = engineCap !== null && engineCap > 0 && engineCap <= 1 \? engineCap : null;/.test(client)
+  && /Math\.round\(engineCap \* 1000\) \/ 10/.test(client),
+  '计算器或回读提示仍读 NS.engineCap ⇒ 与保存路径不同源');
+/* ═══ 教学必须教**生效值**（2026-10-08 实测：卡片写「占用达 80%」而实际 75%） ═══ */
+ok('决策卡/一次性说明拿到的是**生效**强制线（不是配置值）',
+  /const effCrit = Math\.min\(M3\.criticalRatio, criticalCapOf\(agent\)\);/.test(host)
+  && /renderPolicyCard\(r\.ratio, effCrit\)/.test(host) && /renderBrief\(effCrit\)/.test(host),
+  '教学仍用配置值 ⇒ 教一个不会触发的数字（与门控不同源）');
+ok('两个出口都把 effCrit 落进模块参数（不是各自再读 M3.criticalRatio）',
+  /* 必须数**两处**（renderPolicyCard 与 renderBrief 各一）——只匹配到一处时，
+   * 另一个出口仍读配置值也照样通过（变异实测：弱版断言未抓住）。 */
+  (host.match(/const crit = Number\.isFinite\(effCrit\) \? effCrit : M3\.criticalRatio;/g) ?? []).length === 2,
+  '出口内部仍读配置值，或只改了两个出口中的一个 ⇒ 传参被忽略');
+/* 用户要求（2026-10-08）：删掉「（已按上限 75% 收敛）」——显示生效值本身已经说清事实。 */
+ok('弹窗阈值行不再追加「（已按上限 … 收敛）」（用户要求删除）',
+  !/已按上限/.test(clientNoComment),
+  '仍带收敛注释 ⇒ 用户已明确要求删除');
 
 /* ═══════════ 6.8 R1 智能思考字段三端对账 ═══════════ */
 console.log('\n== 6.8 智能思考字段（FIELDS ↔ schema ↔ M3_DEFAULTS）==');
@@ -544,7 +582,9 @@ console.log('\n== 6.10 智能思考注入（门控必须与压缩解耦）==');
 // 现有 M2 注入三部分门控不同：用量行无门控 / 决策卡 ratio>=markerMinRatio / 一次性说明首次。
 // 思考强度必须是**第四条独立通道**：门控 = effortEnabled，与占用无关。
 const injectBody = (() => {
-  const m = /const card = renderPolicyCard\(r\.ratio\);([\s\S]*?)return \{ \.\.\.decision, messages:/.exec(host);
+  /* ⚠️ 2026-10-08：调用点由 `renderPolicyCard(r.ratio)` 变为 `renderPolicyCard(r.ratio, effCrit)`
+   * （决策卡/说明必须教**生效强制线**而非配置值）⇒ 正则放宽到参数列表任意内容。 */
+  const m = /const card = renderPolicyCard\(r\.ratio[^;]*\);([\s\S]*?)return \{ \.\.\.decision, messages:/.exec(host);
   return m ? m[1] : '';
 })();
 ok('解析出 M2 注入主体', injectBody.length > 0, '未匹配到注入主体（改名了？）');
