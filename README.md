@@ -53,6 +53,17 @@ DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`：**让长�
 
 用户全程零操作。模型也可在回复里写「待执行：<任务>」显式记录要续跑的任务。
 
+**恢复投递走三通道，当前实际生效顺序**（2026-10-07 实证）：
+
+| 通道 | 方式 | 状态 |
+| --- | --- | --- |
+| **A** | `sessionController.prompt(request, AbortSignal.timeout(30s))` | ✅ **当前首选**（`{"accepted":true}`，一次命中） |
+| B | `ctx.remote.session.prompt` 代理 | ❌ 不可用（插件 ctx 无 `remote` inject 权限） |
+| C | `createUserMessage` + `agent.followup`（官方同原语） | ✅ 兜底（早期历史走此路） |
+
+> 通道 A 早期因**缺 AbortSignal 第二参**被拒（官方 `prompt()` 首行 `throwIfAborted`）——
+> 补参后即通。这印证了「官方契约的参数一个都不能少」。
+
 ### 2.3 三个可改动点
 
 | 改什么 | 生效方式 |
@@ -80,17 +91,56 @@ DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`：**让长�
 - **配置面**：7 个字段，面板按秒/比率显示；成本阈值计算器（8 个模型预设，一键算推荐值并写入）
 - **只读审查落地**：外部审查 23 条，批次 1/2/3 全部实施（含心跳泄漏、`ctx.effect` 语义误用等真 bug）
 
-**未实施（明确挂起）**：D1 模块切分（动骨架，建议单独一轮）、D2 wire 样板共享、
+**未实施（明确挂起）**：D1 模块切分（动骨架，**已有测试护栏，可以做了**）、D2 wire 样板共享、
 C2 无界 Map 上限（当前规模无实际风险）、A6 恢复计数清零、
 **A5 pre-step 强制压缩真机 E2E**（唯一「已实现但成功率未验」的路径——需占用冲到强制压缩线
 才有条件测，当前设为 80%，等接近了再做）、A2/A6 的真机 E2E。
 
-> ✅ **2026-10-07 清偿**：C3② 报告稳态瘦身（3.77MB → 预计 ~600KB，单条 16KB → 2KB）、
-> B5 取证工具收敛（18 个散落脚本 → 2 个统一工具）。详见 [`docs/milestones.md`](docs/milestones.md)。
+> ✅ **2026-10-07 清偿**：C3② 报告稳态瘦身（3.77MB → 预计 ~600KB）、B5 取证工具收敛
+> （18 个散落脚本 → 2 个统一工具）、**测试骨架**（3 套件 127 项断言）+ **通道 A 验收**。
+> 详见 [`docs/milestones.md`](docs/milestones.md)。
 
 ---
 
-## 4. 成本模型与推荐配置
+## 4. 测试与取证
+
+### 4.1 测试（`npm test`，<1 秒）
+
+```bash
+npm test              # 跑全部三个套件
+npm run test:contract # 只跑契约对账
+npm run test:static   # 只跑静态约束
+npm run test:report   # 只跑报告形状
+```
+
+| 套件 | 断言数 | 查什么 | 能抓到什么 |
+| --- | --- | --- | --- |
+| `contract.mjs` | 55 | face 方法表 ↔ client 描述符 ↔ TYPERT 三端对账；Config 字段在 FIELDS/schema/M3_DEFAULTS 三处齐全；退役字段未复活；`mergeConfig` 读取集 ⊆ schema | **调用静默失败**（P29：三端漂移不报错、只是拿不到数据） |
+| `static.mjs` | 29 | 真实 `node --check`；client 自足（无外部 import，require 仅 react）；entry 薄壳（<40 行、有静态 Config、动态 import 带 `?ts=`）；模块依赖方向无环；热换纪律 | 语法错误、破坏热换、client 引入依赖、循环依赖 |
+| `report.mjs` | 43 | 产出侧字段契约；`bfOnce` 回填链依赖；C3② 关键事件必须走 full 档；真实报告结构自洽；`hud-acts.json` 去重；dump 工具可跑 | 报告形状无声破坏（本项目踩过 2 次：顶层读 m3/m5、脚本读已删字段） |
+
+**已验证有效**：注入 3 个人为 bug（`m3-act` 误入精简档 / client face 改名 / host 引用 client.js），
+三套件全部抓到且定位精准。
+
+### 4.2 取证工具
+
+```bash
+npm run dump -- --tail 20          # 报告概览 + 尾部条目
+npm run dump -- --kind m3-act      # 按 reason 过滤
+npm run dump -- --field m3.eff     # 取最近一条的某字段
+npm run dump -- --history-acts     # 压缩历史（含 hud-acts.json）
+
+npm run asar -- list --filter dsh-token-meter
+npm run asar -- grep --pattern compactIfNeeded --ext js --ctx 3
+```
+
+> ⚠️ **路径约定**：报告的 `m3`/`m5`/`m55` 块在每个 **history 条目**上，不在顶层（`report.mjs` 已断言此约定）。
+
+---
+
+---
+
+## 5. 成本模型与推荐配置
 
 > **完整分析见 [`docs/cost-model.md`](docs/cost-model.md)**（官方单价取证、缓存命中率影响、
 > 结构占比推导、阈值弹性表、计算器模型）。本节只留结论。
@@ -116,7 +166,7 @@ C2 无界 Map 上限（当前规模无实际风险）、A6 恢复计数清零、
 
 ---
 
-## 5. 配置面速查
+## 6. 配置面速查
 
 | 面板字段 | 配置键 | 默认 | 说明 |
 | --- | --- | --- | --- |
@@ -134,7 +184,7 @@ C2 无界 Map 上限（当前规模无实际风险）、A6 恢复计数清零、
 
 ---
 
-## 6. 已知设计风险（开发前必读）
+## 7. 已知设计风险（开发前必读）
 
 1. **激活安全**：插件 `apply()` 内任何异常只记录不抛（DSH 纪律：抛 = 条目装载失败）。
 2. **CJK 计数低估**：占用比是估计值（无 provider usage 时按 4 字符/token 启发式），
@@ -150,7 +200,7 @@ C2 无界 Map 上限（当前规模无实际风险）、A6 恢复计数清零、
 
 ---
 
-## 7. 文档索引
+## 8. 文档索引
 
 | 文档 | 内容 |
 | --- | --- |
@@ -180,7 +230,7 @@ node docs/reference/tools/asar-query.cjs extract --paths "/dsh/node_modules/..."
 
 ---
 
-## 8. 验收标准
+## 9. 验收标准
 
 1. 每轮 prompt 含实时用量三元组（上限/已用/占比），模型可正确复述；
 2. 占用达**智能压缩线**时，模型可写标记触发压缩，插件自动执行并自动拉起续跑任务（用户零重发）；

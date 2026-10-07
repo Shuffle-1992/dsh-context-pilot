@@ -1,0 +1,14 @@
+{
+  "name": "dsh-context-pilot-repo",
+  "private": true,
+  "type": "module",
+  "description": "开发用根清单（插件本体在 plugin/，由 DSH profile 以 link: 挂载；此文件不参与挂载）。",
+  "scripts": {
+    "test": "node test/run.mjs",
+    "test:contract": "node test/contract.mjs",
+    "test:static": "node test/static.mjs",
+    "test:report": "node test/report.mjs",
+    "dump": "node docs/reference/tools/dump-report.cjs",
+    "asar": "node docs/reference/tools/asar-query.cjs"
+  }
+}

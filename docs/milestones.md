@@ -182,3 +182,34 @@
   统一工具按正确路径读，并在文档里写明该约定（防再踩）。
 - **目录语义恢复**：`plugin/.data/` 现在只剩**运行时数据**（`m1-report.json` + `hud-acts.json`），
   取证脚本归 `docs/reference/tools/`。
+
+### 测试骨架 + 通道 A 验收 —— ✅ 2026-10-07
+
+**测试骨架**（`test/`，项目此前**完全没有测试**）：
+- 3 套件 / **127 项断言** / <1 秒，`npm test` 一键跑：
+  - `contract.mjs`（55）——**三端契约对账**：face 方法表 ↔ client 描述符 ↔ TYPERT（FACE_NAME／方法集／
+    参数名／可选项标记）；Config 字段在 FIELDS ↔ schema ↔ M3_DEFAULTS 三处齐全且互相可达；
+    退役字段（policyCardMinRatio/highRatio/lightTaskChars）防复活；`mergeConfig` 读取集 ⊆ schema 键
+  - `static.mjs`（29）——真实 `node --check`；**client 自足性**（无 import、require 仅 react）；
+    **entry 薄壳**（有效代码 <40 行、静态 Config、动态 import 带 `?ts=`、不在顶层 import impl）；
+    模块依赖方向（无循环、host 不引用 client）；热换纪律；无调试残留
+  - `report.mjs`（43）——产出侧字段契约（13 项 m3/m5/m55/m2 关键字段）；**bfOnce 回填链依赖**
+    （必须按 `reason==='m3-act'` + `e.m3.lastAct` 读）；C3② 关键事件必须走 full 档；
+    真实报告结构自洽（含「m3/m5/m55 不在顶层」断言）；`hud-acts.json` 去重；dump 工具自检
+- **有效性验证**（关键）：注入 3 个人为 bug——`m3-act` 误入精简档 / client `HUD_FACE` 改名 /
+  host 代码引用 client.js——**三套件全部抓到且定位精准**，随后还原。
+- **发现并修掉测试自身的 3 处误报**：① 用括号配平启发式校验 ESM 会误判（改用真实
+  `node --check`，client.js 信封按 CJS 校验）；② `host 引用 client.js` 把**注释里的提及**也算了
+  （改为剥注释后再查）；③ 依赖图漏掉**模板字符串形式的动态 import**（补了 `import(\`./x.mjs?` 模式，
+  修正后正确显示 `host.impl.mjs → wire.host.mjs`）。
+- **对 D1 的价值**：模块依赖图与「无循环」断言就位，切分时可直接验证；`entry` 薄壳约束、
+  动态 import 纪律也有断言——**D1 现在有安全网了**。
+
+**通道 A 验收**（此前 README 记「实际走通道 C」，需更正）：
+- 历史 `m55.attempts` 取证：唯一一次真实投递 = **`sessionController.prompt` → `{"accepted":true}`**
+  （05:58:34），**一次命中、零 rejected**（补 AbortSignal 后直接成功，未回退到 B/C）。
+- `channelProbe` 佐证：`sessionController.found=true`、`hasPrompt=true`、`ctor=SessionController`；
+  通道 B `ctx.remote` 报 `cannot get property "remote" without inject`（插件 ctx 无该权限）⇒ 结构性不可用。
+- **结论**：恢复投递当前首选**通道 A**，通道 C 作兜底。README §2.2 已更新三通道状态表。
+- **附带澄清一个误判**：`m55.attempts` 是**累积数组**（每次刷新把当前全部 `slice(-10)` 写进各条目），
+  故同一次尝试会在连续多个报告条目里各出现一次——排查时曾误读为「重复执行 23 次」，实为展示放大。
