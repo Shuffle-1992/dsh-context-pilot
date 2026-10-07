@@ -132,11 +132,11 @@ window.__ModuleLoader__.load({
 			/* 开关滑块（bool 字段）：**复刻 DSH 原生 Switch**（dsh-client-ui-primitives Switch.module.css，
 			 * 已存 docs/reference 溯源；36×20 轨道 padding2 + 16px 旋钮 translateX16）。
 			 * 全部用主题 token ⇒ 深浅主题自动适配（暗色下 ON=白轨道黑旋钮，与原生插件开关一致）。 */
-			".dcp-switch{position:relative;display:inline-block;width:36px;height:20px;flex:none;padding:2px;border:0;border-radius:999px;background:var(--dsw-alias-border-l3,rgba(128,128,128,.4));cursor:pointer;box-sizing:border-box;transition:background 120ms ease}",
+			".dcp-switch{position:relative;display:inline-block;width:36px;height:20px;flex:none;padding:2px;border:0;border-radius:999px;corner-shape:round;background:var(--dsw-alias-border-l3,rgba(128,128,128,.4));cursor:pointer;box-sizing:border-box;transition:background 120ms ease}",
 			".dcp-switch input{position:absolute;opacity:0;width:0;height:0;margin:0}",
 			".dcp-switch:has(input:checked){background:var(--dsw-alias-brand-primary,rgba(76,125,255,.9))}",
 			".dcp-switch:has(input:disabled){opacity:.5;cursor:default}",
-			".dcp-switch .dcp-slider{display:block;width:16px;height:16px;border-radius:50%;background:var(--dsw-alias-switch-thumb,rgba(128,128,128,.85));transition:transform 120ms ease;pointer-events:none}",
+			".dcp-switch .dcp-slider{display:block;width:16px;height:16px;border-radius:50%;corner-shape:round;background:var(--dsw-alias-switch-thumb,rgba(128,128,128,.85));transition:transform 120ms ease;pointer-events:none}",
 			".dcp-switch input:checked + .dcp-slider{transform:translateX(16px);background:var(--dsw-alias-label-primary-foreground,#fff)}",
 			".dcp-switch input:focus-visible + .dcp-slider{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary,#4c7dff));outline-offset:2px}",
 			".dcp-label{width:170px;color:var(--dsw-alias-label-secondary,currentColor);flex:none}",
