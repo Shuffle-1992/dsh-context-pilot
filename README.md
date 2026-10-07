@@ -323,23 +323,44 @@ DeepSeek `6767 × $0.15/1M ≈ $0.0010/段`；GLM-5.3 `6767 × 6.9/1e4 ≈ 4.7 �
 | 字段 | DeepSeek API | GLM Coding Plan | 理由 |
 | --- | --- | --- | --- |
 | `criticalRatio` 危险线 | **0.85** | **0.80** | 命中便宜 ⇒ DS 可晚压；GLM 早压省额度 |
-| `markerMinRatio` 标记最低占用 | **0.30** | **0.15–0.20** | DS 需 3 倍价差才抵一次多余压缩的信息损失；GLM 压早直接换额度 |
-| `policyCardMinRatio` 决策卡 | **0.35** | **0.15–0.20** | 卡片约 300 token/轮；GLM 上下文单价高 ⇒ 更值得早干预 |
+| `markerMinRatio` 标记最低占用<br>（**同时是决策卡门槛**） | **0.30** | **0.15–0.20** | DS 需 3 倍价差才抵一次多余压缩的信息损失；GLM 压早直接换额度 |
 | `sweepMinIntervalMs` 兜底间隔 | 600000 | 600000 | 与口径无关 |
 | `armedTtlMs` 武装有效期 | 120000 | 120000 | 与口径无关 |
 
 **共同原则**：不要把阈值调得过低去追命中率——**过度压缩导致模型重读文件/重跑命令的返工成本，远超省下的 token**。
 本插件把决策交给模型（政策卡教它判断「任务是否还依赖早期细节」）而非无条件自动压缩，正是为此。
 
+### 7.7 决策卡门槛并入 `markerMinRatio`（2026-10-07，用户发现的设计缺陷）
+
+**缺陷**：原先 `policyCardMinRatio`（教学门槛）与 `markerMinRatio`（执行门槛）是两个独立参数，产生不可达区间：
+
+| 区间 | 有卡？（教写标记） | 能执行？ | 结果 |
+| --- | --- | --- | --- |
+| `[0, policyCardMinRatio)` | ❌ | ✅（若 ≥ markerMin） | **模型不知道标记存在 ⇒ 永远不写 ⇒ 死区** |
+| `[markerMinRatio, policyCardMinRatio)`（marker < card 时） | ❌ | ✅ | **同上：区间完全不可达** |
+| `> policyCardMinRatio` 且 `> markerMinRatio` | ✅ | ✅ | 正常 |
+
+即推荐值 `marker 0.30 / card 0.35` 里，`[0.30, 0.35)` 是**永远不会有任何行为**的死区；
+反之若 `marker > card` 则错配（教了却不执行）。
+
+**修法**（用户决定）：**删除 `policyCardMinRatio` 配置项，代码统一走 `决策卡门槛 = markerMinRatio`**。
+语义变成「**能收到卡 = 标记有效**」，无论用户怎么填都不会出现死区或错配。
+- host：`renderPolicyCard` 改读 `M3.markerMinRatio`；`mergeConfig` 不再读取该键（旧 config 残留键静默忽略）
+- client：`FIELDS` 删除该行；`recommendFromPrice` 不再产出 `card`；「一键填入」只写 2 项
+- schema：`plugin-config.schema.mjs` 删除该字段定义
+- 弹窗阈值速览行改为「标记最低占用(含决策卡) X% ｜ 危险线 Y%」
+
+> 校验（07:54 热换后）：`m3.eff` 已无 `policyCardMinRatio` 键，`markerMinRatio=0.15` 保留。
+
 ### 7.6 面板内置计算器（2026-10-06 新增，`client.js` PriceCalculator）
 
 配置区**下方**新增「成本阈值计算器」——把手算变成随单价实时推导：
 
-- **四个预设按钮**（官方单价一键填入）：DeepSeek flash / DeepSeek v4-pro / GLM-5.3 / GLM-5.3-Flash
+- **预设按钮**（官方单价一键填入）：DeepSeek flash/v4-pro、GLM-5.3/5.3-Flash、Kimi K3、千问 3.8-Max/3.8-Flash、阶跃 step-5（全 ¥ 口径，GLM 为积分）
 - **三个输入**：缓存命中价、未命中价、输出价（手改即退出预设高亮）
 - **诊断行**：命中:未命中比值、上下文项占单请求成本 %、估算单请求成本
-- **推荐行**：`markerMinRatio` / `policyCardMinRatio` / `criticalRatio` + 判语
-- **「一键填入并保存」按钮**：写入三个推荐字段（走与上方表单完全相同的 `persist → writeField` 路径，
+- **推荐行**：`markerMinRatio`（含决策卡）/ `criticalRatio` + 判语
+- **「一键填入并保存」按钮**：写入推荐字段（走与上方表单完全相同的 `persist → writeField` 路径，
   含命名空间 `set` + **回读校验**；未变化的字段自动跳过）。失败提示（未就绪/未持久化）与手工保存一致。
 
 **推导模型**（与 §7.3/§7.5 同一套，锚点取**实测** ctxShare 而非理想值，故能复现上表）：

@@ -65,11 +65,10 @@ window.__ModuleLoader__.load({
 			{ key: "dryRun", label: "演习模式", type: "bool", def: false, hint: "只记录决策，不真执行压缩" },
 			{ key: "criticalRatio", label: "危险线", type: "num", def: 0.85, hint: "达此值无条件强制压缩。推荐 0.85（DeepSeek）／0.80（GLM 套餐）" },
 			{ key: "marker", label: "压缩标记", type: "text", def: "[cp:compact]", hint: "模型回复尾行标记；置空字符串关闭标记通道" },
-			{ key: "markerMinRatio", label: "标记最低占用", type: "num", def: 0.2, hint: "标记低于此占用不触发。推荐 0.30（DeepSeek）／0.15–0.20（GLM）" },
+			{ key: "markerMinRatio", label: "标记最低占用", type: "num", def: 0.2, hint: "标记生效门槛，**同时决定何时注入决策卡**（2026-10-07 起两者统一）。推荐 0.30（DeepSeek 1:50）／0.22（1:20）／0.17（1:8）／0.15（1:4）" },
 			{ key: "armedTtlMs", label: "标记武装有效期(ms)", type: "int", def: 120000, hint: "标记→空闲超过此值失效；120000（2 分钟）够用" },
-			{ key: "policyCardMinRatio", label: "压缩决策提示词注入", type: "num", def: 0.3, hint: "达此值才注入决策卡（每轮约 300 token）。推荐 0.35（DeepSeek）／0.15–0.20（GLM）" },
-			{ key: "highRatio", label: "审计参考线", type: "num", def: 0.6, hint: "仅审计口径，不参与压缩触发" },
-			{ key: "lightTaskChars", label: "轻任务字符阈值", type: "int", def: 4000, hint: "仅审计口径，不参与压缩触发" },
+			{ key: "highRatio", label: "审计参考线", type: "num", def: 0.6, hint: "仅审计口径，不参与压缩触发（原始设计：占用≥0.6 且任务轻时曾建议压缩）" },
+			{ key: "lightTaskChars", label: "轻任务字符阈值", type: "int", def: 4000, hint: "仅审计口径，不参与压缩触发（原始设计：任务字符数≤此值算轻任务）" },
 			{ key: "sweepMinIntervalMs", label: "兜底扫除最小间隔(ms)", type: "int", def: 600000, hint: "危险线兜底的最小间隔；标记模式不受限" },
 		];
 
@@ -200,13 +199,12 @@ window.__ModuleLoader__.load({
 			const lerp = (x, x0, x1, y0, y1) => y0 + ((x - x0) * (y1 - y0)) / (x1 - x0);
 			const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 			const marker = clamp(lerp(ctxShare, 0.5, 0.93, 0.3, 0.15), 0.12, 0.4);
-			const card = clamp(marker + 0.05, 0.15, 0.5); // 卡片门槛略高于标记门槛
 			const crit = clamp(lerp(ctxShare, 0.5, 0.93, 0.85, 0.8), 0.75, 0.9);
+			// 2026-10-07：决策卡门槛 = 标记最低占用（用户决定）——不再有独立 card 值。
 			const r2 = (v) => Math.round(v * 100) / 100;
 			return {
 				ratio, ctxShare,
 				markerMinRatio: r2(marker),
-				policyCardMinRatio: r2(card),
 				criticalRatio: r2(crit),
 				verdict: ctxShare >= 0.8 ? "命中仍贵 ⇒ 上下文持续失血：建议压早（低阈值）"
 					: ctxShare >= 0.6 ? "中间地带：建议中等阈值"
@@ -285,14 +283,13 @@ window.__ModuleLoader__.load({
 				try {
 					const values = {
 						markerMinRatio: rec.markerMinRatio,
-						policyCardMinRatio: rec.policyCardMinRatio,
 						criticalRatio: rec.criticalRatio,
 					};
 					const { written } = await persist(values);
 					setDraft(null); // 以写入值清理草稿，避免残留脏值
 					const text = written === 0
 						? "推荐值与当前配置一致，无需写入。"
-						: `已应用并回读校验通过（${written} 项：标记 ${rec.markerMinRatio} / 决策卡 ${rec.policyCardMinRatio} / 危险线 ${rec.criticalRatio}）`;
+						: `已应用并回读校验通过（${written} 项：标记最低占用(含决策卡) ${rec.markerMinRatio} / 危险线 ${rec.criticalRatio}）`;
 					setMessage({ kind: "ok", text: `${text}。` });
 					return { ok: true, text };
 				} catch (error) {
@@ -406,8 +403,7 @@ window.__ModuleLoader__.load({
 				) : el("div", { className: "dcp-hint" }, "请输入有效的正数价格。"),
 				rec ? el("div", { className: "dcp-rec" },
 					el("span", null, "推荐："),
-					el("span", null, "标记最低占用 ", el("b", null, rec.markerMinRatio)),
-					el("span", null, "决策卡注入 ", el("b", null, rec.policyCardMinRatio)),
+					el("span", null, "标记最低占用(含决策卡) ", el("b", null, rec.markerMinRatio)),
 					el("span", null, "危险线 ", el("b", null, rec.criticalRatio)),
 				) : null,
 				rec ? el("div", { className: "dcp-hint" }, rec.verdict) : null,
@@ -709,9 +705,9 @@ window.__ModuleLoader__.load({
 								chips.appendChild(c);
 							}
 							if (v.dryRun === true) chips.appendChild(chip("演习", "rgba(128,128,128,.9)"));
-							/* 阈值速览：标记最低占用 / 决策卡注入 / 危险线（来自配置镜像，面板改值即跟随） */
+							/* 阈值速览：标记最低占用（含决策卡）/ 危险线（来自配置镜像，面板改值即跟随） */
 							const pct = (x, d) => `${Math.round((Number.isFinite(Number(x)) ? Number(x) : d) * 100)}%`;
-							thr.textContent = `标记最低占用 ${pct(v.markerMinRatio, 0.2)} ｜ 决策卡注入 ${pct(v.policyCardMinRatio, 0.3)} ｜ 危险线 ${pct(v.criticalRatio, 0.85)}`;
+							thr.textContent = `标记最低占用(含决策卡) ${pct(v.markerMinRatio, 0.2)} ｜ 危险线 ${pct(v.criticalRatio, 0.85)}`;
 						} catch { /* 快照失败保持现状 */ }
 					};
 					if (typeof settingsScope.subscribe === "function") liveRows.push({ row, off: settingsScope.subscribe(renderHud) }); // C4：off 在册

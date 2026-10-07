@@ -49,10 +49,11 @@ const DSH_LLM_REL = ['dsh', 'node_modules', '@deepseek-ai', 'dsh-llm', 'lib', 'i
  *    ⇒ 上下文规模化便宜，默认偏保守（少压、保信息，避免压缩导致返工）——markerMinRatio 0.30 偏高：
  *      3 倍价格差才能换回一次多余压缩的代价。
  *  - GLM Coding Plan：Cached 1.7 vs Input 6.9（1:4.1，**命中仍计费**）。同样 285K 下上下文占 **91%**
- *    ⇒ 上下文是持续失血，压早直接换额度——建议 markerMinRatio 0.15–0.20、policyCardMinRatio 0.15–0.20。
+ *    ⇒ 上下文是持续失血，压早直接换额度——建议 markerMinRatio 0.15–0.20。
  *  - 阈值→成本弹性（实测增速 6.8K/段、压后回落 25K）：0.15→0.30 平均上下文 88K→163K，
  *    单请求成本 DS 仅 +18% 而 GLM +69%。**同一组阈值在 GLM 上的钱效约为 DeepSeek 的 3.8 倍**。
- * 面板备注（client.js FIELDS[].hint）与 schema description 已写入两套推荐值，改这里须三处同步。
+ *  ⚠️ 2026-10-07：决策卡门槛已并入 markerMinRatio（用户决定，消除「卡未教/标记不可达」死区），
+ *    故下面注释只提单一门槛。面板备注（client.js FIELDS[].hint）与 schema description 须同步。
  */
 const M3_DEFAULTS = {
   enabled: true,
@@ -60,10 +61,11 @@ const M3_DEFAULTS = {
   highRatio: 0.6, // 审计参考线（决策主体已移交给模型，此值仅用于审计口径）
   criticalRatio: 0.85, // 危险线：pre-step 无条件压（官方 pressure 路径）；GLM 套餐可降 0.80
   lightTaskChars: 4000, // 轻任务字符阈值（仅 inbox 审计口径）
-  markerMinRatio: 0.2, // 标记通道最低占用；DeepSeek 建议 0.30（少压保信息）／GLM 建议 0.15–0.20（压早省额度）
+  markerMinRatio: 0.2, // 标记通道最低占用，**同时是决策卡门槛**（2026-10-07 起二者统一）；DS 建议 0.30／GLM 等 1:4 档建议 0.15–0.20
   armedTtlMs: 120_000, // 标记武装有效期（事件→idle 之间）
   marker: '[cp:compact]', // M3.6：模型回复尾部标记 → idle 后自动压缩（用户零输入，标记在回复里可见）
-  policyCardMinRatio: 0.3, // 注入政策卡的最低占用；DeepSeek 建议 0.35／GLM 建议 0.15–0.20（每轮卡约 300 token）
+  // policyCardMinRatio 已于 2026-10-07 退役（用户决定）：决策卡门槛 = markerMinRatio，见 renderPolicyCard。
+  // 旧 config 里若仍有该键，mergeConfig 不再读取，面板也不再显示（不删除键以免报错，静默忽略）。
   sweepMinIntervalMs: 600_000, // safety-net 两次 idle 扫除最小间隔（marker 模式不受限）
 };
 // 注：关键词「先压缩」通道已按用户决定裁撤（2026-10-06）——"要写先压缩不如直接手动执行压缩指令"。
@@ -222,13 +224,13 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       const live = (v) => (v !== null && typeof v === 'object' && typeof v.get === 'function' ? v.get() : v);
       if (!config || typeof config !== 'object') return;
       const raw = {};
-      for (const k of ['enabled', 'dryRun', 'highRatio', 'criticalRatio', 'lightTaskChars', 'marker', 'markerMinRatio', 'armedTtlMs', 'policyCardMinRatio', 'sweepMinIntervalMs']) {
+      for (const k of ['enabled', 'dryRun', 'highRatio', 'criticalRatio', 'lightTaskChars', 'marker', 'markerMinRatio', 'armedTtlMs', 'sweepMinIntervalMs']) {
         raw[k] = live(config[k]);
       }
       if (typeof raw.enabled === 'boolean') M3.enabled = raw.enabled;
       if (typeof raw.dryRun === 'boolean') M3.dryRun = raw.dryRun;
       if (typeof raw.marker === 'string') M3.marker = raw.marker;
-      for (const k of ['highRatio', 'criticalRatio', 'markerMinRatio', 'policyCardMinRatio']) {
+      for (const k of ['highRatio', 'criticalRatio', 'markerMinRatio']) {
         if (typeof raw[k] === 'number' && Number.isFinite(raw[k]) && raw[k] >= 0 && raw[k] <= 1) M3[k] = raw[k];
       }
       for (const k of ['lightTaskChars', 'armedTtlMs', 'sweepMinIntervalMs']) {
@@ -849,9 +851,14 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     };
   };
 
-  /** M3.5 通道2：政策卡——教会模型「何时值得压缩、如何触发」（仅相关占用以上出现，省 token）。 */
+  /** M3.5 通道2：政策卡——教会模型「何时值得压缩、如何触发」。
+   *  ⚠️ 2026-10-07 用户决定：**决策卡门槛 = 标记最低占用**（不再独立配置）。
+   *  原设计缺陷（用户发现）：`policyCardMinRatio` 独立时，markerMinRatio < 卡门槛 的区间是死区——
+   *  模型收不到卡 ⇒ 不知道标记 ⇒ 永远不写标记 ⇒ 该区间内标记通道完全不可达；
+   *  且若 markerMinRatio > 卡门槛则反向错配（教了却不执行）。现统一为同一门槛，
+   *  语义：「能收到卡 = 标记有效」，无论用户怎么填都不会出现死区或错配。 */
   const renderPolicyCard = (ratio) => {
-    if (ratio == null || ratio < M3.policyCardMinRatio) return null;
+    if (ratio == null || ratio < M3.markerMinRatio) return null;
     const pct = `${(ratio * 100).toFixed(0)}%`;
     return [
       `压缩决策卡（context-pilot，当前占用 ${pct}）：先判断接下来的任务是否还依赖本轮之前的对话细节——`,

@@ -83,9 +83,9 @@ function buildWith(z) {
       criticalRatio: z.number().default(0.85).description('危险线：达此值无条件强制压缩。推荐 0.85（DeepSeek）／0.80（GLM 套餐）').volatile(),
       lightTaskChars: z.number().default(4000).description('轻任务字符阈值（仅审计口径，不参与触发）').volatile(),
       marker: z.string().default('[cp:compact]').description('模型回复尾部标记（置空字符串关闭标记通道）').volatile(),
-      markerMinRatio: z.number().default(0.2).description('标记通道最低占用：低于此不压缩。推荐 0.30（DeepSeek）／0.15–0.20（GLM）').volatile(),
+      markerMinRatio: z.number().default(0.2).description('标记通道最低占用，**同时是决策卡注入门槛**（2026-10-07 起二者统一）。推荐 0.30(1:50)／0.22(1:20)／0.17(1:8)／0.15(1:4)').volatile(),
       armedTtlMs: z.number().default(120000).description('标记武装有效期（毫秒）：标记→空闲超过此值失效，120000（2 分钟）够用').volatile(),
-      policyCardMinRatio: z.number().default(0.3).description('决策卡注入的最低占用（每轮约 300 token）。推荐 0.35（DeepSeek）／0.15–0.20（GLM）').volatile(),
+      // policyCardMinRatio 已于 2026-10-07 退役（用户决定）：决策卡门槛 = markerMinRatio，消除「卡未教/标记不可达」死区
       sweepMinIntervalMs: z.number().default(600000).description('危险线兜底扫除的最小间隔（毫秒；标记模式不受限）').volatile(),
       hudLastAct: z.string().default('').description('M5 状态：最近一次压缩摘要（host 自动写入，无需手改）').volatile(),
       hudArmed: z.string().default('').description('M5 状态：标记武装中时为 "armed"（host 自动写入）').volatile(),
