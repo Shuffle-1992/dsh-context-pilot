@@ -173,7 +173,13 @@ const SPLIT_WARN = 900;
 const TARGET_MODULES = ['core.mjs', 'm1.snapshot.mjs', 'm2.inject.mjs', 'm3.compact.mjs', 'm5.hud.mjs', 'm55.resume.mjs'];
 const existing = TARGET_MODULES.filter((f) => existsSync(join(PLUGIN, f)));
 const done = existing.length === TARGET_MODULES.length;
+/* R3（2026-10-08）：effort.mjs 是**计划外的第一刀**（智能思考功能域，不在 D1 的 6 个目标模块内）。
+ * 单独报出来，免得「已抽 0/6」看起来像毫无进展。 */
+const extraModules = ['effort.mjs'].filter((f) => existsSync(join(PLUGIN, f)));
 console.log(`   host.impl.mjs = ${hostLines} 行（目标 ≤${SPLIT_TARGET}）｜ 已抽模块 ${existing.length}/${TARGET_MODULES.length}${existing.length ? '：' + existing.join(', ') : ''}`);
+if (extraModules.length) console.log(`   ℹ️  D1 计划外已抽功能域模块：${extraModules.join(', ')}（R3 智能思考解耦）`);
+ok('R3 已抽独立功能域模块 effort.mjs（依赖图叶子节点）',
+  extraModules.length === 1, 'effort.mjs 缺失 ⇒ 智能思考功能域又退回 host.impl.mjs（R3 解耦被回滚？）');
 if (done) {
   ok(`D1 已完成：host.impl.mjs ≤ ${SPLIT_TARGET} 行`, hostLines <= SPLIT_TARGET,
     `切分未彻底：${hostLines} 行`);

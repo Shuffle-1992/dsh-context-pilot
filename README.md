@@ -134,9 +134,13 @@ Agent 自改档不应改掉新会话的默认档。
 
 | 改什么 | 生效方式 |
 | --- | --- |
-| 面板配置（两条线、有效期等） | **即时生效**（host 活读 config，无需重启） |
-| `host.impl.mjs` | plugin toggle 热换 |
+| 面板配置（两条线、有效期、换档冷却等） | **即时生效**（host 活读 config，无需重启） |
+| `host.impl.mjs` / `effort.mjs` | plugin toggle 热换 |
 | `client.js` | 刷新页面 |
+
+> R3（2026-10-08）起智能思考功能域独立为 `plugin/effort.mjs`：host 用
+> `import(\`./effort.mjs?ts=${implTs}\`)` 加载（ts 取自 impl 自身），**与 impl 同批热换**；
+> `static.mjs` §4/§5 的依赖方向与「动态 import 必须带 `?ts=`」护栏自动覆盖它。
 
 详见 [`docs/setup.md`](docs/setup.md#4-部署矩阵)。
 
@@ -160,10 +164,19 @@ Agent 自改档不应改掉新会话的默认档。
 - **R2 换档改工具**（2026-10-08，**已注册生效**）：`set_reasoning_effort` 工具取代文本标记。
   工具调用让本轮**继续到下一步**（源码实证）⇒ **本次任务内立即生效、零用户输入、零伪造消息**；
   顺带消除文本标记的「散文提及误触发」面。实测 `effortTool.ok=true, via=tools.register`
+- **R3 智能思考解耦**（2026-10-08）：功能域抽成 `plugin/effort.mjs`（415 行，依赖图叶子节点），
+  `host.impl.mjs` **2348 → 1563 行**；S1–S10 十项缺陷全消（命名统一 / 拆两个巨型函数 /
+  `sidOf`·`checkEffort`·`bumpSkip` 单点 / `readEffort` 纯 async / 三 Map 合一 /
+  **懒安装彻底移出 M2 注入分支** / 冷却可配 / 工具 output 收敛 / getHud 开关字段分离）；
+  调查脚手架（`r1ProbeOnce` + 三个 `snap.*Probe`）清理，结论改为「留档断言」防丢
+- **压缩失效定位**（2026-10-08）：压缩两条路径全 400 ⇒ 补错误正文取证后定位为 **workbuddy
+  provider 对摘要请求的思考档位报 400**（非本插件）；切 `trae` 后同一路径一次成功
+  （733.9K token / 95% → 1.9%）。全文见 [`docs/compaction-failure-diagnosis.md`](docs/compaction-failure-diagnosis.md)
 - **配置面**：7 个字段，面板按秒/比率显示（总开关为开关滑块）；成本阈值计算器（8 个模型预设，一键算推荐值并写入）
 - **只读审查落地**：外部审查 23 条，批次 1/2/3 全部实施（含心跳泄漏、`ctx.effect` 语义误用等真 bug）
 
-**未实施（明确挂起）**：D1 模块切分（动骨架，**已有测试护栏 + 任务书，可以做了**）、
+**未实施（明确挂起）**：D1 模块切分**剩余部分**（`effort.mjs` 已作为第一刀抽出，
+其余 `core/m1/m2/m3/m5/m55` 仍待切，**已有测试护栏 + 任务书**）、
 C2 无界 Map 上限（当前规模无实际风险）、A6 恢复计数清零、
 **A5 pre-step 强制压缩真机 E2E**（唯一「已实现但成功率未验」的路径——需占用冲到强制压缩线
 才有条件测，当前设为 80%，等接近了再做）、A2/A6 的真机 E2E。
@@ -189,9 +202,11 @@ npm run test:report   # 只跑报告形状
 
 | 套件 | 断言数 | 查什么 | 能抓到什么 |
 | --- | --- | --- | --- |
-| `contract.mjs` | 82 | face 方法表 ↔ client 描述符 ↔ TYPERT 三端对账；Config 字段在 FIELDS/schema/M3_DEFAULTS 三处齐全；退役字段未复活；`mergeConfig` 读取集 ⊆ schema；**getHud 作用域契约**（防 ReferenceError 回归）；**弹窗/阈值行排版契约**；**智能思考 UI 契约**（开关尺寸/右对齐/字段三端） | **调用静默失败**（P29：三端漂移不报错、只是拿不到数据）；已实测抓过 3 个真 bug |
-| `static.mjs` | 30 | 真实 `node --check`；client 自足（无外部 import，require 仅 react）；entry 薄壳（<40 行、有静态 Config、动态 import 带 `?ts=`）；模块依赖方向无环；热换纪律；调试残留扫描 | 语法错误、破坏热换、client 引入依赖、循环依赖、`TODO`/`XXX`/`console.log` 残留 |
-| `report.mjs` | 58 | 产出侧字段契约；`bfOnce` 回填链依赖；C3② 关键事件必须走 full 档；**getHud 作用域与 criticalCap 实参契约**；真实报告结构自洽；`hud-acts.json` 去重；dump 工具可跑 | 报告形状无声破坏（本项目踩过 2 次：顶层读 m3/m5、脚本读已删字段） |
+| `contract.mjs` | 181 | face 方法表 ↔ client 描述符 ↔ TYPERT 三端对账；Config 字段在 FIELDS/schema/M3_DEFAULTS 三处齐全；退役字段未复活；`mergeConfig` 读取集 ⊆ schema；**getHud 作用域契约**（防 ReferenceError 回归）；**弹窗/阈值行排版契约**；**智能思考 UI 契约**（开关尺寸/右对齐/字段三端）；**智能思考 8 条实证结论**（prepend 最外层 / pending 持久 / 冷却基准 / 计数语义 / 两侧校验 / agent.ctx / sid 现读 / 删 maxTokens） | **调用静默失败**（P29：三端漂移不报错、只是拿不到数据）；已实测抓过 3 个真 bug |
+| `static.mjs` | 33 | 真实 `node --check`；client 自足（无外部 import，require 仅 react）；entry 薄壳（<40 行、有静态 Config、动态 import 带 `?ts=`）；模块依赖方向无环；热换纪律；调试残留扫描 | 语法错误、破坏热换、client 引入依赖、循环依赖、`TODO`/`XXX`/`console.log` 残留 |
+| `report.mjs` | 57 | 产出侧字段契约；`bfOnce` 回填链依赖；C3② 关键事件必须走 full 档；**getHud 作用域与 criticalCap 实参契约**；**调查结论留档**（探针退役后结论不得丢）；真实报告结构自洽；`hud-acts.json` 去重；dump 工具可跑 | 报告形状无声破坏（本项目踩过 2 次：顶层读 m3/m5、脚本读已删字段） |
+
+合计 **271 条断言**。
 
 **已验证有效**：注入 3 个人为 bug（`m3-act` 误入精简档 / client face 改名 / host 引用 client.js），
 三套件全部抓到且定位精准。**新增断言均实测验证过「对回归确实失败」**（两边都通过的测试等于没测）。
@@ -246,6 +261,7 @@ npm run asar -- grep --pattern compactIfNeeded --ext js --ctx 3
 | --- | --- | --- | --- |
 | 总开关 | `enabled` | true | 关闭后完全恢复原生 DSH（面板为开关滑块） |
 | **智能思考** | `effortEnabled` | false | 开=暴露思考档位 + 注册 `set_reasoning_effort` 工具；关=提示词不注入、工具也不注册 |
+| **换档冷却(秒)** | `effortCooldownMs` | 30 | 两次换档的最小间隔（存储为 ms）。**换档会使前缀缓存失效 ⇒ 计费敏感**，故可配（R3-S7） |
 | **智能压缩线** | `markerMinRatio` | 0.2 | 占用达此值时模型可自行决定压缩并自动续跑 |
 | **强制压缩线** | `criticalRatio` | 0.85 | 占用达此值无条件强制压缩 |
 | 压缩标记 | `marker` | `[cp:compact]` | 模型回复尾行标记；置空则关闭智能压缩 |
@@ -290,6 +306,9 @@ npm run asar -- grep --pattern compactIfNeeded --ext js --ctx 3
 | [`docs/d1-module-split-brief.md`](docs/d1-module-split-brief.md) | D1 模块切分任务书（目标结构 / 硬规则 / 7 步顺序 / 回滚） |
 | [`docs/r1-reasoning-effort-investigation.md`](docs/r1-reasoning-effort-investigation.md) | **智能思考调查**：读档/枚举/写档三腿实证 + `selectModel` 全局副作用 + dsh-router-laya 参考 |
 | [`docs/r1-effort-design.md`](docs/r1-effort-design.md) | **智能思考设计定稿**：三层门控解耦 / 数据与写通道 / 提示词文本 / UI（弹窗 + 输入框 chip）/ 实施顺序 |
+| [`docs/r2-tool-switch-design.md`](docs/r2-tool-switch-design.md) | **换档改工具方案**：文本标记的两个致命缺陷 / `agent/request` + prepend 应用链 / 压缩能否也做成工具的分析 |
+| [`docs/r3-effort-review.md`](docs/r3-effort-review.md) | **R3 审查与解耦方案**：S1–S10 十项缺陷 / 抽 `effort.mjs` / 8 步实施顺序 / 10 条必须保留的实证结论 |
+| [`docs/compaction-failure-diagnosis.md`](docs/compaction-failure-diagnosis.md) | **压缩全线失效定位**：workbuddy provider 对摘要请求 400 的完整证据链与两条修复选项 |
 | [`docs/reference/README.md`](docs/reference/README.md) | 第三方（DSH 官方）抽取材料的来源与许可 |
 | [`review-brief.md`](review-brief.md) / [`review-findings.md`](review-findings.md) | 只读审查的任务书与报告 |
 

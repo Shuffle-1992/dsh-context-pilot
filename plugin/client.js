@@ -61,9 +61,12 @@ window.__ModuleLoader__.load({
 		 *  备注精简原则（2026-10-07 用户要求）：一行说清用途，不写推荐值枚举（推荐值在计算器里实时算）。 */
 		const FIELDS = [
 			{ key: "enabled", label: "总开关", type: "bool", def: true, hint: "关闭后完全恢复原生 DSH" },
-			/* R2（2026-10-08）：智能思考总门——开=注入思考强度信息 + 注册 set_reasoning_effort 工具；
-			 * 关=提示词不注入、标记也不生效（用户明确定义：一个开关管两件事，不做"只读/只写"拆分）。 */
+			/* 智能思考总门（2026-10-07 引入，R2 换工具方案，R3 移入 host 侧 effort.mjs）：
+			 * 开 = 注入思考强度信息 + 注册 set_reasoning_effort 工具；关 = 都不做
+			 * （用户明确定义：一个开关管两件事，不做"只读/只写"拆分）。 */
 			{ key: "effortEnabled", label: "智能思考", type: "bool", def: false, hint: "开启后向 Agent 暴露思考档位并允许其自主换档；关闭则完全不介入" },
+			/* 换档冷却（R3-S7 起可配）：换档会使前缀缓存失效 ⇒ 属计费敏感参数，故开放配置。 */
+			{ key: "effortCooldownMs", label: "换档冷却(秒)", type: "int", def: 30000, scale: 1000, hint: "两次换档的最小间隔（防反复打断前缀缓存）" },
 			{ key: "markerMinRatio", label: "智能压缩线", type: "num", def: 0.2, hint: "占用达此值时，模型可自行决定压缩并自动续跑" },
 			{ key: "criticalRatio", label: "强制压缩线", type: "num", def: 0.85, hint: "占用达此值无条件强制压缩（先于 DSH 引擎自动压缩触发）" },
 			{ key: "marker", label: "压缩标记", type: "text", def: "[cp:compact]", hint: "模型回复尾行标记；置空则关闭智能压缩" },
@@ -521,7 +524,9 @@ window.__ModuleLoader__.load({
 			const pendingNow = !!(sel && sel.pending);
 			/* ① host 侧信息（开关状态 + 换档冷却）：挂载时问一次；**投影变化时再问一次**
 			 * （换档必然改变投影 ⇒ 天然触发重问，拿到新的 cooldownUntil）。
-			 * 依赖数组用 effort/pendingNow：它们变化即代表投影变了。 */
+			 * 依赖数组用 effort/pendingNow：它们变化即代表投影变了。
+			 * R3-S9：host 现显式返回 effortEnabled 布尔 —— 开关状态与档位数据分离，
+			 * 不再用 `effort.ok` 同时承担两种语义（它既可能是「开关关闭」也可能是「读档失败」）。 */
 			const [hostInfo, setHostInfo] = react.useState(null);
 			react.useEffect(() => {
 				let alive = true;
@@ -531,7 +536,14 @@ window.__ModuleLoader__.load({
 						const raw = await hudRemoteSvc.getHud(NS.sid || "");
 						const env = raw && typeof raw === "object" && "value" in raw ? (raw.ok ? raw.value : null) : raw;
 						if (!alive) return;
-						setHostInfo(env && env.ok && env.effort && env.effort.ok ? env.effort : null);
+						const e = env && env.effort ? env.effort : null;
+						setHostInfo(env && env.ok
+							? {
+								on: env.effortEnabled === true,
+								cooldownUntil: e && typeof e.cooldownUntil === "number" ? e.cooldownUntil : 0,
+								cooldownTotalMs: e && typeof e.cooldownTotalMs === "number" ? e.cooldownTotalMs : 30000,
+							}
+							: null);
 					} catch { /* 吞 */ }
 				};
 				pullOnce();
@@ -542,7 +554,7 @@ window.__ModuleLoader__.load({
 			}, [effort, pendingNow]);
 			/* 冷却倒计时（本地，仅在确实处于冷却时启用 1s tick；冷却结束自动停） */
 			const [now, setNow] = react.useState(() => Date.now());
-			const until = hostInfo && typeof hostInfo.cooldownUntil === "number" ? hostInfo.cooldownUntil : 0;
+			const until = hostInfo ? hostInfo.cooldownUntil : 0;
 			const cooling = until > now;
 			react.useEffect(() => {
 				if (!cooling) return undefined;
@@ -562,7 +574,7 @@ window.__ModuleLoader__.load({
 					if (cs.fontSize) node.style.fontSize = cs.fontSize;
 				} catch { /* 忽略 */ }
 			}, [effort]);
-			if (!hostInfo || !effort) return null;
+			if (!hostInfo || !hostInfo.on || !effort) return null;
 			/* 显示形态（2026-10-07 用户要求）：不用冒号，改成**两个 span + 间距**——
 			 * 「智能思考档位」与档位值视觉分离（冒号在中英混排里偏挤，间距更清爽）。
 			 * 间距 6px（与弹窗内其他 label/开关的 gap 一致）。

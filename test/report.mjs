@@ -35,6 +35,8 @@ const ok = (name, cond, detail) => {
 };
 
 const host = readFileSync(join(PLUGIN, 'host.impl.mjs'), 'utf8');
+/* R3（2026-10-08）：智能思考功能域已抽独立模块，相关断言随之改指向模块。 */
+const effort = readFileSync(join(PLUGIN, 'effort.mjs'), 'utf8');
 
 /* ═══════════ ① 产出侧形状契约（源码断言）═══════════ */
 console.log('\n== 1. 产出侧形状契约（host.impl.mjs 必须写入的关键字段）==');
@@ -177,28 +179,33 @@ if (!existsSync(HUD_ACTS)) {
   }
 }
 
-/* ═══════════ ⑥ R1 思考强度探针契约（2026-10-07 调查）═══════════ */
-console.log('\n== 6. R1 思考强度探针（默认只读，副作用须显式授权）==');
-// 调查结论（docs/r1-reasoning-effort-investigation.md）：
-//  ① 读当前档 = session.requestHeader().config.reasoningEffort（selectionFor 不在命令门面上）
-//  ② 枚举可选档 = llm.resolveModelInfo() / sessionController.modelCatalog()
-//  ③ 写档两条路：selectModel（**会写全局默认模型**，副作用）vs agent/request waterfall（无副作用，推荐）
-const r1Body = /const r1ProbeOnce = async \(\) => \{([\s\S]*?)\n  \};/.exec(host)?.[1] ?? '';
-ok('解析出 r1ProbeOnce 函数体', r1Body.length > 0, '未找到 r1ProbeOnce（探针被移除？）');
-ok('读当前档走 requestHeader（非 selectionFor）', /requestHeader\?\.\(\)/.test(r1Body),
-  '未用 requestHeader 读档 ⇒ 与调查结论不符');
-ok('枚举走 resolveModelInfo', /resolveModelInfo/.test(r1Body), '未枚举模型可选档');
-ok('枚举同时取 modelCatalog（全目录）', /modelCatalog/.test(r1Body), '未取官方聚合目录');
-// 副作用闸门：selectModel 会 agentDefaultModel.saveSelection ⇒ 改全局默认模型
-ok('写测默认关闭（须 DCP_R1_WRITE_TEST=1 显式授权）',
-  /DCP_R1_WRITE_TEST === '1'/.test(r1Body),
-  '写测未加环境变量闸门 ⇒ selectModel 会静默改写全局默认模型');
-ok('源码注释记录了 selectModel 的全局默认副作用', /saveSelection|全局默认/.test(host),
-  '未记录该副作用（实施期易踩）');
-// 报告瘦身：探针只在 r1-probe 条目落盘，不得复制进每条 FULL 快照
-ok('r1 探针只在 r1-probe 条目落盘（防稳态报告膨胀）',
-  /reason === 'r1-probe' && state\.r1Probe/.test(host),
-  'r1 无条件写入快照 ⇒ modelCatalog 全目录被复制进每条 FULL 条目');
+/* ═══════════ ⑥ 思考强度调查结论契约（探针已退役，结论必须留档）═══════════ */
+console.log('\n== 6. 思考强度调查结论（探针退役，结论与参考实现必须留档）==');
+// R3（2026-10-08）：调查期的一次性探针 r1ProbeOnce（~170 行、且自带 selectModel 写入路径）
+// 已随「清理调查脚手架」退役——结论已入 docs 与 effort.mjs 文件头。
+// 本段用「结论留档」断言替代原来的「探针存在」断言：结论本身必须还在，否则实施期会再踩一遍。
+ok('调查期探针已退役（不留一次性脚手架）',
+  !/r1ProbeOnce|state\.r1Probe|r2Probe|r3Probe/.test(host),
+  '仍残留 r1ProbeOnce/state.r1Probe/snap.r*Probe ⇒ 调查脚手架未清理');
+const invDocPath = join(ROOT, 'docs', 'r1-reasoning-effort-investigation.md');
+const invDoc = existsSync(invDocPath) ? readFileSync(invDocPath, 'utf8') : '';
+ok('调查结论已入档（docs/r1-reasoning-effort-investigation.md）', invDoc.length > 0,
+  '缺少调查文档 ⇒ 结论只活在代码里，重构一次就丢');
+ok('负面结论已入档（selectionFor 不在命令门面上）',
+  /requestHeader/.test(invDoc) && /selectionFor/.test(invDoc),
+  '文档未记录「selectionFor 不可用」⇒ 实施期会再试一遍这条死路');
+ok('写档副作用已入档（selectModel 会改全局默认模型）',
+  /saveSelection|全局默认/.test(invDoc),
+  '未记录该副作用 ⇒ 实施期易踩（会顺带改掉新会话的默认档）');
+/* 结论必须同时固化在模块文件头（10 条「来之不易」）—— 只放 docs 不够：
+ * 改这个文件的人不一定先读 docs。断言几条最容易被当「冗余」删掉的。 */
+ok('关键实证结论固化在 effort.mjs 文件头',
+  /prepend: true/.test(effort) && /delete out\.maxTokens/.test(effort) &&
+  /UNSUPPORTED_REASONING_EFFORT/.test(effort) && /id 会轮转/.test(effort),
+  'effort.mjs 未固化 prepend / maxTokens / 两侧校验 / sid 轮转四条结论 ⇒ 下轮重构会误删');
+ok('读档唯一可靠路径仍是 requestHeader（代码与文档一致）',
+  /agent\?\.session\?\.requestHeader\?\.\(\)/.test(effort),
+  'effort.mjs 未走 requestHeader 读档 ⇒ 与调查结论不符');
 // 参考实现已存档（router-laya 的 agent/request 路线）
 ok('router-laya 参考源码已存档', existsSync(join(ROOT, '.data', 'ref', 'router-laya-index.js')),
   '缺少 .data/ref/router-laya-index.js（参考实现证据）');

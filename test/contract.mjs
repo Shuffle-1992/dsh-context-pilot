@@ -107,6 +107,9 @@ for (const p of optionalNames) {
 console.log('\n== 5. Config 字段（FIELDS ↔ schema ↔ M3_DEFAULTS）==');
 const schema = read('plugin-config.schema.mjs');
 const host = read('host.impl.mjs');
+/* R3（2026-10-08）：智能思考功能域已抽成独立模块（plugin/effort.mjs），
+ * 相关断言随之改指向模块——「实现住哪里」变了，「契约是什么」没变。 */
+const effort = read('effort.mjs');
 
 const fieldsKeys = [...(/const FIELDS = \[([\s\S]*?)\n\t\t\];/.exec(client)?.[1] ?? '').matchAll(/key:\s*"([^"]+)"/g)].map((m) => m[1]);
 // schema 里非 volatile 状态的 Config 键（排除 hud* 状态字段）
@@ -215,8 +218,20 @@ ok('chip 注册到 conversation.input.right（模型选择器左侧）',
 ok('chip 注册 id 独立（不与官方条目撞车）', /id:\s*"context-pilot-effort"/.test(client),
   '未用自有 id ⇒ 可能替换官方条目');
 ok('chip 仅在 effortEnabled 开启时显示',
-  /if \(!hostInfo \|\| !effort\) return null;/.test(client),
+  /if \(!hostInfo \|\| !hostInfo\.on \|\| !effort\) return null;/.test(client),
   '缺少显示条件 ⇒ 开关关闭时仍显示');
+/* R3-S9：host 显式返回 effortEnabled 布尔 —— 开关状态与档位数据**分离**。
+ * 原先 chip 靠 `effort.ok` 推断开关，而 `effort.ok=false` 既可能是「开关关闭」
+ * 也可能是「读档失败」，两种语义混在一个字段里。 */
+ok('chip 读 host 的 effortEnabled 布尔（开关状态与数据分离，S9）',
+  /env\.effortEnabled === true/.test(client),
+  'chip 仍用 effort.ok 推断开关 ⇒ 无法区分「开关关闭」与「读档失败」');
+ok('host getHud 独立返回 effortEnabled（与 effort 数据分离）',
+  /effortEnabled: effOn,/.test(host),
+  'getHud 未独立返回开关状态 ⇒ S9 未落地');
+ok('wire 的方法签名声明了 effortEnabled（三端一致）',
+  /effortEnabled:boolean/.test(wire),
+  'wire 签名缺 effortEnabled ⇒ 与 host 实际返回漂移');
 ok('chip 不用冒号分隔（用户要求改间距）', !/智能思考档位:\$\{/.test(client) && !/`智能思考档位:/.test(client),
   '仍用「智能思考档位:XXX」冒号形态 ⇒ 用户要求改成间距');
 ok('chip 用两个 span + gap 呈现（间距 6px）',
@@ -264,8 +279,19 @@ ok('mergeConfig 读取 effortEnabled', /for \(const k of \[[\s\S]{0,120}'effortE
   'mergeConfig 未读 ⇒ 面板改值不生效');
 ok('effortEnabled 默认关闭（新功能默认不介入）', /effortEnabled:\s*false/.test(host),
   '默认开启 ⇒ 未确认就改变既有会话行为');
+/* R3-S7：换档冷却可配（换档会使前缀缓存失效 ⇒ 计费敏感参数，必须能让用户按口径调）。 */
+ok('FIELDS 含 effortCooldownMs（冷却可配，S7）', fieldsKeys.includes('effortCooldownMs'), '面板缺该字段 ⇒ 用户改不到冷却');
+ok('schema 含 effortCooldownMs', schemaKeys.includes('effortCooldownMs'), 'schema 缺该字段 ⇒ 面板保存被拒');
+ok('M3_DEFAULTS 含 effortCooldownMs', hostDefaults.includes('effortCooldownMs'), 'host 缺该字段 ⇒ 读不到');
+ok('mergeConfig 读取后按数值校验（防 NaN 污染）',
+  /for \(const k of \['armedTtlMs', 'sweepMinIntervalMs', 'effortCooldownMs'\]\)/.test(host),
+  'effortCooldownMs 未走数值校验 ⇒ 非法值会被写进 M3');
+ok('effort 模块从 config 现读冷却（面板改值即生效）',
+  /readCfg: \(\) => \(\{ enabled: M3\.effortEnabled === true, cooldownMs: M3\.effortCooldownMs \}\)/.test(host) &&
+  /const cooldownMs = \(\) => \{/.test(effort),
+  '冷却未走现读 ⇒ 面板改值后仍用启动时的旧值');
 
-/* ═══════════ 6.10 R1 智能思考注入（门控解耦 + 教学覆盖度）═══════════ */
+/* ═══════════ 6.10 智能思考注入（门控解耦 + 教学覆盖度）═══════════ */
 console.log('\n== 6.10 智能思考注入（门控必须与压缩解耦）==');
 // 用户要求「全程允许」——注入与换档**不得**引用压缩的 markerMinRatio 门控。
 // 现有 M2 注入三部分门控不同：用量行无门控 / 决策卡 ratio>=markerMinRatio / 一次性说明首次。
@@ -275,58 +301,66 @@ const injectBody = (() => {
   return m ? m[1] : '';
 })();
 ok('解析出 M2 注入主体', injectBody.length > 0, '未匹配到注入主体（改名了？）');
-/* 只截取 **effort 相关**的那几行（从注释「R1 智能思考」到教学标记结束）——
+/* 只截取 **effort 相关**的那几行（从注释「智能思考：**独立门控**」到 fullText 拼装）——
  * 不能截整个注入主体：它包含 renderPolicyCard 行，而卡本身合法引用 markerMinRatio。 */
 const effInject = (() => {
-  const s = host.indexOf('/* R1 智能思考：**独立门控**');
+  const s = host.indexOf('/* 智能思考：**独立门控**');
   if (s < 0) return '';
   const e = host.indexOf('const fullText =', s);
   return e > s ? host.slice(s, e) : '';
 })();
 ok('解析出 effort 注入段', effInject.length > 0, '未找到 effort 注入段');
 ok('智能思考注入用独立门控 effortEnabled（不共用 markerMinRatio）',
-  /if \(M3\.effortEnabled === true\) eff = await readEffort\(agent\)/.test(effInject),
+  /if \(M3\.effortEnabled === true && effortApi\) eff = await effortApi\.read\(agent\)/.test(effInject),
   'effort 注入未走 effortEnabled 独立门控 ⇒ 低占用时被压缩门控挡掉（用户要求全程允许）');
-/* ⚠️ R2 真 bug 修复（2026-10-08 实测）：懒安装必须**早于 `step !== 1` 早退**。
- * 原实现塞在注入分支内 ⇒ 一轮里只有 step 1 能执行到；若首步就有工具调用，
- * 后续 pre-step 的 step 恒 >1 ⇒ 钩子永远装不上 ⇒ **工具接受成功却永不变档**
- * （实测：effortToolCalls=1、effortSwitches=0、effortHooks 从未赋值）。 */
-ok('懒安装早于 step!==1 早退（防「工具接受但永不变档」）',
+/* ⚠️ R3-S4（2026-10-08 结构性修复）：懒安装必须**彻底移出** M2 注入分支。
+ * R2 曾因把它留在该分支内（且只在 `step!==1` 早退之后）而产出真 bug：
+ * 一轮首步就调工具 ⇒ 后续 pre-step 的 step 恒 >1 ⇒ 钩子永装不上
+ * ⇒ 工具接受成功却永不变档（实测 effortToolCalls=1、effortSwitches=0、effortHooks 从未赋值）。
+ * 现在的判据比「早于早退」更强：**必须先于 pre-step 里的任何其它动作**（连压缩检查都排在它后面），
+ * 且注入分支内不得再出现任何 ensure/注册调用。 */
+ok('懒安装先于 pre-step 的一切其它动作（R3-S4 结构性解耦）',
   (() => {
-    const s = host.indexOf('ensureEffortHooks(); // R1：懒安装');
+    const s = host.indexOf('await ensureEffort();');
+    const p = host.indexOf('await preStepCompaction(payload);');
+    return s > 0 && p > 0 && s < p;
+  })(),
+  'ensureEffort 未放在 pre-step 最前面 ⇒ 仍可能被某条早退绕过');
+ok('懒安装不受 step 门控约束（先于 step!==1 早退）',
+  (() => {
+    const s = host.indexOf('await ensureEffort();');
     const g = host.indexOf('if (step !== 1) return decision;');
     return s > 0 && g > 0 && s < g;
   })(),
   '懒安装仍在 step!==1 早退之后 ⇒ 首步即调工具时钩子永不安装');
-ok('registerEffortTool 懒注册同样早于早退',
-  (() => {
-    const s = host.indexOf('registerEffortTool(); // R2：确保工具已注册');
-    const g = host.indexOf('if (step !== 1) return decision;');
-    return s > 0 && g > 0 && s < g;
-  })(),
-  '工具懒注册在早退之后 ⇒ 会话中途打开开关时不生效');
+ok('注入分支内不再有任何 effort 安装/注册调用（耦合已断）',
+  !/ensureEffort\(\)|effortApi\.ensure|registerTool\(\)/.test(effInject),
+  '注入分支内仍做 effort 安装 ⇒ 早退条件一改就会再次静默破坏 effort');
 /* 剥注释后再查：注释里说明「与 markerMinRatio 解耦」是正常文字，代码里引用才是耦合。 */
 const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 ok('effort 注入段不引用 markerMinRatio（剥注释后）', !/markerMinRatio/.test(stripComments(effInject)),
   'effort 注入段**代码**引用了 markerMinRatio ⇒ 与压缩门控耦合');
 ok('读档失败不阻断注入（try/catch 吞）',
-  /catch \{ \/\* 读档失败 ⇒ 不注入/.test(host) || /if \(M3\.effortEnabled === true\) eff = await readEffort/.test(injectBody),
+  /catch \{ \/\* 读档失败 ⇒ 不注入/.test(host),
   '读档异常未吞 ⇒ 新功能可打崩主注入流程');
 ok('思考强度教学与插件说明同时机（会话首次）',
-  /effBriefedBySid\.has\(sid\) \? renderEffortBrief\(eff\)/.test(injectBody) ||
   /!effBriefedBySid\.has\(sid\)/.test(injectBody),
   '教学未按会话一次性 ⇒ 每轮重复占 token');
 ok('用量行后缀拼装（每轮告知当前实际档位）',
   /effSuffix \? `\$\{r\.text\} ｜ \$\{effSuffix\}` : r\.text/.test(injectBody),
   '未拼后缀 ⇒ 模型不知道当前**实际生效**档位');
+ok('注入文本出口走模块（host 不再内联文案）',
+  /effortApi\?\.renderSuffix\(eff\)/.test(injectBody) && /effortApi\?\.renderBrief\(eff\)/.test(injectBody),
+  'host 仍内联 effort 文案 ⇒ 与模块两份实现会漂移');
 // 教学文本覆盖度 6/6（用户指出「暴露了但不会调用」——必须教）
-// R2 变更：③ 由「标记语法」改为「**工具名 + 调用方式**」；⑤ 由「下一步生效」改为「本次任务内立即生效」
-const effBrief = /const renderEffortBrief = \(eff\) => \{([\s\S]*?)\n  \};/.exec(host)?.[1] ?? '';
-ok('解析出 renderEffortBrief', effBrief.length > 0, '未找到教学文本函数');
+// ③ 由「标记语法」改为「**工具名 + 调用方式**」；⑤ 由「下一步生效」改为「本次任务内立即生效」
+// R3：教学文本住 plugin/effort.mjs（功能域整体搬入），断言随之改指向模块。
+const effBrief = /function renderBrief\(eff\) \{([\s\S]*?)\n  \}/.exec(effort)?.[1] ?? '';
+ok('解析出 renderBrief（教学文本函数）', effBrief.length > 0, '未找到教学文本函数');
 for (const [name, re] of [
   ['① 当前值', /当前思考强度档位：' \+ eff\.current/],
   ['② 可选档', /本模型可选 ' \+ opts/],
-  ['③ 工具名+调用方式', /EFFORT_TOOL_NAME \+ '（参数 effort=<档位>）'|调用工具 '/],
+  ['③ 工具名+调用方式', /TOOL_NAME \+ '（参数 effort=<档位>）切换：'/],
   ['④ 何时该用', /更深推理|更快响应/],
   ['⑤ 生效时机+不中断', /本次任务内立即生效|任务与上下文不中断/],
   ['⑥ 代价提醒', /缓存失效|1-2 次/],
@@ -354,148 +388,196 @@ ok('clearBriefed 声明早于调用点（无 TDZ 风险）',
   host.indexOf('const clearBriefed = ') < host.indexOf('clearBriefed(sid)'),
   'clearBriefed 声明在调用之后 ⇒ const TDZ 会抛 ReferenceError');
 
-/* ═══════════ 6.12 R1 换档执行通道（agent.ctx 作用域，非 global）═══════════ */
-console.log('\n== 6.12 换档执行通道（agent/request 挂在 agent.ctx 上）==');
+/* ═══════════ 6.12 换档执行通道（agent.ctx 作用域，非 global）═══════════ */
+console.log('\n== 6.12 换档执行通道（实现已抽 plugin/effort.mjs）==');
 // 源码实证（2026-10-07）：`waterfall("agent/request", {turn,step,signal}, seed)` 的 payload
 // **只有 turn/step/signal，没有 agent** ⇒ 不能用 payload 找会话（第一版实现踩了这个坑，
 // 会导致 per-session 查找恒不命中、换档静默失效）。
 // 官方 installModelSelection 的做法：注册在 **agent.ctx**（dsh-agent/lib/types/model-selection.js L45/L61，
 // 调用方 api-session-controller L310 传 agent.ctx）。本插件同款：按 agent 懒安装 + WeakSet 去重。
+ok('R3-S7：effort 实现已抽独立模块（host 只做接线 + 带 ?ts= 热换）',
+  /import\(`\.\/effort\.mjs\?ts=\$\{IMPL_TS\}`\)/.test(host) && /let effortApi = null/.test(host) &&
+  !/pendingEffortBySid|effortHookInstalled|readEffort = \(agent\)/.test(host),
+  'host 仍内联 effort 实现 ⇒ R3-S7 未落地（或动态 import 漏了 ?ts= 会命中无参缓存）');
 ok('换档钩子装在 agent.ctx（不是插件 ctx 的 global）',
-  /agent\.ctx\.on\('agent\/request'/.test(host),
+  /agent\.ctx\.on\('agent\/request'/.test(effort),
   '未装在 agent.ctx ⇒ payload 无 agent，per-session 查找恒不命中（换档静默失效）');
 ok('未使用插件级 global agent/request（payload 无 agent 会失效）',
   !/state\.listeners\['agent\/request'\]\s*=\s*addListener/.test(host),
   '仍注册插件级 agent/request ⇒ 拿不到 agent');
 ok('钩子按 agent 去重（WeakSet，防重复安装）',
-  /const effortHookInstalled = new WeakSet\(\)/.test(host) && /effortHookInstalled\.has\(agent\)/.test(host),
+  /const hookInstalled = new WeakSet\(\)/.test(effort) && /hookInstalled\.has\(agent\)/.test(effort),
   '未去重 ⇒ 每次 pre-step 重复注册，waterfall 回调叠加');
-ok('钩子懒安装（新会话自动覆盖）', /const ensureEffortHooks = \(\) => \{/.test(host) && /results\.push\(installEffortRequestHook\(a\)\)/.test(host),
+ok('钩子懒安装（新会话自动覆盖）',
+  /function ensure\(\) \{/.test(effort) && /installHook\(a\)/.test(effort),
   '无懒安装 ⇒ 新会话拿不到钩子');
-/* R2 取证要求（2026-10-08）：ensureEffortHooks 曾**全静默**——工具链路已通但 apply 从不执行时
- * 无法定位断点（实测踩到：effortToolCalls=1 而 effortSwitches=0）。
- * 现必须留痕：调用次数 / enabled / agent 数 / 每个 agent 的安装结果 / 异常。 */
+/* 取证要求（2026-10-08 踩坑换来）：ensure 曾**全静默**——工具链路已通但 apply 从不执行时
+ * 无法定位断点（实测 effortToolCalls=1 而 effortSwitches=0、effortHooks 从未赋值）。
+ * 现必须留痕：调用次数 / enabled / agent 数 / 安装成功与失败数 / 异常。 */
 ok('懒安装有取证留痕（防静默失败）',
-  /state\.m3\.effortEnsure/.test(host) && /lastResults/.test(host) && /lastAgents/.test(host),
+  /const d = state\.m3\.effortDiag;/.test(effort) && /d\.calls \+= 1/.test(effort) &&
+  /d\.installed = ok/.test(effort) && /d\.failed = failed/.test(effort),
   '懒安装无留痕 ⇒ 工具接受但不变档时无法定位');
 ok('钩子安装失败有留痕（agent.ctx 不可用时）',
-  /state\.m3\.effortHookError = \{/.test(host),
+  /effortDiag\.hookError = \{/.test(effort),
   '安装失败静默 return false ⇒ 无法区分「没调用」与「调用了但失败」');
-ok('pre-step 会触发懒安装', /if \(M3\.effortEnabled === true\) \{[\s\S]{0,120}?ensureEffortHooks\(\)/.test(host),
-  'pre-step 未调用 ensureEffortHooks ⇒ 钩子永不安装');
+ok('host 侧初始化 effortDiag（报告可读到该字段）',
+  /effortDiag: \{ calls: 0/.test(host),
+  'host state 未初始化 effortDiag ⇒ 报告字段缺失（R3-S10 合并后必须同步初始化）');
+ok('pre-step 会触发懒安装', /await ensureEffort\(\);/.test(host),
+  'pre-step 未调用 ensureEffort ⇒ 钩子永不安装');
+ok('新建会话也会补装（双保险）',
+  /state\.listeners\['session\/created'\] = addListener\('session\/created',[\s\S]{0,400}?ensureEffort\(\)/.test(host),
+  '新会话只在 pre-step 才补装 ⇒ 若首轮 pre-step 早退则钩子缺失');
 /* 实测风险（2026-10-07 E2E 排查中发现）：sid 若只在**安装期**捕获一次，而本项目实测
- * session id 会轮转（压缩后 / 多会话交错）⇒ 标记解析路径写入的 sid 与钩子查询的 sid
- * 可能不一致 ⇒ pendingEffortBySid 查不到 ⇒ **换档静默失效**。
+ * session id 会轮转（压缩后 / 多会话交错）⇒ 查询不到 pending ⇒ **换档静默失效**。
  * 修复：请求时**现读** sid（优先），安装期值仅作兜底（两者取并集查找）。 */
 ok('sid 在请求时现读（不只依赖安装期捕获）',
-  /const sidNow = String\(pick\(agent\.session\?\.id/.test(host),
-  'sid 仅在安装期捕获 ⇒ id 轮转后 pending 查不到，换档静默失效');
+  /const sidNow = sidOf\(agent\);/.test(effort) && /const sidAtInstall = sidOf\(agent\)/.test(effort),
+  'sid 仅在安装期捕获 ⇒ id 轮转后查不到 pending，换档静默失效');
 ok('现读 sid 未命中时回退安装期值（并集查找）',
-  /pendingEffortBySid\.get\(sidNow\) \?\? \(sidAtInstall !== sidNow \? pendingEffortBySid\.get\(sidAtInstall\)/.test(host),
+  /hitNow \? sidNow : \(sidAtInstall && bySid\.has\(sidAtInstall\) \? sidAtInstall : sidNow\)/.test(effort),
   '无回退 ⇒ 两种 sid 不一致时丢失待应用档位');
-ok('删除/记忆用实际命中的 key（避免孤儿 pending）',
-  /const sidKey = pendingEffortBySid\.get\(sidNow\) \? sidNow : sidAtInstall;/.test(host) &&
-  /pendingEffortBySid\.delete\(sidKey\)/.test(host),
-  '用固定 sid 删除 ⇒ 命中另一 key 时留下孤儿 pending（下次误触发）');
-// 声明顺序（const 无提升，TDZ 会抛 ReferenceError）
-for (const [name, def, use] of [
-  ['installEffortRequestHook', 'const installEffortRequestHook', 'installEffortRequestHook(a)'],
-  ['ensureEffortHooks', 'const ensureEffortHooks', 'ensureEffortHooks();'],
-  ['registerEffortTool', 'const registerEffortTool', 'registerEffortTool();'],
-]) {
-  ok(`${name} 声明早于使用（防 const TDZ）`, host.indexOf(def) < host.indexOf(use),
-    `${name} 声明在使用之后 ⇒ 运行时 TDZ 抛错`);
-}
+ok('删除/记忆用实际命中的 key（避免孤儿状态）', /dropSid\(sidKey\)/.test(effort),
+  '用固定 sid 删除 ⇒ 命中另一 key 时留下孤儿状态（下次误触发）');
+/* R3-S6：原先三张 Map（pending/冷却基准/已写入档）各自 delete，漏删即留孤儿 ——
+ * 现合并为单对象 + 单删除点，孤儿在结构上不可能出现。 */
+ok('状态合并为单一 bySid 对象（S6）',
+  /const bySid = new Map\(\)/.test(effort) &&
+  !/pendingEffortBySid|effortSwitchAtBySid|appliedEffortBySid/.test(stripComments(effort) + stripComments(host)),
+  '状态仍分散在多张 Map ⇒ 各自 delete 会留孤儿');
+ok('sid/校验/跳过计数三个小逻辑已抽单点（S3）',
+  /const sidOf = \(agent, fallback = ''\)/.test(effort) && /const checkEffort = \(eff, want\) => \{/.test(effort) &&
+  /const bumpSkip = \(kind\) => \{/.test(effort),
+  '三个小逻辑仍内联重复 ⇒ S3 未消');
+/* S5：`readEffort` 原先在早退路径**同步返回对象**、在正常路径返回 Promise ⇒ 调用方必须 await，
+ * 但读代码看不出它可能是 Promise；某处漏 await 就会拿到 Promise 当对象用（`eff.ok` 恒 undefined）
+ * ⇒ **静默失效**。现全路径 async + 全调用点 await。
+ * ⚠️ 变异验证（去掉这条判据后「把某条 return 改成 return Promise.resolve(...)」不再被抓到）：
+ *    故判据必须针对「**任何** 从非同期路径 return Promise」，而不只是 `Promise.resolve(p.value)` 一种形态。 */
+const readBody = /async function read\(agent\) \{([\s\S]*?)\n  \}/.exec(effort)?.[1] ?? '';
+ok('readEffort 全程 async（S5：消除同步/异步混用）',
+  readBody.length > 0 && !/return\s+Promise/.test(readBody),
+  '仍从非同期路径 return Promise ⇒ 漏 await 会静默拿到 Promise 当对象用');
+ok('read 的全部调用点都 await（S5 的另一半）',
+  (effort.match(/read\(agent\)/g) || []).length >= 3 && /await effortApi\.read\(agent\)/.test(host),
+  'read 有调用点未 await ⇒ 拿到 Promise 当对象用（静默失效）');
 ok('session/event 监听器只有一处（合并而非重复注册）',
   (host.match(/state\.listeners\['session\/event'\]/g) || []).length === 1,
   '注册了两处 ⇒ 后注册者覆盖 listeners 记录（压缩标记链路取证丢失）');
 // 三个必备防护
 ok('应用前校验档位合法性（否则 llm 抛 UNSUPPORTED_REASONING_EFFORT 中断请求）',
-  /opts && !opts\.includes\(pend\.effort\)/.test(host),
+  /const chk = checkEffort\(eff, want\);/.test(effort),
   '未校验档位 ⇒ 非法档会中断整个请求');
-ok('非法档只忽略并留痕（不硬送）', /effortSkips\.invalid/.test(host) && /lastEffortApply = \{[\s\S]{0,200}?applied: false/.test(host),
+ok('非法档只忽略并留痕（不硬送）',
+  /bumpSkip\('invalid'\)/.test(effort) && /applied: false, error: chk\.reason/.test(effort),
   '非法档未留痕 ⇒ 无法取证为何没生效');
 ok('有换档冷却（防频繁换档反复打断前缀缓存）',
-  /const EFFORT_SWITCH_MIN_MS = 30_000/.test(host) && /since < EFFORT_SWITCH_MIN_MS/.test(host),
+  /export const DEFAULT_COOLDOWN_MS = 30_000/.test(effort) && /since < cap/.test(effort),
   '无冷却 ⇒ 模型可每轮换档，反复使缓存失效');
 ok('尊重他人显式指定档位（让位，不覆盖）',
-  /config\?\.reasoningEffort !== undefined && applied !== undefined\s*\n?\s*&& config\.reasoningEffort !== applied && config\.reasoningEffort !== pend\.effort/.test(host),
+  /config\.reasoningEffort !== s\.applied && config\.reasoningEffort !== want/.test(effort),
   '未区分「自己写的档」与「他人显式指定」⇒ 与用户/subagent 选择打架或自我锁死');
 /* ⚠️ 必须 prepend：官方 installModelSelection 挂在**同一** agent/request 上且在内层，
  * 它 await next() 后 delete reasoningEffort 再套回持久化 header 值 ⇒ 非最外层会被剥掉。
  * 实测缺陷（2026-10-07）：applied:true 但之后每轮注入仍是旧档 ⇒ 换档实际未生效。 */
 ok('换档 hook 用 prepend（否则被官方 installModelSelection 剥掉）',
-  /\}, \{ prepend: true \}\); \/\/ ⚠️ 必须 prepend/.test(host),
+  /\}, \{ prepend: true \}\); \/\/ 结论①/.test(effort),
   '未 prepend ⇒ 官方内层会 delete 我们写入的 effort 再套回旧档（换档静默失效）');
 ok('pending 持久（每轮覆盖，不一次性消费）',
-  /pendingEffortBySid\.set\(sid, \{ effort: want/.test(host) &&
-  !/const out = \{ \.\.\.config, reasoningEffort: pend\.effort \};\s*\n\s*delete out\.maxTokens;\s*\n\s*pendingEffortBySid\.delete/.test(host),
-  'pending 被一次性删除 ⇒ 只有第一轮生效，之后被内层打回旧档');
+  /st\.want = want;/.test(effort) && !/want = null/.test(effort),
+  'pending 被一次性消费 ⇒ 只有第一轮生效，之后被内层打回旧档');
 ok('换档计数只在档位真变化时自增（否则变成请求次数）',
-  /const changed = config\?\.reasoningEffort !== pend\.effort;/.test(host) && /effortReasserts/.test(host),
+  /const changed = config\?\.reasoningEffort !== want;/.test(effort) && /effortReasserts \+= 1/.test(effort),
   '无条件自增 ⇒ effortSwitches 失去取证意义');
 ok('冷却基准只在真变化时更新（否则后续换档全被挡）',
-  /if \(changed\) \{\s*\n\s*effortSwitchAtBySid\.set\(sidKey, Date\.now\(\)\);/.test(host),
+  /if \(changed\) \{\s*\n\s*s\.switchedAt = Date\.now\(\);/.test(effort),
   '每轮刷新冷却基准 ⇒ 冷却永远处于「刚换过」，模型后续换档全被跳过');
 ok('应用时删除 maxTokens（不把上个 adapter 的 cap 钉住）',
-  /const out = \{ \.\.\.config, reasoningEffort: pend\.effort \};\s*\n\s*delete out\.maxTokens;/.test(host),
+  /const out = \{ \.\.\.config, reasoningEffort: want \};\s*\n\s*delete out\.maxTokens;/.test(effort),
   '未删 maxTokens ⇒ 换档后沿用旧 adapter 的输出上限（router-laya applyRoute 同款教训）');
-ok('换档异常原样放行（绝不影响请求）', /catch \(e\) \{\s*\n\s*log\('warn', `R1 换档应用异常（吞，原样放行）/.test(host),
+ok('换档异常原样放行（绝不影响请求）',
+  /log\('warn', `智能思考 应用异常（吞，原样放行）/.test(effort),
   '异常未吞 ⇒ 新功能可打崩模型请求');
+ok('结论清单固化在模块文件头（重构时不得当冗余删掉）',
+  /十条「来之不易」/.test(effort) && /结论①/.test(effort) && /结论⑩/.test(effort),
+  '模块未固化「来之不易」结论 ⇒ 下轮重构极易误删（每一条都是踩坑换来的）');
 
-/* ═══════════ 6.13 R2 换档工具（取代文本标记）═══════════ */
-console.log('\n== 6.13 换档工具 set_reasoning_effort（R2，取代文本标记）==');
+/* ═══════════ 6.13 换档工具（取代文本标记）═══════════ */
+console.log('\n== 6.13 换档工具 set_reasoning_effort（取代文本标记）==');
 // 用户 2026-10-08 决策：① 不保留文本标记；② 工具名 set_reasoning_effort。
 // 工具方案为什么对（源码实证）：dsh-agent-loop L1152-1155 有 toolCalls ⇒ step() 返回 null
 // ⇒ turnEnds 保持 null ⇒ L1005 不 break ⇒ target="next-step" ⇒ **本轮继续**；
 // 每步重走 agent/request ⇒ 下一步即带新档位。零用户输入、零伪造消息。
 ok('文本标记已移除（用户要求不保留）',
-  !/EFFORT_MARKER_RE/.test(host) && !/\[cp:effort/.test(stripComments(host)),
+  !/EFFORT_MARKER_RE/.test(host + effort) && !/\[cp:effort/.test(stripComments(host + effort)),
   '仍残留 [cp:effort] 标记解析 ⇒ 与「不保留文本标记」的决定矛盾');
 ok('session/event 不再解析换档标记',
-  !/matchAll\(EFFORT_MARKER_RE\)/.test(host),
+  !/matchAll\(EFFORT_MARKER_RE\)/.test(host + effort),
   'session/event 仍在解析标记');
 ok('工具名 = set_reasoning_effort（用户指定）',
-  /const EFFORT_TOOL_NAME = 'set_reasoning_effort';/.test(host),
+  /export const TOOL_NAME = 'set_reasoning_effort';/.test(effort),
   '工具名不符用户指定');
 ok('用官方 defineTool 定义（非自造 API）',
-  /defineToolFn\(\{[\s\S]{0,200}?name: EFFORT_TOOL_NAME/.test(host),
+  /tools\.register\(defineTool\(toolSpec\(\)\)\)/.test(effort) && /name: TOOL_NAME,/.test(effort),
   '未走官方 defineTool ⇒ 注册可能被拒');
+ok('工具「定义」与「执行体」分离（R3-S2：拆 133 行巨型函数）',
+  /function toolSpec\(\) \{/.test(effort) && /async function runTool\(args, exec\) \{/.test(effort),
+  '工具 schema 与执行逻辑仍混在一个巨型函数里');
+ok('钩子「决策」与「安装」分离（R3-S2：拆 108 行巨型函数）',
+  /async function applyTo\(config, agent, sidAtInstall\) \{/.test(effort) && /function installHook\(agent\) \{/.test(effort),
+  '决策逻辑与安装薄壳仍混在一个巨型函数里');
 ok('走官方 ctx.tools.register 注册',
-  /tools\.register\(def\)/.test(host) && /svc\('tools'\)/.test(host),
+  /tools\.register\(defineTool\(toolSpec\(\)\)\)/.test(effort) && /svc\('tools'\)/.test(effort),
   '未用 tools.register ⇒ 工具不生效');
 ok('defineTool 走候选链加载（bare→env→resourcesPath→硬编码）',
   /async function loadDefineTool\(\)/.test(host) && /dshToolsCandidates/.test(host),
   '未走候选链 ⇒ 第三方目录下 bare import 必失败（本项目已有教训）');
 ok('effortEnabled 关闭时不注册工具（完全不介入）',
-  /if \(M3\.effortEnabled === true\) registerEffortTool\(\);/.test(host),
+  /if \(M3\.effortEnabled === true\) effortReady\.then\(\(api\) => api\?\.ensure\(\)\)/.test(host) &&
+  /if \(!d\.enabled\) return false;/.test(effort),
   '关闭时仍注册 ⇒ 与「关=完全不介入」的用户定义矛盾');
 ok('会话中途打开开关会补注册（懒注册）',
-  /registerEffortTool\(\); \/\/ R2：确保工具已注册/.test(host),
+  /registerTool\(\);\s*\n\s*return true;/.test(effort),
   '只在加载时注册一次 ⇒ 中途打开开关后工具不可用');
 // 工具必须**不抛错**（抛错会中断本轮；这里只想"告知 + 不换"）
 ok('工具非法档返回结构化错误而非抛错（抛错会中断本轮）',
-  /return \{ ok: false, error: `档位 "\$\{want\}" 不在当前模型的可选集内。`, options: opts \};/.test(host),
+  /return \{ ok: false, error: `档位 "\$\{want\}" 不在当前模型的可选集内。`, options: chk\.options \};/.test(effort),
   '非法档抛错 ⇒ 中断模型本轮（应当返回错误让模型自行纠正）');
-ok('工具冷却中返回 remainSec（模型能知道等多久）',
-  /return \{\s*\n\s*ok: false, cooling: true, remainSec/.test(host),
-  '冷却仅静默忽略 ⇒ 模型不知为何没生效');
-ok('工具写的是持久 pending（复用 R1 的 prepend 应用链）',
-  /pendingEffortBySid\.set\(sid, \{ effort: want, at: Date\.now\(\), source: 'tool' \}\)/.test(host),
+/* R3-S8：output 收敛为 4 字段。原先 ok/effort/applied/error/options/cooling/remainSec 七字段，
+ * 其中 cooling + remainSec 语义重叠（且都可由 error 文案承担）⇒ 冷却剩余秒数改写入 error。 */
+ok('工具 output 收敛为 4 字段（S8）',
+  /additionalProperties: false/.test(effort) &&
+  /ok: \{ type: 'boolean', required: true/.test(effort) &&
+  !/cooling: \{ type/.test(effort) && !/remainSec: \{ type/.test(effort) &&
+  !/applied: \{ type/.test(effort),
+  'output schema 未收敛 ⇒ 字段语义重叠（cooling/remainSec/applied 应并入 error 文案与 ok/effort）');
+ok('冷却剩余秒数写进 error 文案（S8 收敛后仍能告知模型）',
+  /还需 \$\{remainSec\} 秒/.test(effort),
+  '冷却被静默忽略 ⇒ 模型不知为何没生效');
+ok('工具写的是持久 pending（复用 prepend 应用链）',
+  /st\.want = want;/.test(effort),
   '工具未写 pending ⇒ agent/request 拿不到目标档位');
 ok('工具有参数 schema（effort 必填）',
-  /effort: \{[\s\S]{0,120}?required: true/.test(host),
+  /effort: \{[\s\S]{0,160}?required: true/.test(effort),
   '缺参数 schema ⇒ defineTool 校验失败/模型不知道传什么');
 ok('工具有 output schema + render',
-  /output: \{[\s\S]{0,80}?schema: \{[\s\S]{0,900}?render: \(_args, value\) => \[\{ type: 'text', text: JSON\.stringify\(value\) \}\]/.test(host),
+  /output: \{[\s\S]{0,80}?schema: \{[\s\S]{0,700}?render: \(_args, value\) => \[\{ type: 'text', text: JSON\.stringify\(value\) \}\]/.test(effort),
   '缺 output.render ⇒ 工具结果无法渲染给模型');
 ok('工具执行异常被吞并返回错误（不影响会话）',
-  /R2 换档工具执行异常（吞）/.test(host),
+  /智能思考 工具执行异常（吞）/.test(effort),
   '异常未吞 ⇒ 可打崩工具调用');
 ok('工具注册结果有取证字段（effortTool / effortToolLoader）',
   /effortTool: null/.test(host) && /effortToolLoader: null/.test(host),
   '缺取证 ⇒ 工具没生效时无法定位断点');
-/* R1 的「标记必须独占一行（防散文误触发）」断言已随文本标记一并移除——
+ok('工具调用次数有取证（effortToolCalls / lastEffortTool）',
+  /effortToolCalls \+= 1/.test(effort) && /state\.m3\.lastEffortTool = \{/.test(effort) &&
+  /effortToolCalls: 0/.test(host) && /lastEffortTool: null/.test(host),
+  '工具调用无取证 ⇒ 无法区分「模型没调」与「调了没生效」');
+ok('死字段已删除（effortMarkerHits / lastEffortMarker）',
+  !/effortMarkerHits|lastEffortMarker/.test(stripComments(host) + stripComments(effort)),
+  '文本标记时代的死字段仍在 ⇒ 新读者会以为标记机制还在（R3-S1）');
+/* 文本标记时代的「标记必须独占一行（防散文误触发）」断言已随方案一并移除——
  * 工具方案参数结构化，**不存在**正则误判面（这正是换工具的理由之一）。
  * 历史记录见 docs/milestones.md（R1 那节仍保留该坑的描述，供后来者参考）。 */
 

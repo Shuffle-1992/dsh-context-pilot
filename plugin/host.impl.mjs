@@ -59,10 +59,15 @@ const DSH_TOOLS_REL = ['dsh', 'node_modules', '@deepseek-ai', 'dsh-tools', 'lib'
  */
 const M3_DEFAULTS = {
   enabled: true,
-  /* R1（2026-10-07）：智能思考总门。开 = 向 Agent 注入思考强度信息 + 允许其写 [cp:effort] 改档；
-   * 关 = 提示词不注入、标记不生效（用户定义：一个开关管两件事，不做只读/只写拆分）。
+  /* 智能思考总门（2026-10-07 引入，R2 换工具方案，R3 移入 effort.mjs）。
+   * 开 = 向 Agent 注入思考强度信息 + 注册 set_reasoning_effort 工具允许其自主换档；
+   * 关 = 提示词不注入、工具不注册（用户定义：一个开关管两件事，不做只读/只写拆分）。
    * 默认 false：新功能默认不介入，避免未确认行为改变既有会话（用户可随时在弹窗开启）。 */
   effortEnabled: false,
+  /* 换档冷却（2026-10-08 起可配，R3-S7）：两次换档的最小间隔。
+   * 换档会使前缀缓存失效（dsh-llm call-config.js 标注 effort 属缓存敏感参数）⇒
+   * 这是**会实际影响计费**的参数，故开放配置；默认 30s 是实测「够用且不误挡」的折中。 */
+  effortCooldownMs: 30_000,
   criticalRatio: 0.85, // 强制压缩线：pre-step/idle 无条件压（官方 pressure 路径）；GLM 等 1:4 档可降 0.80
   markerMinRatio: 0.2, // 智能压缩线：模型标记生效门槛，**同时是决策卡注入门槛**（2026-10-07 起二者统一）
   armedTtlMs: 120_000, // 标记有效期（事件→idle 之间）
@@ -278,7 +283,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       const live = (v) => (v !== null && typeof v === 'object' && typeof v.get === 'function' ? v.get() : v);
       if (!config || typeof config !== 'object') return;
       const raw = {};
-      for (const k of ['enabled', 'effortEnabled', 'criticalRatio', 'marker', 'markerMinRatio', 'armedTtlMs', 'sweepMinIntervalMs']) {
+      for (const k of ['enabled', 'effortEnabled', 'criticalRatio', 'marker', 'markerMinRatio', 'armedTtlMs', 'sweepMinIntervalMs', 'effortCooldownMs']) {
         raw[k] = live(config[k]);
       }
       if (typeof raw.enabled === 'boolean') M3.enabled = raw.enabled;
@@ -287,7 +292,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       for (const k of ['criticalRatio', 'markerMinRatio']) {
         if (typeof raw[k] === 'number' && Number.isFinite(raw[k]) && raw[k] >= 0 && raw[k] <= 1) M3[k] = raw[k];
       }
-      for (const k of ['armedTtlMs', 'sweepMinIntervalMs']) {
+      for (const k of ['armedTtlMs', 'sweepMinIntervalMs', 'effortCooldownMs']) {
         if (typeof raw[k] === 'number' && Number.isFinite(raw[k]) && raw[k] >= 0) M3[k] = raw[k];
       }
     } catch (e) {
@@ -412,7 +417,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
   /* R1：智能思考教学的一次性标记（与压缩说明分开——两者开关独立，可能只开一个）。
    * ⚠️ 与 briefedBySid 一样，**压缩成功后必须清除**（见 clearBriefed 的注释）。 */
   const effBriefedBySid = new Set();
-  /* R1（2026-10-07，真 bug 修复）：一次性说明的「已讲」标记必须在**压缩成功后清除**。
+  /* 一次性说明的「已讲」标记必须在**压缩成功后清除**（真 bug 修复，2026-10-07）。
    * 原实现 briefedBySid 只有 add、全文无 delete/clear ⇒ 压缩后那条说明被收进摘要，
    * 而插件认为「讲过了」永不再讲；摘要由模型生成、**不保证保留该段** ⇒ 模型可能永久
    * 失去用法说明（压缩标记怎么写、智能思考怎么换档都不知道）。
@@ -609,7 +614,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     implLoadedAt: new Date().toISOString(),
     listeners: {},
     m2: { registered: false, injections: 0, briefings: 0, lastText: null, lastAt: null, via: null, skips: {},
-      // R1：智能思考注入取证（教学次数 / 压缩后重讲次数）
+      // 智能思考注入取证（教学次数 / 压缩后重讲次数 / 每轮后缀次数）
       effortBriefings: 0, briefReissues: 0, effortSuffixes: 0 },
     m3: {
       decisions: 0,
@@ -633,16 +638,22 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       markerHits: 0, // B3：keywordHits 恒 0 字段已随审查退役（历史报告条目保持原样，不受影响）
       policyCards: 0,
       engineCapProbe: null, // C-own：引擎阈值探测留痕（via/ratio/fallback），取证「钳制用的是哪个值」
-      // R1/R2 智能思考取证：标记命中/换档应用/跳过原因（cooldown|invalid|foreign|noRoute）
-      effortMarkerHits: 0,
-      effortSwitches: 0,
-      effortSkips: {},
-      lastEffortMarker: null,
-      lastEffortApply: null,
-      // R2：工具方案取证（注册结果 / 加载链 / 工具调用次数）
-      effortTool: null,
-      effortToolLoader: null,
+      /* 智能思考（effort）取证 —— R3 收敛（原先 12 个散字段 + 两处 `?? 0` 隐式初始化）。
+       * `effortMarkerHits`（文本标记时代，永不自增）与 `lastEffortMarker`（实为工具路径写入）
+       * 已删除：前者是死字段，后者名字误导。 */
+      effortSwitches: 0, // 真换档次数（只在档位实际变化时自增，见 effort.mjs 结论④）
+      effortReasserts: 0, // 每轮重复覆盖次数（防被官方内层打回，不计入换档）
+      effortSkips: {}, // 跳过原因计数：foreign|noRoute|invalid|sameValue|cooldown
       effortToolCalls: 0,
+      lastEffortApply: null, // 最近一次应用决策（含 from/provider/model/options/失败原因）
+      lastEffortTool: null, // 最近一次工具接受（want + sid）
+      effortTool: null, // 工具注册结果
+      effortToolLoader: null, // defineTool 加载链探测
+      effortHooks: 0, // 已安装的 agent/request 钩子数
+      /** 懒安装诊断（R3-S10：原先 effortEnsure + effortHookError 两个对象，现合一）。
+       *  ⚠️ 曾因该函数**全静默**导致「工具接受成功却永不变档」无从定位（effortToolCalls=1、
+       *  effortSwitches=0、effortHooks 从未赋值）⇒ 必须留痕。 */
+      effortDiag: { calls: 0, at: null, enabled: false, agents: null, installed: 0, failed: 0, error: null, hookError: null },
     },
     // M5 HUD 发布取证（entry 查找/edit 结果全程留痕——弹窗侧空态无法区分静默失败）
     // hud.gen = 实例指纹：客户端取到的 gen 应与本实例一致；不一致 = RPC 打到了旧激活的僵尸面
@@ -650,8 +661,6 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     m5: { lastPublish: null, hud: { hudLastAct: '', hudArmed: '', hudPending: '', gen: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}` }, hudFace: 'absent', acts: [], lastSid: null, lineage: {} },
     // M5.5 恢复通道取证（每次尝试逐相位落报告，杜绝 log-only 黑洞）
     m55: { armed: null, attempts: [], channelProbe: null },
-    // R1（2026-10-07）：思考强度调查探针（一次性只读；见 apply 尾部 r1ProbeOnce）
-    r1Probe: null,
   };
   /* 激活即从 hud-acts.json 恢复压缩历史（跨重启/跨 toggle 存续）；
    * 报告回填降级为迁移/兜底源（bfOnce 内合并去重，不再覆盖式写 acts）。 */
@@ -692,366 +701,69 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     return ok ? v : DEFAULT_ENGINE_THRESHOLD;
   };
 
-  /* ---- R1（2026-10-07）：思考强度（reasoning effort）读取 —— 供注入与输入框 chip 使用 ----
-   * 读档唯一可靠路径 = `agent.session.requestHeader().config.reasoningEffort`（**已生效值**）。
-   * 负面结论（实测）：`sessionController.selectionFor(agent)` 是内部类方法，命令门面上不存在
-   * （hasSelectionFor=false）⇒ 不可用。详见 docs/r1-reasoning-effort-investigation.md。
-   * 可选档 = `llm.resolveModelInfo(provider, model).reasoning.efforts`（**动态取，绝不硬编码**：
-   * 同一 model id 在不同 provider 档位不同，实测 trae/deepseek-v4.1-flash=low/high/xhigh，
-   * workbuddy 同名模型=off/low/high/max）。
-   * 全函数吞异常：拿不到就返回 { ok:false }，调用方跳过（绝不因读档失败影响主流程）。 */
-  const readEffort = (agent) => {
-    try {
-      const hdr = agent?.session?.requestHeader?.();
-      const cfg = hdr?.config ?? null;
-      if (!cfg?.provider || !cfg?.model) return { ok: false, error: 'no-route' };
-      const isAdapterDefault = hdr?.adapterDefaults?.reasoningEffort === true;
-      /* 当前档：adapter 默认时 reasoningEffort 可能仍存在，但语义是「不是会话选择」——标注出来 */
-      const current = typeof cfg.reasoningEffort === 'string' && cfg.reasoningEffort ? cfg.reasoningEffort : null;
-      /* 可选档：异步取，拿不到就只给当前值（UI 仍可显示，只是没有可选列表） */
-      const llm = svc('llm');
-      const p = tryOf(() => llm?.resolveModelInfo?.(cfg.provider, cfg.model));
-      const base = {
-        ok: true,
-        provider: cfg.provider,
-        model: cfg.model,
-        current,
-        adapterDefault: isAdapterDefault,
-        efforts: null,
-        defaultEffort: null,
-      };
-      if (p.error || !p.value) return base;
-      return Promise.resolve(p.value).then(
-        (mi) => ({
-          ...base,
-          efforts: mi?.reasoning ? (mi.reasoning.efforts ?? []).map((e) => e.id) : null,
-          defaultEffort: mi?.reasoning?.defaultEffort ?? null,
-        }),
-        () => base,
-      );
-    } catch (e) {
-      return { ok: false, error: msg(e) };
-    }
-  };
-
-  /* ═══════════ R2：换档 = **工具** `set_reasoning_effort`（取代 R1 文本标记）═══════════
-   * 为什么弃用文本标记（用户 2026-10-08 指出，诊断正确）：
-   *  ① 标记写在回复末尾 ⇒ 本轮已结束 ⇒ 档位只在**下一轮**（用户下次说话）生效；
-   *     「需要我再发起才能触发标记，这个就失去意义了」。
-   *  ② 若仿压缩标记用 followup() 自动拉起，那是往 inbox.next-turn **伪造一条用户消息**——
-   *     用户原话：「压缩标记的自动拉起本质是调用我的输入框发起新的内容拉起的」。
+  /* ═══════════ 智能思考（reasoning effort）：模块接线（R3 解耦，2026-10-08）═══════════
+   * 实现全部搬进 plugin/effort.mjs（配置/状态/读取/钩子/工具/注入文本/HUD 载荷）；
+   * 此处只留四件事：① 依赖注入；② 幂等懒安装入口；③ 注入文本出口；④ HUD 载荷出口。
+   * 审查与解耦方案：docs/r3-effort-review.md；十条「来之不易」的实证结论见 effort.mjs 文件头。
    *
-   * 工具方案为什么对（源码实证）：
-   *   dsh-agent-loop L1152-1155：有 toolCalls ⇒ step() 返回 null ⇒ L979 turnEnds=null
-   *   ⇒ L1005 不 break ⇒ target="next-step" ⇒ **本轮继续到下一步**；
-   *   而每步都重走 prepareRequest → agent/request waterfall（L1179）
-   *   ⇒ 工具执行后写 pending，**下一步的请求即带新档位**。
-   *   全程零用户输入、零伪造消息、同轮内生效。
-   *   附带消除 R1 的「散文提及误触发」风险（工具参数结构化，无正则）。
-   *
-   * 应用仍在 agent/request（保留 R1 的 prepend 修复，见下）。
-   * 设计全文：docs/r2-tool-switch-design.md */
-  /** sid → { effort, at }：本会话**期望档位**（持久态，非一次性）。
-   * ⚠️ 必须持久：官方 installModelSelection 也在 agent/request 上，且它在**外层**——
-   * 它 `await next()` 后 `delete reasoningEffort` 再套上自己的（来自持久化 header）
-   * ⇒ 内层写的 effort 会被剥掉（实测：applied:true 但之后每轮仍是旧档）。
-   * 故本插件用 `{ prepend: true }` 成为**最外层**，每轮都覆盖一次。 */
-  const pendingEffortBySid = new Map();
-  /** 换档冷却（默认 30s）：防频繁换档反复打断前缀缓存。 */
-  const EFFORT_SWITCH_MIN_MS = 30_000;
-  const effortSwitchAtBySid = new Map();
-  /** 生效档位的本地记忆：区分「我们写的档」与「他人显式指定」（router-laya isOurRoute 语义）。
-   *  没有它，第二轮起每轮都看起来是「显式指定」，插件会与用户/subagent 的选择打架或自我锁定。 */
-  const appliedEffortBySid = new Map();
-
-  /* ---- R1 执行：agent/request waterfall —— 改请求配置（无全局副作用） ----
-   * 源码依据（dsh-agent-loop lib/index.js L1179）：`waterfall("agent/request", {turn,step,signal}, seed)`
-   * 的返回值直接进 `llm.prepareCall(proposedConfig, signal)` ⇒ 改它就改本轮请求。
-   *
-   * ⚠️ **payload 里没有 agent**（源码实证：只有 {turn,step,signal}）⇒ 不能用 payload 找会话。
-   * 官方 installModelSelection 的做法是注册在 **agent.ctx**（agent 作用域）上
-   * （dsh-agent/lib/types/model-selection.js L45/L61，调用方 api-session-controller L310 传 agent.ctx）。
-   * 故本插件**按 agent 逐个安装**（懒安装，WeakSet 去重），sid 由闭包捕获。
-   *
-   * 校验失败/无待应用档位 ⇒ 原样返回 config（绝不影响请求）。 */
-  const effortHookInstalled = new WeakSet();
-  const installEffortRequestHook = (agent) => {
-    try {
-      if (!agent?.ctx || typeof agent.ctx.on !== 'function') {
-        /* R2 取证（2026-10-08）：工具链路已通但 apply 未执行——此处曾静默 return false，
-         * 导致「工具接受成功却永不变档」。改为留痕，便于定位。 */
-        state.m3.effortHookError = {
-          at: new Date().toISOString(),
-          reason: !agent?.ctx ? 'agent.ctx 缺失' : 'agent.ctx.on 非函数',
-          ctxType: typeof agent?.ctx,
-          onType: typeof agent?.ctx?.on,
-          agentKeys: tryOf(() => Object.keys(agent ?? {}).slice(0, 20)).value ?? null,
-        };
-        return false;
-      }
-      if (effortHookInstalled.has(agent)) return true;
-      /* 安装时捕获一次（兜底），但**请求时重读**（见下）——本项目实测 session id 会轮转
-       * （压缩后 / 多会话交错），安装期捕获的 id 可能与标记解析路径写入的 sid 不一致，
-       * 导致 pendingEffortBySid 查不到 ⇒ 换档静默失效。 */
-      const sidAtInstall = String(pick(agent.session?.id, agent.sessionId, agent.id, ''));
-      if (!sidAtInstall) return false;
-      effortHookInstalled.add(agent);
-      agent.ctx.on('agent/request', async (payload, next) => {
-        const config = await next();
-        try {
-          if (!effEnabled() || M3.effortEnabled !== true) return config;
-          /* ⚠️ sid **现读**（优先），安装期捕获值仅作兜底——防 id 轮转导致 pending 查不到。
-           * 两条读法都试：先现读，命中即用；未命中再回退安装期值（两者取并集查找）。 */
-          const sidNow = String(pick(agent.session?.id, agent.sessionId, agent.id, ''));
-          const pend = pendingEffortBySid.get(sidNow) ?? (sidAtInstall !== sidNow ? pendingEffortBySid.get(sidAtInstall) : undefined);
-          if (!pend) return config;
-          /* 实际命中的 key（用于后续 delete / 记忆写入，避免留下孤儿 pending） */
-          const sidKey = pendingEffortBySid.get(sidNow) ? sidNow : sidAtInstall;
-          /* 尊重「他人显式指定」：若当前 config 带 effort 且**既不是我们上次写的、也不是我们本次想写的**，
-           * 说明是用户手动选档或 subagent 自带 ⇒ 让位（router-laya carriesExplicitRoute 语义）。
-           * ⚠️ 必须同时排除 pend.effort：本 hook 每轮都会跑（pending 持久），
-           * 官方内层会把 config 设为持久化 header 值——若该值恰为我们已写入的档，
-           * 只比 applied 会漏判；加上 pend 比较才稳。 */
-          const applied = appliedEffortBySid.get(sidKey);
-          if (config?.reasoningEffort !== undefined && applied !== undefined
-              && config.reasoningEffort !== applied && config.reasoningEffort !== pend.effort) {
-            pendingEffortBySid.delete(sidKey);
-            state.m3.effortSkips = state.m3.effortSkips ?? {};
-            state.m3.effortSkips.foreign = (state.m3.effortSkips.foreign ?? 0) + 1;
-            log('info', `R1 换档让位：当前请求档位 ${config.reasoningEffort} 非本插件所写（他人显式指定）`);
-            return config;
-          }
-          /* 档位合法性校验（**必须**：非法档会让 llm 抛 UNSUPPORTED_REASONING_EFFORT 中断请求） */
-          const eff = await readEffort(agent);
-          const opts = Array.isArray(eff?.efforts) ? eff.efforts : null;
-          if (!eff?.ok) {
-            pendingEffortBySid.delete(sidKey);
-            state.m3.effortSkips = state.m3.effortSkips ?? {};
-            state.m3.effortSkips.noRoute = (state.m3.effortSkips.noRoute ?? 0) + 1;
-            return config;
-          }
-          if (opts && !opts.includes(pend.effort)) {
-            pendingEffortBySid.delete(sidKey);
-            state.m3.effortSkips = state.m3.effortSkips ?? {};
-            state.m3.effortSkips.invalid = (state.m3.effortSkips.invalid ?? 0) + 1;
-            state.m3.lastEffortApply = {
-              at: new Date().toISOString(), sessionId: sidKey, want: pend.effort, applied: false,
-              error: `档位不在当前模型可选集内（可选 ${opts.join('/')}）`,
-            };
-            log('warn', `R1 换档忽略：${pend.effort} 不在 ${eff.provider}/${eff.model} 的可选集（${opts.join('/')}）`);
-            schedule('r1-effort', 400);
-            return config;
-          }
-          /* 应用（去掉 maxTokens：换档不应把上个 adapter 的 cap 钉住——router-laya applyRoute 同款）。
-           * ⚠️ **不删除 pending**：本 hook 用 prepend 处于最外层，官方 installModelSelection 在内层
-           * 会 delete reasoningEffort 再套回持久化 header 的值 ⇒ 必须**每轮**都覆盖一次，
-           * 否则只有第一轮生效、之后被打回旧档（实测缺陷）。
-           * 持久 pending = 「本会话期望档位」，直到被新的 [cp:effort] 替换或被让位逻辑清除。 */
-          const out = { ...config, reasoningEffort: pend.effort };
-          delete out.maxTokens;
-          appliedEffortBySid.set(sidKey, pend.effort);
-          /* ⚠️ 计数器只在**档位真正变化**时自增：pending 持久 ⇒ 本 hook 每轮都跑，
-           * 若无条件自增会变成「请求次数」而非「换档次数」，失去取证意义。
-           * ⚠️ effortSwitchAtBySid（冷却基准）也**只在变化时**更新——否则每轮刷新会让
-           * 冷却永远处于「刚刚换过」状态，把模型后续的新标记全部挡掉。 */
-          const changed = config?.reasoningEffort !== pend.effort;
-          if (changed) {
-            effortSwitchAtBySid.set(sidKey, Date.now());
-            state.m3.effortSwitches = (state.m3.effortSwitches ?? 0) + 1;
-            state.m3.lastEffortApply = {
-              at: new Date().toISOString(), sessionId: sidKey, want: pend.effort,
-              from: config?.reasoningEffort ?? null, applied: true,
-              provider: eff.provider, model: eff.model, options: opts,
-              sidNow, sidAtInstall,
-            };
-            log('info', `R1 换档应用：${config?.reasoningEffort ?? '(默认)'} → ${pend.effort}（${eff.provider}/${eff.model}，下一步生效）`);
-            schedule('r1-effort', 400);
-          } else {
-            /* 已一致：只记「维持」次数（每轮覆盖仍在做，防被内层打回），不刷 lastEffortApply */
-            state.m3.effortReasserts = (state.m3.effortReasserts ?? 0) + 1;
-          }
-          return out;
-        } catch (e) {
-          log('warn', `R1 换档应用异常（吞，原样放行）：${msg(e)}`);
-          return config;
-        }
-      }, { prepend: true }); // ⚠️ 必须 prepend：官方 installModelSelection 在同 seam 上且在内层，
-      // 它 await next() 后会 delete reasoningEffort 再套回持久化 header 值 ⇒ 非最外层会被剥掉（实测缺陷）。
-      state.m3.effortHooks = (state.m3.effortHooks ?? 0) + 1;
-      return true;
-    } catch (e) {
-      log('warn', `R1 安装 agent/request 钩子失败（吞）：${msg(e)}`);
-      return false;
-    }
-  };
-  /** 懒安装：每次 pre-step / 快照时对可见 agent 补装（新会话自动覆盖）。
-   * R2 取证（2026-10-08）：此前该函数**全静默**——工具链路通但 apply 从不执行时无处可查。
-   * 现留痕：enabled 状态 / agent 列表长度 / 每个 agent 的安装结果。 */
-  const ensureEffortHooks = () => {
-    try {
-      state.m3.effortEnsure = state.m3.effortEnsure ?? { calls: 0, lastAgents: null, lastResults: null };
-      state.m3.effortEnsure.calls += 1;
-      state.m3.effortEnsure.enabled = M3.effortEnabled === true;
-      if (M3.effortEnabled !== true) return;
-      const list = svc('agents')?.list?.() ?? [];
-      state.m3.effortEnsure.lastAgents = Array.isArray(list) ? list.length : 'not-array';
-      const results = [];
-      for (const a of list) results.push(installEffortRequestHook(a));
-      state.m3.effortEnsure.lastResults = results;
-      state.m3.effortEnsure.at = new Date().toISOString();
-    } catch (e) {
-      state.m3.effortEnsure = { ...(state.m3.effortEnsure ?? {}), error: msg(e), at: new Date().toISOString() };
-    }
-  };
-
-  /* ═══════════ R2：换档工具 `set_reasoning_effort` ═══════════
-   * 模型像调用任何工具一样调用它 ⇒ **本轮继续**（agent-loop L1152-1155：有 toolCalls
-   * 时 step() 返回 null，turnEnds 保持 null，L1005 不 break）⇒ 下一步的 agent/request
-   * 即应用新档位。零用户输入、零伪造消息、同轮生效。
-   *
-   * 工具契约（照官方 dsh-tool-ask-user 范式）：
-   *   defineTool({ name, description, parameters, output:{schema,render}, execute(args, exec) })
-   *   exec = { name, callId, agent, signal }（dsh-tools types L771-776）
-   *
-   * ⚠️ 关键设计：**工具不抛错**。非法档/冷却中一律返回结构化结果让模型自己纠正——
-   * 抛错会中断本轮（工具错误对模型是可见的失败），而这里只想要"告知 + 不换"。
-   * 这与 agent/request 路径必须校验（否则 llm 抛 UNSUPPORTED_REASONING_EFFORT 中断请求）
-   * 是两层不同的保护。 */
-  const EFFORT_TOOL_NAME = 'set_reasoning_effort';
-  let defineToolFn = null; // 由 loadDefineTool 异步填充
-  let effortToolRegistered = false;
-
-  const registerEffortTool = () => {
-    try {
-      if (effortToolRegistered) return true;
-      if (!defineToolFn) return false;
-      const tools = svc('tools');
-      if (!tools || typeof tools.register !== 'function') {
-        state.m3.effortTool = { at: new Date().toISOString(), ok: false, error: 'tools.register 不可用' };
-        return false;
-      }
-      const def = defineToolFn({
-        name: EFFORT_TOOL_NAME,
-        description:
-          '调整本次任务的思考强度档位（下一步生效，任务不中断）。'
-          + '当前档位与可选档位见每轮开头的用量行与首次注入的说明。'
-          + '需要更深推理（复杂设计、疑难排查、长链规划）时升档；'
-          + '简单查询、机械修改时降档可省额度。'
-          + '换档可能使前缀缓存失效，一次任务 1-2 次为宜。',
-        parameters: {
-          effort: {
-            type: 'string',
-            required: true,
-            description: '目标档位。必须在该模型的可选集内（可选集见首次注入的说明或当前用量行）。',
-          },
-        },
-        output: {
-          schema: {
-            type: 'object',
-            additionalProperties: true,
-            properties: {
-              ok: { type: 'boolean', required: true, description: '是否已接受换档。' },
-              effort: { type: 'string', description: '本次请求的档位。' },
-              applied: { type: 'string', description: '生效时机说明（如 next-step）。' },
-              error: { type: 'string', description: '未接受时的原因。' },
-              options: { type: 'array', items: { type: 'string' }, description: '该模型的可选档位。' },
-              cooling: { type: 'boolean', description: '是否因冷却被拒。' },
-              remainSec: { type: 'number', description: '冷却剩余秒数。' },
-            },
-          },
-          render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
-        },
-        async execute(args, exec) {
-          try {
-            if (!effEnabled() || M3.effortEnabled !== true) {
-              return { ok: false, error: '智能思考未开启（用户在设置里关闭了该功能）。' };
-            }
-            const agent = exec?.agent;
-            if (!agent) return { ok: false, error: '无 agent 作用域，无法换档。' };
-            const want = String(args?.effort ?? '').trim();
-            if (!want) return { ok: false, error: 'effort 参数为空。' };
-            const sid = String(pick(agent.session?.id, agent.sessionId, agent.id, ''));
-            if (!sid) return { ok: false, error: '无法解析会话 id。' };
-            /* 档位合法性校验：拿当前模型的可选集 */
-            const eff = await readEffort(agent);
-            if (!eff?.ok) return { ok: false, error: `无法读取当前模型档位信息（${eff?.error ?? '未知'}）。` };
-            const opts = Array.isArray(eff.efforts) ? eff.efforts : null;
-            if (opts && !opts.includes(want)) {
-              state.m3.effortSkips = state.m3.effortSkips ?? {};
-              state.m3.effortSkips.invalid = (state.m3.effortSkips.invalid ?? 0) + 1;
-              state.m3.lastEffortApply = {
-                at: new Date().toISOString(), sessionId: sid, want, applied: false,
-                via: 'tool', error: `档位不在可选集内（${opts.join('/')}）`,
-              };
-              log('warn', `R2 换档工具拒绝：${want} 不在 ${eff.provider}/${eff.model} 的可选集（${opts.join('/')}）`);
-              schedule('r2-effort', 400);
-              /* ⚠️ 返回结构化错误而非抛错——让模型自己纠正（抛错会中断本轮） */
-              return { ok: false, error: `档位 "${want}" 不在当前模型的可选集内。`, options: opts };
-            }
-            /* 幂等：与期望档位相同 ⇒ 直接成功（不消耗冷却） */
-            const cur = pendingEffortBySid.get(sid);
-            if (cur && cur.effort === want) {
-              state.m3.effortSkips = state.m3.effortSkips ?? {};
-              state.m3.effortSkips.sameValue = (state.m3.effortSkips.sameValue ?? 0) + 1;
-              return { ok: true, effort: want, applied: 'already', note: '该档位已是当前期望值，无需切换。' };
-            }
-            /* 冷却 */
-            const lastAt = effortSwitchAtBySid.get(sid) ?? 0;
-            const since = Date.now() - lastAt;
-            if (since < EFFORT_SWITCH_MIN_MS) {
-              const remainSec = Math.ceil((EFFORT_SWITCH_MIN_MS - since) / 1000);
-              state.m3.effortSkips = state.m3.effortSkips ?? {};
-              state.m3.effortSkips.cooldown = (state.m3.effortSkips.cooldown ?? 0) + 1;
-              log('info', `R2 换档工具被冷却拒绝（还剩 ${remainSec}s）`);
-              schedule('r2-effort', 400);
-              return {
-                ok: false, cooling: true, remainSec, options: opts ?? undefined,
-                error: `换档冷却中，还需 ${remainSec} 秒。冷却用于避免频繁换档反复打断前缀缓存。`,
-              };
-            }
-            /* 接受：写持久 pending（agent/request 最外层每步覆盖） */
-            pendingEffortBySid.set(sid, { effort: want, at: Date.now(), source: 'tool' });
-            state.m3.effortToolCalls = (state.m3.effortToolCalls ?? 0) + 1;
-            state.m3.lastEffortMarker = { at: new Date().toISOString(), sessionId: sid, want, via: 'tool' };
-            log('info', `R2 换档工具接受：${eff.current ?? '(默认)'} → ${want}（${eff.provider}/${eff.model}）→ 下一步生效`);
-            schedule('r2-effort', 400);
-            return {
-              ok: true, effort: want, applied: 'next-step',
-              from: eff.current ?? undefined,
-              note: '已接受。下一步（本次工具调用之后的继续步骤）即以新档位请求，任务不中断。',
-            };
-          } catch (e) {
-            log('warn', `R2 换档工具执行异常（吞）：${msg(e)}`);
-            return { ok: false, error: `内部错误：${msg(e)}` };
-          }
-        },
+   * ⚠️ 动态 import 必须带 ?ts=（沿用 impl 自身的 ts）：静态相对于 ESM 会按**无参 URL**
+   *    永久缓存（P16 实测踩过），改 effort.mjs 后将无法随插件 toggle 热换。
+   *    impl 的 ts 由 entry.mjs 按「mtime + 激活序号」构造 ⇒ 每次 toggle 必变 ⇒ effort 同批换新。 */
+  const IMPL_TS = (() => {
+    try { return new URL(import.meta.url).searchParams.get('ts') || String(Date.now()); } catch { return String(Date.now()); }
+  })();
+  let defineToolFn = null; // 官方 defineTool（工具定义器），由 loadDefineTool 异步填充
+  let effortApi = null; // effort.mjs 实例（异步就绪）
+  const effortReady = import(`./effort.mjs?ts=${IMPL_TS}`)
+    .then((m) => {
+      effortApi = m.createEffort({
+        svc, tryOf, pick, msg, log, state,
+        /* schedule 用箭头包装：该 const 在当前位置仍处 TDZ，直接取引用会在建对象时抛
+         * ReferenceError；调用时机晚于 apply，包装后安全。 */
+        schedule: (reason, delay) => schedule(reason, delay),
+        readCfg: () => ({ enabled: M3.effortEnabled === true, cooldownMs: M3.effortCooldownMs }),
+        getDefineTool: () => defineToolFn,
       });
-      tools.register(def);
-      effortToolRegistered = true;
-      state.m3.effortTool = { at: new Date().toISOString(), ok: true, name: EFFORT_TOOL_NAME, via: 'tools.register' };
-      log('info', `R2 换档工具已注册：${EFFORT_TOOL_NAME}`);
-      return true;
-    } catch (e) {
-      state.m3.effortTool = { at: new Date().toISOString(), ok: false, error: msg(e) };
-      log('warn', `R2 换档工具注册失败（吞）：${msg(e)}`);
-      return false;
-    }
-  };
+      return effortApi;
+    })
+    .catch((e) => {
+      log('warn', `智能思考模块加载失败（吞，该功能不可用，主流程不受影响）：${msg(e)}`);
+      return null;
+    });
 
-  /* 官方 defineTool 异步解析；就绪后注册工具（effortEnabled 关闭时不注册——完全不介入）。 */
+  /* 官方 defineTool 异步解析；就绪后若开关已开则补注册（开关关闭时不注册——完全不介入）。 */
   loadDefineTool()
     .then(({ defineTool: fn, via, probe }) => {
       defineToolFn = fn;
       state.m3.effortToolLoader = { at: new Date().toISOString(), via, ok: !!fn, probe: probe.slice(-4) };
       if (!fn) {
-        log('warn', 'R2 defineTool 不可达 ⇒ 换档工具不注册（主流程不受影响）');
+        log('warn', '智能思考 defineTool 不可达 ⇒ 换档工具不注册（主流程不受影响）');
         return;
       }
       try { mergeConfig(); } catch { /* 吞 */ }
-      if (M3.effortEnabled === true) registerEffortTool();
+      if (M3.effortEnabled === true) effortReady.then((api) => api?.ensure());
     })
-    .catch((e) => log('warn', `R2 defineTool 解析异常（吞）：${msg(e)}`));
+    .catch((e) => log('warn', `智能思考 defineTool 解析异常（吞）：${msg(e)}`));
 
+  /**
+   * 智能思考懒安装入口 —— **独立于 M2 注入分支**（R3-S4 的结构性修复）。
+   * 由 pre-step 的**最前面**调用（新建会话时另由 session/created 兜底）：幂等、无副作用，
+   * 开关关闭时内部直接返回。
+   * ⚠️ 历史真 bug：该调用曾塞在 M2 注入分支内、且在 `step !== 1` 早退**之后** ⇒
+   *    一轮首步就调工具时，后续 pre-step 的 step 恒 > 1 ⇒ 钩子永远装不上
+   *    ⇒ 工具接受成功却永不变档（实测 effortToolCalls=1、effortSwitches=0、effortHooks 从未赋值）。
+   */
+  const ensureEffort = async () => {
+    try {
+      mergeConfig();
+      if (M3.effortEnabled !== true) return false;
+      const api = await effortReady;
+      return api ? api.ensure() : false;
+    } catch (e) {
+      log('warn', `智能思考懒安装异常（吞）：${msg(e)}`);
+      return false;
+    }
+  };
 
   /** 提取一条消息的可见文本（复杂度启发 + 关键词检测共用）。 */
   const messageText = (message) => {
@@ -1255,41 +967,13 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         attempts: state.m55.attempts.slice(-10).map((a) => ({ ...a })),
         channelProbe: state.m55.channelProbe ? { ...state.m55.channelProbe } : null,
       },
-      /* R1（2026-10-07）：思考强度可读/可枚举/可写调查探针（一次性只读）。
-       * ⚠️ 只在产生它的那条 `r1-probe` 条目上落盘——否则 modelCatalog 全目录（17 个模型）
-       * 会被复制进之后每一条 FULL 快照（activation+2s / m3-act / m4-probe…），稳态报告白胖。
-       * 该条目在 history 里长期留存（HISTORY_CAP=120），取证随时可回读。 */
-      ...(reason === 'r1-probe' && state.r1Probe ? { r1: { ...state.r1Probe } } : {}),
     };
 
     for (const k of ['tokenMeter', 'sessions', 'agents', 'systemPrompt', 'compaction', 'llm', 'sessionProjections', 'sessionQuery', 'configEditor', 'sessionController', 'typertGateway',
-      // R2（2026-10-08）：换档改工具方案的前置验证——tools 服务必须可达且 register 可调用
+      // 智能思考：换档工具的注册面——tools 服务必须可达且 register 可调用
       'tools']) {
       const s = svc(k);
       snap.services[k] = s ? typeof s : 'absent';
-    }
-
-    /* R2 探针（2026-10-08）：换档改「工具」方案的前置验证——一次性，只读探测。
-     * 依据（docs/r2-tool-switch-design.md）：工具调用会让本轮**继续**到下一步
-     * （dsh-agent-loop L1152-1155：有 toolCalls ⇒ 返回 null ⇒ 不 break），
-     * 而每步都重走 agent/request ⇒ 同轮内换档生效、无需用户输入、无伪造消息。
-     * 本探针只查「工具注册面是否可达」，**不实际注册**（避免污染工具列表）。 */
-    if (!snap.r2Probe) {
-      try {
-        const tools = svc('tools');
-        const agentList = tryOf(() => svc('agents')?.list?.() ?? []).value ?? [];
-        const first = agentList[0] ?? null;
-        snap.r2Probe = {
-          at: new Date().toISOString(),
-          toolsService: tools ? typeof tools : 'absent',
-          hasRegister: typeof tools?.register === 'function',
-          agentCount: agentList.length,
-          agentHasCtxTools: typeof first?.ctx?.tools?.register === 'function',
-          agentCtxToolsType: first?.ctx?.tools ? typeof first.ctx.tools : 'absent',
-        };
-      } catch (e) {
-        snap.r2Probe = { at: new Date().toISOString(), error: msg(e) };
-      }
     }
 
     const tm = svc('tokenMeter');
@@ -1372,75 +1056,6 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
             typeof p === 'string' ? p : { id: pick(p?.id, p?.name), keys: Object.keys(p ?? {}).slice(0, 20) },
           )
         : undefined;
-
-    /* R2 探针（2026-10-08）：工具是否真的**对模型可见**（不只是注册成功）。
-     * 背景：tools.register 只让工具进调度表；能否被模型看见取决于 wireSchemas→view(scope)。
-     * 实测：global view 含 set_reasoning_effort（count=3），但模型看不到它且无 tool-addition 事件。
-     * 最强证据 = **会话 requestHeader().tools 的名字列表**（模型实际收到的工具表）。 */
-    /* R3 探针（2026-10-08）：压缩摘要 400「模型不支持该思考强度」的**根因定位**。
-     * 现象：preStepOk=0 / actOk=0（两条压缩路径全败），错误码 INVALID_REQUEST，
-     * 正文「workbuddy upstream client (http 400): 模型不支持该思考强度，请调整」。
-     * 假设：compaction-basic 的 summarizeWithLlm **完全不传 reasoningEffort**（源码无该词），
-     * 故摘要请求的档位来自 llm 侧的补全（agent.options / 持久化 header）——
-     * 而 workbuddy 声明可选 off/low/high/max，upstream 却可能拒绝其中某值（声明≠实现）。
-     * 本探针读 agent.options 与 requestHeader，确认摘要请求会拿到哪个档位。 */
-    if (!snap.r3Probe) {
-      try {
-        const agentList = tryOf(() => svc('agents')?.list?.() ?? []).value ?? [];
-        const a = agentList[0] ?? null;
-        const hdr = tryOf(() => a?.session?.requestHeader?.()).value ?? null;
-        snap.r3Probe = {
-          at: new Date().toISOString(),
-          optionsProvider: a?.options?.provider ?? null,
-          optionsModel: a?.options?.model ?? null,
-          /** ⚠️ 关键：agent.options.reasoningEffort —— compaction 的 agentTarget 只取 provider/model，
-           *  但 llm 层可能从 options 补全档位；若它仍是旧值，摘要就会用错档 */
-          optionsReasoningEffort: a?.options?.reasoningEffort ?? null,
-          headerConfig: hdr?.config ?? null,
-          headerAdapterDefaults: hdr?.adapterDefaults ?? null,
-        };
-      } catch (e) {
-        snap.r3Probe = { at: new Date().toISOString(), error: msg(e) };
-      }
-    }
-
-    if (!snap.r2Probe2) {
-      try {
-        const tools = svc('tools');
-        const agentList = tryOf(() => svc('agents')?.list?.() ?? []).value ?? [];
-        const first = agentList[0] ?? null;
-        const namesOf = (v) => {
-          try {
-            if (!v || !v.visible) return null;
-            return [...v.visible.keys()];
-          } catch { return null; }
-        };
-        const globalView = tryOf(() => tools?.view?.(undefined));
-        const gNames = namesOf(globalView.value);
-        /* 模型实际收到的：会话最近一次 request header 的 tools */
-        const hdr = tryOf(() => first?.session?.requestHeader?.());
-        const hdrTools = (() => {
-          try {
-            const t = hdr.value?.header?.tools ?? hdr.value?.tools;
-            return Array.isArray(t) ? t.map((x) => x?.name).filter(Boolean) : null;
-          } catch { return null; }
-        })();
-        snap.r2Probe2 = {
-          at: new Date().toISOString(),
-          globalViewError: globalView.error ?? null,
-          globalCount: gNames ? gNames.length : null,
-          globalHas: gNames ? gNames.includes('set_reasoning_effort') : null,
-          globalSample: gNames ? gNames.slice(0, 20) : null,
-          /** 模型实际看到的工具表（requestHeader.tools）——这是判定「可见与否」的唯一权威 */
-          headerToolCount: hdrTools ? hdrTools.length : null,
-          headerHasMine: hdrTools ? hdrTools.includes('set_reasoning_effort') : null,
-          headerSample: hdrTools ? hdrTools.slice(0, 20) : null,
-          headerKeys: tryOf(() => Object.keys(hdr.value ?? {})).value ?? null,
-        };
-      } catch (e) {
-        snap.r2Probe2 = { at: new Date().toISOString(), error: msg(e) };
-      }
-    }
 
     return snap;
   };
@@ -1644,44 +1259,17 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     '若任务依赖细节则照常执行、勿写标记；占用达 ' + Math.round(M3.criticalRatio * 100) + '% 强制压缩线时系统自动压缩。标记不要连续多轮写（压缩后占用需重新累积）。',
   ].join('');
 
-  /* ---- R2（2026-10-08）智能思考：一次性教学文本 ------------------------------------
-   * 为什么必须教用法（本项目已踩过的同类坑，见 policyCardMinRatio 注释）：
-   * 「暴露了能力但不教怎么用 = 功能等于不存在」——模型不知道有这个工具就永远不会调。
-   * 覆盖度必须 6/6：① 当前值 ② 可选档 ③ **工具名+用法** ④ 何时该用 ⑤ 生效时机+不中断 ⑥ 代价提醒。
-   * 档位**现拼活值**（沿用 renderBrief 的 A3 教训：写死会在模型/config 变化后自相矛盾）。
-   * 无档可调（模型不支持思考档）时返回 null ⇒ 不注入、不打扰。
-   * ⚠️ R2 变更：由「写 [cp:effort] 标记」改为「调用 set_reasoning_effort 工具」——
-   *   工具调用让**本轮继续**（下一步即新档位），而标记要等下一轮（用户须再发消息）。 */
-  const renderEffortBrief = (eff) => {
-    try {
-      if (!eff?.ok || !eff.current) return null;
-      const opts = Array.isArray(eff.efforts) && eff.efforts.length ? eff.efforts.join('/') : null;
-      return [
-        '【智能思考（本会话仅此一次）】当前思考强度档位：' + eff.current + (opts ? '（本模型可选 ' + opts + '）' : '（可选档位未取到）') + '。',
-        '需要更深推理（复杂设计、疑难排查、长链规划）或更快响应（简单查询、机械修改）时，调用工具 '
-          + EFFORT_TOOL_NAME + '（参数 effort=<档位>）切换：',
-        '它会在**本次任务内立即生效**（下一步请求即用新档位），任务与上下文不中断，用户无需操作。',
-        '换档可能使前缀缓存失效，一次任务 1-2 次为宜；档位非法或处于冷却时工具会返回原因，按提示处理即可。',
-      ].join('');
-    } catch {
-      return null;
-    }
-  };
-
-  /** R1：每轮用量行后缀——让模型知道**当前实际生效**档位（它只知道自己请求过什么，
-   *  不知道插件是否应用成功，例如档位非法被忽略时）。短后缀 ≈7 token/轮。 */
-  const renderEffortSuffix = (eff) => {
-    try {
-      if (!eff?.ok || !eff.current) return null;
-      return '思考强度 ' + eff.current + (eff.adapterDefault ? '(默认)' : '');
-    } catch {
-      return null;
-    }
-  };
+  /* 智能思考的**注入文本**（一次性教学 / 每轮后缀）已随功能域搬入 plugin/effort.mjs：
+   *   renderBrief(eff)  —— 一次性教学，覆盖度 6/6（当前值/可选档/工具名+用法/何时该用/生效时机/代价）
+   *   renderSuffix(eff) —— 每轮用量行后缀「思考强度 <当前实际档>」（≈7 token/轮）
+   * 两者都是纯函数，缺信息时返回 null ⇒ 不注入、不打扰。此处只做出口引用（见下方注入主体）。 */
 
   state.listeners['agent/pre-step'] = addListener(
     'agent/pre-step',
     async (payload, next) => {
+      /* 智能思考：懒安装**先于一切**（R3-S4：与 M2 注入分支彻底解耦，任何早退都影响不到它）。
+       * 幂等 + 开关关闭时内部直接返回 ⇒ 放在最前面零成本。 */
+      await ensureEffort();
       await preStepCompaction(payload); // M3.5 通道1：轮内先压（绝不上抛）
       const decision = await next();
       if (!decision || decision.kind === 'reject') return decision;
@@ -1689,21 +1277,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       try {
         const { agent, turn, step, signal } = payload ?? {};
         if (signal?.aborted) return decision;
-        /* ⚠️ R2 修复（2026-10-08，实测真 bug）：**懒安装必须早于 `step !== 1` 早退**。
-         * 原实现把 ensureEffortHooks/registerEffortTool 放在注入分支内部 ⇒
-         * 一轮里只有 step 1 会执行到；而本轮若首步就有工具调用（模型调了别的工具），
-         * 后续 pre-step 的 step 恒 > 1 ⇒ 钩子永远装不上 ⇒ **工具接受成功却永不变档**
-         * （实测：effortToolCalls=1 而 effortSwitches=0、effortHooks 从未赋值）。
-         * 注意：`registerEffortTool` 的**加载期**路径不依赖此处（故 effortTool.ok 曾为 true），
-         * 但「会话中途打开开关」与「agent 作用域钩子」都只能在这里装。 */
-        try {
-          mergeConfig();
-          if (M3.effortEnabled === true) {
-            ensureEffortHooks(); // R1：懒安装 agent/request 钩子（每次 pre-step 都补装，幂等）
-            registerEffortTool(); // R2：确保工具已注册（幂等；覆盖「会话中途打开开关」）
-          }
-        } catch { /* 懒安装失败不影响注入与主流程 */ }
-        if (step !== 1) return decision; // 每轮只注一次（轮首快照）※注入本身仍受此门控
+        if (step !== 1) return decision; // 每轮只注一次（轮首快照）
         if (!createUserMessage || !agent?.session) {
           const key = !createUserMessage ? 'noFactory' : 'noSession';
           state.m2.skips[key] = (state.m2.skips[key] ?? 0) + 1;
@@ -1722,20 +1296,19 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         const card = renderPolicyCard(r.ratio); // M3.5 通道2：政策卡（相关占用以上才出现）
         const sid = String(pick(agent.session.id, agent.sessionId, 'unknown'));
         noteSessionId(sid); // C-lineage
-        /* R1 智能思考：**独立门控**（effortEnabled），与压缩的 markerMinRatio 完全解耦——
-         * 用户明确要求「全程允许」：低占用也必须能注入/换档（压缩的卡在低占用时是不注入的）。
-         * 注：钩子与工具的懒安装已上移到 `step !== 1` 早退**之前**（见上方 R2 修复注释）。 */
+        /* 智能思考：**独立门控**（effortEnabled），与压缩的 markerMinRatio 完全解耦——
+         * 用户明确要求「全程允许」：低占用也必须能注入/换档（压缩的卡在低占用时是不注入的）。 */
         let eff = null;
         try {
-          if (M3.effortEnabled === true) eff = await readEffort(agent);
+          if (M3.effortEnabled === true && effortApi) eff = await effortApi.read(agent);
         } catch { /* 读档失败 ⇒ 不注入（绝不因新功能影响主流程） */ }
-        const effSuffix = renderEffortSuffix(eff);
+        const effSuffix = effortApi?.renderSuffix(eff) ?? null;
         const baseText = effSuffix ? `${r.text} ｜ ${effSuffix}` : r.text;
         if (effSuffix) state.m2.effortSuffixes = (state.m2.effortSuffixes ?? 0) + 1;
         const brief = briefedBySid.has(sid) ? null : renderBrief(); // M2.5+A3：现拼活值
-        /* R1：思考强度教学与「插件说明」同一时机（会话首次）——合并进同一条消息，
+        /* 思考强度教学与「插件说明」同一时机（会话首次）——合并进同一条消息，
          * 不额外增加消息结构开销（role 框架/JSON 包装各一次）。 */
-        const effBrief = eff && !effBriefedBySid.has(sid) ? renderEffortBrief(eff) : null;
+        const effBrief = eff && !effBriefedBySid.has(sid) ? (effortApi?.renderBrief(eff) ?? null) : null;
         if (effBrief) {
           effBriefedBySid.add(sid);
           state.m2.effortBriefings = (state.m2.effortBriefings ?? 0) + 1;
@@ -1768,6 +1341,9 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
 
   state.listeners['session/created'] = addListener('session/created', (session) => {
     log('info', `session/created id=${pick(session?.id, session?.header?.id)} → 安排重测`);
+    /* 智能思考：新会话的 agent/request 钩子必须补装（新会话自动覆盖）。此处只是提前一发，
+     * 真正的保证在 pre-step 最前面 —— 那条路径不可能被任何早退绕过。 */
+    ensureEffort().catch(() => {});
     schedule('session/created', 1500);
   });
   /* ═══════════ M3-a：turn 前审计 + 关键词武装（inbox/inserted） ═══════════
@@ -1915,10 +1491,11 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
    * 已 idle 则直接触发扫除。用户零输入——标记本身在回复里可见（透明）。 */
   state.listeners['session/event'] = addListener('session/event', (session, event) => {
     try {
-      /* R2：此处**不再**解析 [cp:effort] 文本标记——换档已改为工具 set_reasoning_effort
-       * （见 installEffortTool 与 docs/r2-tool-switch-design.md）。
-       * 移除理由（用户 2026-10-08 决定）：① 标记需等下一轮（用户须再发消息）才生效；
-       * ② 工具方案同轮生效且无「散文提及误触发」风险。 */
+      /* 此处**不再**解析任何换档文本标记——换档已改为工具 set_reasoning_effort
+       * （实现见 plugin/effort.mjs，设计见 docs/r2-tool-switch-design.md）。
+       * 移除标记方案的理由（用户 2026-10-08 决定）：① 标记写在回复末尾 ⇒ 本轮已结束
+       * ⇒ 档位要等用户下次说话才生效（「需要我再发起才能触发，这个就失去意义了」）；
+       * ② 工具方案同轮生效，且参数结构化、无「散文提及误触发」风险。 */
       /* 形状探针先行：无论后续逻辑如何，先记录到达的事件（类型计数 + 前 N 条样本） */
       const probeType = event?.type ?? '(no-type)';
       eventProbe.counts[probeType] = (eventProbe.counts[probeType] ?? 0) + 1;
@@ -2079,22 +1656,14 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
              * `via:agentPresets.serviceFor, ratio:0.8, fallback:false`。当前引擎阈值恰为 0.8
              * 故无可见差异，但引擎阈值被改时 client 会拿到错误的 cap。 */
             criticalCap: engineThreshold(targetAgent),
-            /* R1（2026-10-07）：思考强度快照——供输入框 chip 显示「智能思考档位:<当前档>」。
-             * 只在 effortEnabled 开启时返回（关闭 = 不介入，UI 也不显示）。
-             * 异步解析可选档 ⇒ 整个 onGetHud 需为 async（见下方 return Promise.resolve）。
-             * 附**换档冷却**（用户要求「把 30 秒冷却加到档位后面显示」）：
-             * 让用户/模型看得见「现在换档会被冷却挡掉」，而不是写了标记没反应却无提示。
-             * ⚠️ 返回**绝对时间戳** cooldownUntil（而非剩余毫秒）：client 可本地倒计时，
-             * 且 getHud 是低频调用（挂载 + 投影变化时各一次），绝对时间不会因调用间隔而过时。 */
-            effort: effOn
-              ? await readEffort(targetAgent).then((e) => {
-                  if (!e?.ok) return e;
-                  const sidForCool = String(pick(targetAgent?.session?.id, targetAgent?.sessionId, targetAgent?.id, sid, ''));
-                  const lastAt = effortSwitchAtBySid.get(sidForCool) ?? 0;
-                  const until = lastAt ? lastAt + EFFORT_SWITCH_MIN_MS : 0;
-                  return { ...e, cooldownUntil: until > Date.now() ? until : 0, cooldownTotalMs: EFFORT_SWITCH_MIN_MS };
-                })
-              : null,
+            /* 智能思考（effort）：供输入框 chip 显示「智能思考档位 <当前档>」+ 换档冷却。
+             * ⚠️ R3-S9：**开关状态与数据分离**。原先 client 靠 `effort.ok` 推断「功能是否开启」，
+             * 但 `effort.ok=false` 既可能是「开关关闭」也可能只是「读档失败」，两者语义不同。
+             * 现显式返回 effortEnabled 布尔 + effort 数据（开关关闭时为 null）。
+             * 冷却返回**绝对时间戳** cooldownUntil（而非剩余毫秒）：client 可本地倒计时，
+             * 且 getHud 是低频调用（挂载 + 投影变化各一次），绝对值不会因调用间隔而过时。 */
+            effortEnabled: effOn,
+            effort: effOn && effortApi ? await effortApi.hudPayload(targetAgent, sid) : null,
             at: new Date().toISOString(),
           };
           /* getHud 取证（2026-10-07）：记录不显示时从报告直接看「client 传了什么 sid、host 回了什么」——
@@ -2175,174 +1744,5 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
   schedule('activation+2s', 2000);
   schedule('boot+10s', 10000);
 
-  /* ═══════════ R1 探针（2026-10-07）：思考强度（reasoning effort）可读/可枚举/可写调查 ═══════════
-   * 目标（用户需求）：把「当前会话所用模型的思考强度档位」暴露给 Agent，并让 Agent 自己改档。
-   * 三条腿的源码结论（asar 实证，见 docs/reference/asar-out/）：
-   *   ① 读当前档：sessionController.selectionFor(agent).current → {provider, model, reasoningEffort?}
-   *      更直接：agent.session.requestHeader()?.config → {provider, model, reasoningEffort}（**已生效的**）
-   *   ② 枚举可选档：llm.resolveModelInfo(provider, model) → .reasoning.efforts[{id,name,description}]
-   *      + .reasoning.defaultEffort（可选）；无 reasoning 字段 = 该模型不支持思考档
-   *   ③ 写档：sessionController.selectModel({sessionId, provider, model, reasoningEffort})
-   *      → 内部 llm.resolveCallConfig 校验（非法档抛 UNSUPPORTED_REASONING_EFFORT）
-   *      → agents.selectForNextRequest → installModelSelection 在下一轮 request 上生效（**不打断本轮**）
-   * 本探针只读不写（调查阶段）：落一份真实形状到报告，验证三条腿在本机是否真的可达。
-   * ⚠️ 探针一次性（probeDone 守卫），不污染稳态报告。 */
-  const r1ProbeOnce = async () => {
-    if (state.r1Probe) return;
-    try {
-      const aList = tryOf(() => svc('agents')?.list?.() ?? []).value ?? [];
-      const agent = aList[0] ?? null;
-      const out = { at: new Date().toISOString(), legs: {} };
-      if (!agent) {
-        out.error = 'no agent';
-        state.r1Probe = out;
-        return;
-      }
-      /* 腿①：读当前档（两条路径都试，看哪条真实可用） */
-      const hdr = tryOf(() => agent.session?.requestHeader?.());
-      out.legs.readViaHeader = hdr.error
-        ? { error: hdr.error }
-        : { hasHeader: !!hdr.value, config: hdr.value?.config ?? null, adapterDefaults: hdr.value?.adapterDefaults ?? null };
-      const sc = tryOf(() => svc('sessionController'));
-      out.legs.sessionController = { reachable: !!sc.value, hasSelectionFor: typeof sc.value?.selectionFor === 'function', hasSelectModel: typeof sc.value?.selectModel === 'function' };
-      const sel = tryOf(() => sc.value?.selectionFor?.(agent)?.current);
-      out.legs.readViaSelection = sel.error ? { error: sel.error } : { current: sel.value ?? null };
-      /* 腿②：枚举可选档（llm.resolveModelInfo） */
-      const cfg = hdr.value?.config ?? null;
-      const llm = tryOf(() => svc('llm'));
-      out.legs.llm = { reachable: !!llm.value, hasResolveModelInfo: typeof llm.value?.resolveModelInfo === 'function', hasListModels: typeof llm.value?.listModels === 'function' };
-      if (cfg?.provider && cfg?.model) {
-        const info = tryOf(() => llm.value?.resolveModelInfo?.(cfg.provider, cfg.model));
-        if (info.error) out.legs.modelInfo = { error: info.error };
-        else {
-          const p = Promise.resolve(info.value);
-          out.legs.modelInfo = await p.then(
-            (mi) => ({
-              provider: mi?.provider ?? null,
-              id: mi?.id ?? null,
-              contextWindow: mi?.context?.contextWindow ?? null,
-              reasoning: mi?.reasoning
-                ? { defaultEffort: mi.reasoning.defaultEffort ?? null, efforts: (mi.reasoning.efforts ?? []).map((e) => ({ id: e.id, name: e.name })) }
-                : null,
-            }),
-            (e) => ({ error: msg(e) }),
-          );
-        }
-      }
-      /* 腿③：写档 API 形状（只读检查，不实际调用） */
-      out.legs.writePath = {
-        api: 'sessionController.selectModel({sessionId, provider, model, reasoningEffort?})',
-        available: typeof sc.value?.selectModel === 'function',
-        note: '本轮只做只读调查，未实际写入',
-      };
-      /* 腿②b：官方聚合目录 modelCatalog()（Remote 暴露）——一次拿到全部 provider/model/efforts。
-       * 比逐个 resolveModelInfo 更省事，且含 default（当前部署默认档）。 */
-      const cat = tryOf(() => sc.value?.modelCatalog?.());
-      if (cat.error) out.legs.modelCatalog = { error: cat.error };
-      else {
-        out.legs.modelCatalog = await Promise.resolve(cat.value).then(
-          (c) => ({
-            default: c?.default ?? null,
-            routableProviders: c?.routableProviders ?? null,
-            groups: (c?.groups ?? []).map((g) => ({
-              id: g.id,
-              name: g.name,
-              models: (g.models ?? []).slice(0, 30).map((m) => ({
-                id: m.id,
-                name: m.name,
-                efforts: m.reasoning ? (m.reasoning.efforts ?? []).map((e) => e.id) : null,
-                defaultEffort: m.reasoning?.defaultEffort ?? null,
-              })),
-            })),
-            failures: c?.failures ?? null,
-          }),
-          (e) => ({ error: msg(e) }),
-        );
-      }
-      /* 腿③实测（同值写入 + 非法值负测）——只做**可证明无副作用**的两发：
-       *  a) 同值写入：把当前档位再写一遍（值相同 ⇒ 行为不变，但验证 API 真能接受并落 selection）
-       *  b) 非法值负测：故意传非法档，验证 resolveCallConfig 在**任何状态变更之前**抛错
-       *     （源码顺序 requireModel → resolveCallConfig(校验) → selectForNextRequest(变更)，
-       *      故抛错 ⇒ 无变更。这发证明「非法输入不会污染会话」。）
-       *  ⚠️ **副作用实测（重要）**：selectModel 内部还会 `agentDefaultModel.saveSelection(selected)`，
-       *     即把该选择**写成全局默认模型**（落 profile 的 agent-default-model 条目，经 configEditor.edit）。
-       *     实测：同值写入也触发了 profile 重写（cordis.patch.yml mtime 更新、行数/条目/注释均保留完好）。
-       *     ⇒ 实施「Agent 自改档」时若走 selectModel，会**顺带改掉新会话的默认档**——这是必须规避的副作用。
-       *  ⚠️ 故本探针**不做异值写入**（会真实改档 + 改全局默认），异值安装链留待实施阶段用
-       *     agent/request waterfall（router-laya 路线，无副作用）验证。 */
-      const sid0 = String(pick(agent.session?.id, agent.sessionId, agent.id, ''));
-      const cur = cfg?.reasoningEffort;
-      const writeTest = {};
-      if (process.env.DCP_R1_WRITE_TEST === '1' && typeof sc.value?.selectModel === 'function' && sid0 && cfg?.provider && cfg?.model) {
-        if (cur) {
-          const same = tryOf(() =>
-            sc.value.selectModel({ sessionId: sid0, provider: cfg.provider, model: cfg.model, reasoningEffort: cur }),
-          );
-          writeTest.sameValue = same.error
-            ? { ok: false, error: same.error }
-            : await Promise.resolve(same.value).then(
-                (v) => ({ ok: true, selected: v?.selected ?? null }),
-                (e) => ({ ok: false, error: msg(e) }),
-              );
-        } else {
-          writeTest.sameValue = { skipped: '当前档位未显式设置（adapter 默认）' };
-        }
-        const bad = tryOf(() =>
-          sc.value.selectModel({ sessionId: sid0, provider: cfg.provider, model: cfg.model, reasoningEffort: '__r1_invalid__' }),
-        );
-        writeTest.invalidValue = bad.error
-          ? { rejected: true, error: bad.error }
-          : await Promise.resolve(bad.value).then(
-              (v) => ({ rejected: false, WARNING: '非法档竟被接受', selected: v?.selected ?? null }),
-              (e) => ({ rejected: true, error: msg(e) }),
-            );
-        /* 写后复核：档位应仍等于原值（同值写入无变化、非法写入无变更） */
-        const after = tryOf(() => agent.session?.requestHeader?.()?.config?.reasoningEffort);
-        writeTest.effortAfter = after.error ? { error: after.error } : { value: after.value ?? null, unchanged: (after.value ?? null) === (cur ?? null) };
-      } else {
-        writeTest.skipped = process.env.DCP_R1_WRITE_TEST === '1'
-          ? 'selectModel 不可达，或缺 sid/provider/model'
-          : '默认关闭（selectModel 会写全局默认模型，副作用未获授权）；设 DCP_R1_WRITE_TEST=1 才跑';
-      }
-      out.legs.writeTest = writeTest;
-      /* 腿④：facade 方法面 —— 插件经 ctx.get('sessionController') 拿到的是**命令门面**，
-       * 实测 selectionFor 不在其上（内部类方法不外露）⇒ 读当前档只能走 session.requestHeader()。
-       * 列出可调用方法名，避免实施期再次猜 API。 */
-      const facadeMethods = (o) => {
-        const names = new Set();
-        let p = o;
-        for (let d = 0; d < 3 && p && p !== Object.prototype; d++) {
-          for (const n of Object.getOwnPropertyNames(p)) names.add(n);
-          p = Object.getPrototypeOf(p);
-        }
-        return [...names].filter((n) => n !== 'constructor').sort();
-      };
-      out.legs.facades = {
-        sessionController: tryOf(() => facadeMethods(sc.value)).value ?? null,
-        llm: tryOf(() => facadeMethods(llm.value)).value ?? null,
-      };
-      /* 腿⑤（**只读**）：安装链目标——agent/request waterfall 的 config 就是请求配置，
-       * 改它即可改档且**无全局副作用**（router-laya 实证路线，见 .data/ref/router-laya-index.js
-       * applyRoute L444 / agent/request L886）。此处只记录 seam 可达性，不注册监听。 */
-      out.legs.seam = {
-        chosen: 'agent/request waterfall（改 config.reasoningEffort）',
-        alternative: 'sessionController.selectModel（有写全局默认的副作用）',
-        reference: 'HapyRain/dsh-router-laya：applyRoute() 改 provider/model/reasoningEffort，'
-          + '并 delete maxTokens（避免把上一个 adapter 的 cap 钉到新模型）；'
-          + 'isOurRoute() 区分「自己上轮写的档」与「他人显式指定的档」，避免自我锁定',
-        hasAgentRequestSeam: true,
-      };
-
-      out.provider = cfg?.provider ?? null;
-      out.model = cfg?.model ?? null;
-      out.currentEffort = cfg?.reasoningEffort ?? null;
-      state.r1Probe = out;
-      log('info', `R1 探针：model=${out.provider}/${out.model} effort=${out.currentEffort ?? '(adapter默认)'} 可选=${out.legs.modelInfo?.reasoning?.efforts?.map((e) => e.id).join('/') ?? 'n/a'}`);
-      refresh('r1-probe');
-    } catch (e) {
-      state.r1Probe = { at: new Date().toISOString(), error: msg(e) };
-    }
-  };
-  setTimeout(() => { r1ProbeOnce().catch(() => {}); }, 3500)?.unref?.();
   return { reportPath };
 }

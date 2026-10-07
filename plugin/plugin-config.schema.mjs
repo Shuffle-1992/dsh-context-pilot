@@ -78,8 +78,11 @@ function buildWith(z) {
   try {
     return z.object({
       enabled: z.boolean().default(true).description('总开关（关闭后完全恢复原生 DSH）').volatile(),
-      /* R1（2026-10-07）：智能思考总门——开=注入思考强度 + 允许 Agent 改档；关=都不做。 */
+      /* 智能思考总门（2026-10-07 引入，R2 换工具方案，R3 移入 effort.mjs）。 */
       effortEnabled: z.boolean().default(false).description('智能思考：开启后向 Agent 暴露思考档位并允许其自主换档；关闭则完全不介入').volatile(),
+      /* 换档冷却（R3-S7 起可配）：换档会使前缀缓存失效（dsh-llm call-config.js 标注 effort 属
+       * 缓存敏感参数）⇒ 这是**会实际影响计费**的参数，故开放配置；默认 30s。 */
+      effortCooldownMs: z.number().default(30000).description('换档冷却（毫秒）：两次换档的最小间隔，防频繁换档反复打断前缀缓存').volatile(),
       criticalRatio: z.number().default(0.85).description('强制压缩线：占用达此值无条件强制压缩').volatile(),
       marker: z.string().default('[cp:compact]').description('压缩标记：模型回复尾行标记（置空则关闭智能压缩）').volatile(),
       markerMinRatio: z.number().default(0.2).description('智能压缩线：占用达此值时，模型可自行决定压缩并自动续跑').volatile(),

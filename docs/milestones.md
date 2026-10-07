@@ -566,3 +566,80 @@ return concluded ? { kind: "completed" } : null;            // 有工具 ⇒ nul
 **防回归**：`contract.mjs` §6.13 重写为 16 条工具契约断言（标记已移除 / 工具名 /
 官方 defineTool / tools.register / 候选链 / 关闭不注册 / 懒注册 / 不抛错 / 冷却返回 remainSec /
 写持久 pending / 参数与 output schema / 异常吞 / 取证字段），总计 **242 断言全通过**。
+
+### 压缩全线失效定位：workbuddy provider 对摘要请求 400 —— ✅ 2026-10-08
+
+**现象（严重）**：上下文到 95%，压缩是唯一能降占用的手段，但它**两条路径全败**——
+`preStepActs=16 / preStepOk=0`、`acts=2 / actOk=0`，错误码 `INVALID_REQUEST`。
+
+**取证卡点**：报告此前只记错误**码**，错误**正文**只进 log ⇒ 报告里看不到原因，无法定位。
+先补 `m3.lastPreStepError` / `m3.lastActError`（at/code/message/name/stack 三段栈），
+下一步立即拿到根因：
+
+```
+400: {"message":"workbuddy upstream client (http 400): 模型不支持该思考强度，请调整"}
+  at finishError ← summarizeWithLlm（dsh-compaction-basic lib/index.js L361/L324）
+```
+
+**排除法（逐条实证）**：
+1. **不是我们的档位值错** —— 把档位设成 `high` 仍 400；
+2. **不是本插件引起的** —— 首次压缩失败 17:45:25 **早于**首次成功换档 17:58:52；
+3. **不是 compaction-basic 传了档位** —— `summarizeWithLlm` 的源码里 `reasoningEffort` 一词
+   **完全不存在**，摘要请求的档位由 llm 侧从 `agent.options` / 持久化 header 补全，
+   而 workbuddy 声明 `off/low/high/max`、upstream 却拒绝 ⇒ **声明≠实现**；
+4. **确认是 provider 侧** —— 用户切到 `trae/deepseek-v4.1-flash` 后，同一标记路径
+   （`compactNow`）**一次成功**：`lastAct.shadowedTokens=733850`、`markerHits=1`、
+   占用 95% → **1.9%**。
+
+**结论**：workbuddy provider 插件缺陷（摘要请求的思考档位被 upstream 拒绝），**非本插件 bug**。
+另观察到第二种失败形态 `lastActError={code:"summary", message:"manual compaction could not
+produce a smaller summary"}`（摘要不够小），与 400 是两回事。
+
+**旁证（对本插件有用）**：切换后的 `r3Probe` 显示 `agent.options = {provider:workbuddy,
+model:hy4-preview-f, reasoningEffort:null}`（agent 创建时的**陈旧值**）vs
+`requestHeader().config = {provider:trae, reasoningEffort:xhigh}`（**实时值**）——
+再次确认「读档必须走 `requestHeader()`，`agent.options` 不可信」。
+
+**文档**：`docs/compaction-failure-diagnosis.md`（完整证据链与两条修复选项）。
+
+### R3：智能思考全面 review → 模块解耦（8 步） —— ✅ 2026-10-08
+
+**动因**：R1+R2 把智能思考铺进 host 13 处、约 520 行，且**已因耦合产出过一个真 bug**
+（懒安装塞在 M2 注入分支的 `step !== 1` 早退之后 ⇒ 工具接受成功却永不变档）。
+审查见 `docs/r3-effort-review.md`：10 项缺陷（S1–S10）+ 8 步实施顺序 + 10 条必须保留的结论。
+
+**实施（每步测试全绿）**：
+
+| # | 动作 | 结果 |
+| --- | --- | --- |
+| 1 | 命名统一（去 R1/R2 版本前缀）+ 删死字段 | 日志前缀改「智能思考 ⋯」；删 `effortMarkerHits`（文本标记时代，恒 0）与 `lastEffortMarker`（名不副实） |
+| 2 | 抽 `sidOf` / `checkEffort` / `bumpSkip` | 消除 3 处 sid 解析、2 处档位校验、5 处跳过计数的重复 |
+| 3 | `readEffort` 改纯 async | 原先同步对象 / Promise 混用 ⇒ 漏 `await` 会静默拿到 Promise 当对象用 |
+| 4 | 三张 Map → 单一 `bySid` 状态对象 | `pending/冷却基准/已写入档` 同键同生命周期，合并后**只有一个删除点**，孤儿在结构上不可能出现 |
+| 5 | 懒安装移出 M2 注入分支 | 由 pre-step **最前面** `await ensureEffort()`（+ `session/created` 双保险）；注入分支内不再有任何安装调用 |
+| 6 | 拆两个巨型函数 | 108 行钩子 → `applyTo`（决策）+ `installHook`（薄壳）；133 行工具 → `toolSpec`（定义）+ `runTool`（执行） |
+| 7 | **抽 `plugin/effort.mjs`** | 功能域整体搬出：配置/状态/读取/钩子/工具/注入文本/HUD 载荷；host 只留 4 个出口 |
+| 8 | 冷却可配（S7）/ output 收敛（S8）/ 开关字段分离（S9） | `effortCooldownMs` 三端打通；工具 output 7 字段 → 4 字段（冷却秒数并入 error 文案）；getHud 显式返回 `effortEnabled` 布尔 |
+
+**结构收益**：`host.impl.mjs` **2348 → 1563 行**（-785），新增 `effort.mjs` 415 行
+（净 -370 行，且功能域自成一域）。`effort.mjs` 是依赖图的**叶子节点**（不 import 任何内部件），
+`static.mjs` §4 依赖方向护栏自动覆盖。
+
+**热换纪律**：`effort.mjs` 用 `import(\`./effort.mjs?ts=${IMPL_TS}\`)`，`IMPL_TS` 取自 impl
+自身的 `?ts=`（entry.mjs 按「mtime + 激活序号」构造）⇒ 每次 toggle 必变 ⇒ 与 impl 同批换新。
+（静态相对 import 会命中**无参 URL** 永久缓存——P16 实测踩过。）
+
+**调查脚手架清理**：删 `r1ProbeOnce`（~170 行一次性探针，且自带 `selectModel` 写入路径）、
+`state.r1Probe`、`snap.r2Probe` / `snap.r2Probe2` / `snap.r3Probe`（共 -28269 字节）。
+结论不丢：`report.mjs` §6 由「探针存在」断言改为**「结论留档」**断言
+（docs 调查文档 + `effort.mjs` 文件头 10 条 + router-laya 存档）。
+
+**顺带发现并修掉一个测试自身的假绿**：§6.10 教学覆盖 ③ 的正则
+`/EFFORT_TOOL_NAME \+ '（参数 effort=<档位>）'/` 自 R2 起就写错了（多了个 `）'` 收尾，
+实际文本是 `）切换：'`），一直被同一行的 `|调用工具 '` 兜底**掩盖**；
+R3 去掉兜底后暴露并修正为 `/TOOL_NAME \+ '（参数 effort=<档位>）切换：'/`。
+⇒ 教训：「多分支正则」里的一条分支失效可以长期不可见。
+
+**防回归**：`contract.mjs` 181 条（§6.12/§6.13 断言改指向 `effort.mjs`，
+并新增 S3/S4/S5/S6/S7/S8/S9 与「结论清单固化」判据）+ `static.mjs` 33 条 + `report.mjs` 57 条，
+**总计 271 断言全通过**（原 245）。6 条关键绊线实测有效（改回旧结构即 FIRES）。
