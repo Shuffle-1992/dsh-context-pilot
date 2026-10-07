@@ -444,7 +444,7 @@ window.__ModuleLoader__.load({
 				el("div", { className: "dcp-hint" },
 					"保存写入插件配置并触发重载。压缩标记通道：模型回复尾行写标记 → 本轮结束自动压缩（详见政策卡）。"
 					+ "智能思考：开启后向 Agent 暴露当前思考档位（可选档由模型动态决定）并允许其调用 set_reasoning_effort 工具自主换档，本次任务内立即生效、不中断；关闭则提示词不注入、工具也不注册。"),
-				el(PriceCalculator, { writable, saving, onApply: applyRecommendation }),
+				el(PriceCalculator, { writable, saving, onApply: applyRecommendation, engineCap }),
 			);
 		}
 		/**
@@ -453,7 +453,7 @@ window.__ModuleLoader__.load({
 		 * 走 onApply → applyRecommendation → persist → writeField（命名空间 set + 回读校验），
 		 * 与上方表单同一条持久化路径，故失败原因（未就绪/未持久化）提示完全一致。
 		 */
-		function PriceCalculator({ writable, saving, onApply }) {
+		function PriceCalculator({ writable, saving, onApply, engineCap }) {
 			const [hit, setHit] = react.useState("0.02");
 			const [miss, setMiss] = react.useState("1");
 			const [out, setOut] = react.useState("4");
@@ -510,7 +510,9 @@ window.__ModuleLoader__.load({
 					el("span", null, "智能压缩线 ", el("b", null, rec.markerMinRatio)),
 					(() => {
 						/* C-own：推荐强制线同样不得越过**生效上限**（引擎阈值 − 5pp）——超出则按上限收敛并注明。
-						 * 上限取面板自己的 state（`engineCap`），而非只有开过弹窗才有的 `NS.engineCap`。 */
+						 * ⚠️ 上限来自 **props**（面板 state）：本组件是独立函数组件，直接引用面板 state名
+						 * 会 ReferenceError ⇒ 整个配置卡消失（2026-10-08 真事故）。
+						 * `node --check` 只查语法、抓不到未定义标识符 ⇒ 靠 contract 的作用域对账护栏。 */
 						const cap = engineCap !== null && engineCap > 0 && engineCap <= 1 ? engineCap : null;
 						const eff = cap !== null && rec.criticalRatio > cap ? cap : rec.criticalRatio;
 						return el("span", null,

@@ -555,6 +555,30 @@ ok('弹窗阈值行不再追加「（已按上限 … 收敛）」（用户要�
   !/已按上限/.test(clientNoComment),
   '仍带收敛注释 ⇒ 用户已明确要求删除');
 
+/* ═══════════ 6.17 组件作用域护栏（防跨组件引用面板 state） ═══════════ */
+console.log('\n== 6.17 组件作用域：PriceCalculator 不得直接引用面板 state ==');
+/* 真事故（2026-10-08，用户截图「面板不见了」）：把 PriceCalculator 里的 `NS.engineCap`
+ * 改成面板组件的 state `engineCap`，而它是**独立的函数组件** ⇒ `ReferenceError: engineCap is not defined`
+ * ⇒ React 抛错 ⇒ **整个配置卡从插件页消失**（整页只剩「包含的组件」）。
+ * `node --check` **只查语法、抓不到未定义标识符**；static.mjs 的语法护栏对此完全无效。
+ * ⇒ 静态护栏：抽出该组件函数体，把它引用的**面板 state 名**与它的 props 列表对账。 */
+const pcSrc = (() => {
+  const i = client.indexOf('function PriceCalculator');
+  if (i < 0) return '';
+  const j = client.indexOf('\n\t\t}', i); // 组件收尾缩进（2 tab）
+  return j > i ? client.slice(i, j) : client.slice(i, i + 20000);
+})();
+const pcProps = /function PriceCalculator\(\{([^}]*)\}\)/.exec(client)?.[1] ?? '';
+ok('解析出 PriceCalculator 源码与 props', pcSrc.length > 0 && pcProps.length > 0, '未匹配到该组件（改名了？）');
+const PANEL_STATE = ['engineCap', 'draft', 'saving', 'message', 'rev', 'stored', 'ready', 'snapshot'];
+const leaked = PANEL_STATE.filter((n) => new RegExp(`\\b${n}\\b`).test(pcSrc) && !new RegExp(`\\b${n}\\b`).test(pcProps));
+ok('PriceCalculator 引用的面板 state 全部经 props 传入（防 ReferenceError 崩卡）',
+  leaked.length === 0,
+  `直接引用了面板 state：${leaked.join(', ')} ⇒ ReferenceError ⇒ 整个配置卡消失（实测事故）`);
+ok('面板确实把 engineCap 传给了计算器（渲染处与签名两头都在）',
+  /el\(PriceCalculator, \{ writable, saving, onApply: applyRecommendation, engineCap \}\)/.test(client),
+  '渲染处没传 engineCap ⇒ 计算器拿到 undefined（虽不崩，但上限提示失效）');
+
 /* ═══════════ 6.8 R1 智能思考字段三端对账 ═══════════ */
 console.log('\n== 6.8 智能思考字段（FIELDS ↔ schema ↔ M3_DEFAULTS）==');
 ok('FIELDS 含 effortEnabled', fieldsKeys.includes('effortEnabled'), '面板缺该字段');
