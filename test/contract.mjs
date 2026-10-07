@@ -477,6 +477,45 @@ ok('一次性说明明确「没有自动拉起动作」这一反向澄清',
   /没有\*\*任何自动拉起动作/.test(ct),
   '未做反向澄清 ⇒ 模型可能保留旧预期（写标记等恢复）');
 
+/* ═══════════ 6.16 强制压缩线恒低于 DSH 内置阈值 0.5 个百分点 ═══════════ */
+console.log('\n== 6.16 强制压缩线：恒低于 DSH 内置阈值 0.5pp ==');
+/* 用户要求（2026-10-08）：「设置的强制压缩线永远低于 DSH 内置 0.5%（内置 80% ⇒ 上限 79.5%），计算也改」。
+ * 理由：两线相等时谁先命中取决于各自测量时机，插件可能「什么都没做、占用却降了」⇒ HUD 记录失真。 */
+ok('host 定义 0.5pp 余量常量', /const ENGINE_CAP_MARGIN = 0\.005;/.test(host),
+  '缺余量常量（或写死在多处 ⇒ 改一处漏两处）');
+ok('生效上限抽成单一来源 criticalCapOf（= 引擎阈值 − 余量，下限 0）',
+  /const criticalCapOf = \(agent\) => Math\.max\(0, engineThreshold\(agent\) - ENGINE_CAP_MARGIN\);/.test(host),
+  '未抽单一上限函数 ⇒ 三处门控各写一遍必然漂移');
+for (const [label, re] of [
+  ['pre-step 门控', /const effCritical = Math\.min\(M3\.criticalRatio, criticalCapOf\(agent\)\);/],
+  ['idle safety-net 门控', /if \(d\.ratio < Math\.min\(M3\.criticalRatio, criticalCapOf\(agent\)\)\) return;/],
+  ['getHud 下发', /criticalCap: criticalCapOf\(targetAgent\),/],
+]) {
+  ok(`强制线三处同源：${label}`, re.test(host), '该处未用 criticalCapOf ⇒ 与其余两处不一致');
+}
+ok('不再有任何一处用裸引擎阈值做门控 / 下发',
+  !/Math\.min\(M3\.criticalRatio, engineThreshold\(agent\)\)/.test(host) && !/criticalCap: engineThreshold\(/.test(host),
+  '仍有裸 engineThreshold ⇒ 0.5pp 余量被绕过');
+ok('engineCapProbe 同时记原始阈值与生效上限（否则报告里看不出余量扣在哪）',
+  /cap: \+Math\.max\(0, raw - ENGINE_CAP_MARGIN\)\.toFixed\(4\)/.test(host) && /margin: ENGINE_CAP_MARGIN,/.test(host),
+  '取证只记原始值');
+ok('client 提示语说明「DSH 内置阈值 − 0.5 个百分点」（未探测到时也说规则）',
+  /DSH 内置阈值 − 0\.5 个百分点/.test(client),
+  '提示未说明余量规则 ⇒ 用户以为上限还是 80%');
+ok('client 用一位小数显示上限（79.5% 不能被四舍五入成 80%）',
+  /Math\.round\(Number\(x\) \* 1000\) \/ 10/.test(client) && /Math\.round\(NS\.engineCap \* 1000\) \/ 10/.test(client),
+  '用 Math.round(x*100) ⇒ 79.5% 显示成 80%，余量完全不可见');
+ok('弹窗阈值行显示**生效值** min(配置, 上限) 而非裸配置',
+  /const critEff = critCap != null \? Math\.min\(critCfg, critCap\) : critCfg;/.test(client)
+  && /强制压缩线 \$\{pct\(critEff, 0\.85\)\}/.test(client),
+  '弹窗显示裸配置 ⇒ 用户看到 80% 却在实际 79.5% 触发');
+ok('弹窗「距强制线」也用生效值（否则在不会触发的线上报已达线）',
+  /const crit = critEff;/.test(client),
+  '距线提示仍用裸配置 ⇒ 误导');
+ok('hudRemote 带上 criticalCap（弹窗才能算生效值）',
+  /criticalCap: typeof r\.criticalCap === "number"/.test(client),
+  'hudRemote 缺 criticalCap ⇒ 弹窗拿不到上限');
+
 /* ═══════════ 6.8 R1 智能思考字段三端对账 ═══════════ */
 console.log('\n== 6.8 智能思考字段（FIELDS ↔ schema ↔ M3_DEFAULTS）==');
 ok('FIELDS 含 effortEnabled', fieldsKeys.includes('effortEnabled'), '面板缺该字段');

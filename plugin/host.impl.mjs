@@ -587,14 +587,31 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
    *  故**不改引擎配置**，只在插件侧钳制：生效强制线 = min(用户配置, 引擎阈值)。
    *  拿不到（服务未解析/旧版本无该属性）时回退官方默认 0.8；每次现取不缓存（配置可能被改）。 */
   const DEFAULT_ENGINE_THRESHOLD = 0.8;
+  /* 用户要求（2026-10-08）：插件强制线**始终比 DSH 内置阈值低 0.5 个百分点**
+   * （内置 80% ⇒ 上限 79.5%）。理由：两线相等时，谁先命中取决于**各自的测量时机**
+   * ——引擎也在 step 边界自己 measure 一次，插件可能「什么都没做、占用却已经降了」，
+   * 于是 HUD 的压缩记录与原因都会失真（表现为「插件线到了却没记录」）。
+   * 留 0.5pp 同时吸收两边测量的抖动（同一时刻两次 measure 可能有细微差异）。 */
+  const ENGINE_CAP_MARGIN = 0.005;
   const engineThreshold = (agent) => {
     const r = resolveCompactionFor(agent);
     const t = tryOf(() => r.service?.config?.thresholdRatio);
     const v = t.value;
     const ok = typeof v === 'number' && Number.isFinite(v) && v > 0 && v <= 1;
-    state.m3.engineCapProbe = { at: new Date().toISOString(), via: r.via, ratio: ok ? v : null, fallback: !ok };
-    return ok ? v : DEFAULT_ENGINE_THRESHOLD;
+    const raw = ok ? v : DEFAULT_ENGINE_THRESHOLD;
+    /* 取证同时记**原始引擎阈值**与**减去余量后的生效上限**，否则报告里看不出 0.5pp 被扣在哪。 */
+    state.m3.engineCapProbe = {
+      at: new Date().toISOString(),
+      via: r.via,
+      ratio: ok ? v : null,
+      fallback: !ok,
+      cap: +Math.max(0, raw - ENGINE_CAP_MARGIN).toFixed(4),
+      margin: ENGINE_CAP_MARGIN,
+    };
+    return raw;
   };
+  /** 生效强制线上限 = 引擎阈值 − 0.5pp（下限 0，防引擎阈值被配成极小值后出现负数）。 */
+  const criticalCapOf = (agent) => Math.max(0, engineThreshold(agent) - ENGINE_CAP_MARGIN);
 
   /* ═══════════ 智能思考（reasoning effort）：模块接线（R3 解耦，2026-10-08）═══════════
    * 实现全部搬进 plugin/effort.mjs（配置/状态/读取/钩子/工具/注入文本/HUD 载荷）；
@@ -1129,8 +1146,9 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       const intent = compactToolApi ? compactToolApi.peekIntent(sid) : null;
       const wanted = !!intent;
       if (wanted) compactToolApi.takeIntent(sid);
-      /* C-own：生效强制线 = min(用户配置, 引擎阈值)——插件线必须先行，引擎只作卸载后的安全网 */
-      const effCritical = Math.min(M3.criticalRatio, engineThreshold(agent));
+      /* C-own：生效强制线 = min(用户配置, 引擎阈值 − 0.5pp)——插件线必须**确定性地先行**，
+       * 引擎只是插件关闭/卸载后的安全网。 */
+      const effCritical = Math.min(M3.criticalRatio, criticalCapOf(agent));
       if (!wanted && ratio < effCritical) return;
       const compaction = resolveCompactionFor(agent);
       if (!compaction.service) {
@@ -1371,8 +1389,8 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       if (markerShot) markerArmed.delete(sid);
       const now = Date.now();
       if (!markerShot) {
-        /* C-own：safety-net 同样钳到引擎阈值之下（同 pre-step，理由见 engineThreshold） */
-        if (d.ratio < Math.min(M3.criticalRatio, engineThreshold(agent))) return; // safety-net：仅 critical
+        /* C-own：safety-net 同样钳到「引擎阈值 − 0.5pp」之下（同 pre-step，理由见 ENGINE_CAP_MARGIN） */
+        if (d.ratio < Math.min(M3.criticalRatio, criticalCapOf(agent))) return; // safety-net：仅 critical
         if (now - (state.m3.sweeps[sid] ?? 0) < M3.sweepMinIntervalMs) return; // 兜底受冷却限制
       }
       const reason = markerShot ? 'marker' : 'safety-net';
@@ -1629,7 +1647,7 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
              * （时间戳与 hudPollReq 逐次吻合），而 pre-step/快照（传 Agent）全部
              * `via:agentPresets.serviceFor, ratio:0.8, fallback:false`。当前引擎阈值恰为 0.8
              * 故无可见差异，但引擎阈值被改时 client 会拿到错误的 cap。 */
-            criticalCap: engineThreshold(targetAgent),
+            criticalCap: criticalCapOf(targetAgent),
             /* 智能思考（effort）：供输入框 chip 显示「智能思考档位 <当前档>」+ 换档冷却。
              * ⚠️ R3-S9：**开关状态与数据分离**。原先 client 靠 `effort.ok` 推断「功能是否开启」，
              * 但 `effort.ok=false` 既可能是「开关关闭」也可能只是「读档失败」，两者语义不同。

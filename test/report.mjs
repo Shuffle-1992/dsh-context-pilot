@@ -101,16 +101,19 @@ const occBody = occStart >= 0 ? getHudBody.slice(occStart, getHudBody.indexOf('}
 ok('occ IIFE 内不再重复声明 agents', !/const agents\s*=/.test(occBody),
   'occ IIFE 内仍声明 agents ⇒ 外层 criticalCap 引用会 ReferenceError');
 ok('criticalCap 的 Agent 在作用域内解析（targetAgent 由 agents 选出）',
-  /const targetAgent = [\s\S]{0,200}agents\.find/.test(getHudBody) && /criticalCap:\s*engineThreshold\(targetAgent\)/.test(getHudBody),
+  /const targetAgent = [\s\S]{0,200}agents\.find/.test(getHudBody) && /criticalCap:\s*criticalCapOf\(targetAgent\)/.test(getHudBody),
   'criticalCap 未用作用域内解析出的 Agent ⇒ 可能又传 Session/未定义变量');
 ok('getHud 有常驻取证字段 hudPollReq', /state\.m5\.hudPollReq = \{/.test(host),
   '缺 hudPollReq ⇒ 下次同类问题无法从报告判断 host 是否被调用');
 /* 实测缺陷（2026-10-07）：getHud 给 engineThreshold 传了 `?.session`（Session 本体），
  * 而 resolveCompactionFor 要的是 Agent（走 agent.ctx / agentPresets.serviceFor(agent,...)）
  * ⇒ 每次 5s 轮询都写 via:unresolved/fallback:true，criticalCap 恒为兜底 0.8。
- * 证据：getHud 的 engineCapProbe 时间戳与 hudPollReq 逐次吻合，而 pre-step 全部解析成功。 */
-const capArg = /criticalCap:\s*engineThreshold\(([^)]*)\)/.exec(getHudBody)?.[1] ?? '';
-ok('解析出 criticalCap 的 engineThreshold 实参', capArg.length > 0, '未匹配到 criticalCap 实参');
+ * 证据：getHud 的 engineCapProbe 时间戳与 hudPollReq 逐次吻合，而 pre-step 全部解析成功。
+ * ⚠️ 2026-10-08：下发点由 `engineThreshold(targetAgent)` 改为 `criticalCapOf(targetAgent)`
+ *    （用户要求强制线恒低于引擎阈值 0.5pp，上限计算收敛到单一函数）；**传 Agent 本体的要求不变**，
+ *    且现在多了一层：实参若变成 `targetAgent.session`，engineThreshold 内部就会 unresolved。 */
+const capArg = /criticalCap:\s*criticalCapOf\(([^)]*)\)/.exec(getHudBody)?.[1] ?? '';
+ok('解析出 criticalCap 的实参（上限函数）', capArg.length > 0, '未匹配到 criticalCap 实参');
 ok('criticalCap 传 Agent 本体（不得传 .session）',
   capArg.length > 0 && !/\.session/.test(capArg),
   `criticalCap 传了 Session 而非 Agent（实参：${capArg}）⇒ resolveCompactionFor 返回 unresolved，cap 恒为兜底值`);

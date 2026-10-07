@@ -268,14 +268,18 @@ window.__ModuleLoader__.load({
 				if (draft !== null && Object.prototype.hasOwnProperty.call(draft, field.key)) return draft[field.key];
 				return toUi(field, stored[field.key]);
 			};
-			/** 字段备注：criticalRatio 动态追加引擎上限（C-own，NS.engineCap 由 HUD 轮询下发）。
-			 *  上限值不写死（DSH 未来改 thresholdRatio 时自动跟随）；未探测到时只显示静态规则。 */
+			/** 字段备注：criticalRatio 动态追加**生效上限**（C-own，NS.engineCap 由 HUD 轮询下发）。
+			 *  上限值不写死（DSH 未来改 thresholdRatio 时自动跟随）；未探测到时只显示静态规则。
+			 *  用户要求（2026-10-08）：上限 = DSH 内置阈值 **− 0.5 个百分点**（内置 80% ⇒ 79.5%），
+			 *  确保插件线确定性地先于引擎自动压缩触发。 */
 			const hintFor = (field) => {
 				if (field.key !== "criticalRatio") return field.hint ?? "";
 				const cap = typeof NS.engineCap === "number" && Number.isFinite(NS.engineCap) ? NS.engineCap : null;
+				/* 一位小数：0.795 → 79.5%（四舍五入成 80% 就完全看不出那 0.5 个百分点了） */
+				const pct1 = (x) => `${Math.round(Number(x) * 1000) / 10}%`;
 				return cap === null
-					? `${field.hint}；上限=DSH 引擎阈值（待探测，见弹窗阈值行）`
-					: `${field.hint}；不可超过 DSH 内置 ${Math.round(cap * 100)}%，超出自动钳到该值`;
+					? `${field.hint}；上限 = DSH 内置阈值 − 0.5 个百分点（待探测，见弹窗阈值行）`
+					: `${field.hint}；上限 = DSH 内置阈值 − 0.5 个百分点（当前 ${pct1(cap)}），超出自动钳到该值`;
 			};
 			const dirty = draft !== null && FIELDS.some((f) => {
 				const cur = parseInput(f, valueOf(f));
@@ -340,9 +344,10 @@ window.__ModuleLoader__.load({
 					};
 					const { written } = await persist(values);
 					setDraft(null); // 以写入值清理草稿，避免残留脏值
-					/* C-own：persist 可能已把 criticalRatio 钳到引擎上限——回读真实生效值展示 */
+					/* C-own：persist 可能已把 criticalRatio 钳到**生效上限**（引擎阈值 − 0.5pp）——回读真实生效值展示 */
 					const appliedCrit = Math.min(rec.criticalRatio, typeof NS.engineCap === "number" ? NS.engineCap : rec.criticalRatio);
-					const capNote = appliedCrit < rec.criticalRatio ? `（已按引擎上限 ${Math.round(NS.engineCap * 100)}% 收敛）` : "";
+					const capNote = appliedCrit < rec.criticalRatio
+						? `（已按生效上限 ${Math.round(NS.engineCap * 1000) / 10}% 收敛）` : "";
 					const text = written === 0
 						? "推荐值与当前配置一致，无需写入。"
 						: `已应用并回读校验通过（${written} 项：智能压缩线 ${rec.markerMinRatio} / 强制压缩线 ${appliedCrit}${capNote}）`;
@@ -481,7 +486,7 @@ window.__ModuleLoader__.load({
 						const eff = cap !== null && rec.criticalRatio > cap ? cap : rec.criticalRatio;
 						return el("span", null,
 							"强制压缩线 ", el("b", null, eff),
-							eff < rec.criticalRatio ? el("span", { className: "dcp-hint" }, `（推荐值 ${rec.criticalRatio} 超引擎上限，按 ${eff} 生效）`) : null,
+							eff < rec.criticalRatio ? el("span", { className: "dcp-hint" }, `（推荐值 ${rec.criticalRatio} 超生效上限，按 ${eff} 生效）`) : null,
 						);
 					})(),
 				) : null,
@@ -1048,14 +1053,25 @@ window.__ModuleLoader__.load({
 							 * 同时字号 9px → 11px（用户要求「字体改大一些」）——删掉上限后行更短，
 							 * 11px 仍能一行放下，无需再靠缩小字号换空间。 */
 							const pct = (x, d) => `${Math.round((Number.isFinite(Number(x)) ? Number(x) : d) * 100)}%`;
-							thr.textContent = `智能压缩线 ${pct(v.markerMinRatio, 0.2)} · 强制压缩线 ${pct(v.criticalRatio, 0.85)}`;
+							/* 一位小数百分比：79.5% 这种值四舍五入到 80% 就看不出 0.5pp 余量了。 */
+							const pct1 = (x) => `${Math.round(Number(x) * 1000) / 10}%`;
+							const num = (x, d) => (Number.isFinite(Number(x)) ? Number(x) : d);
+							/* 用户要求（2026-10-08）：强制线**永远比 DSH 内置阈值低 0.5 个百分点**
+							 * （内置 80% ⇒ 上限 79.5%）。弹窗显示**生效值**（= min(配置, 上限)），
+							 * 否则用户看到 80% 却在实际 79.5% 触发。
+							 * 仅当配置高于上限时追加「已按上限收敛」——这是**过渡态**（用户下次保存即被钳到
+							 * 79.5%），不是 2026-10-07 删掉的那种「恒定显示上限」的噪声。 */
+							const critCap = num(v.criticalCap, null);
+							const critCfg = num(v.criticalRatio, 0.85);
+							const critEff = critCap != null ? Math.min(critCfg, critCap) : critCfg;
+							thr.textContent = `智能压缩线 ${pct(v.markerMinRatio, 0.2)} · 强制压缩线 ${pct(critEff, 0.85)}`
+								+ (critCap != null && critEff < critCfg ? `（已按上限 ${pct1(critCap)} 收敛）` : "");
 							/* 「距离触发还差多少」——弹窗已在顶部显示当前占用，这里补最有决策价值的一行：
 							 * 距智能压缩线还有多少（达线后模型可自行决定压缩），以及是否已越线。 */
-							const num = (x, d) => (Number.isFinite(Number(x)) ? Number(x) : d);
 							const occ = num(v.occupancyRatio, null); // host 侧未提供时跳过（保持向后兼容）
 							if (occ != null) {
 								const smart = num(v.markerMinRatio, 0.2);
-								const crit = num(v.criticalRatio, 0.85);
+								const crit = critEff; // ⚠️ 必须用生效值，否则会在「不会真正触发的线」上报已达线
 								const fmtK = (t) => (t >= 1000 ? `${(t / 1000).toFixed(0)}K` : String(Math.round(t)));
 								let hint;
 								if (occ >= crit) hint = "已达强制压缩线";
@@ -1115,6 +1131,9 @@ window.__ModuleLoader__.load({
 									gen: r.gen || "",
 									/* 本会话压缩记录明细（host 严格按 sid 过滤）：{at, text}[] */
 									actsDetail: Array.isArray(r.actsDetail) ? r.actsDetail : null,
+									/* 生效强制线上限（= 引擎阈值 − 0.5pp）：既给保存路径钳制用（NS.engineCap），
+									 * 也给弹窗阈值行显示**生效值**用（否则用户看到 80%、实际 79.5% 触发）。 */
+									criticalCap: typeof r.criticalCap === "number" && Number.isFinite(r.criticalCap) ? r.criticalCap : null,
 								};
 								/* C-own：引擎阈值上限（host 动态探测，方案 C 钳制用）——存 NS 供保存路径读取 */
 								if (typeof r.criticalCap === "number" && Number.isFinite(r.criticalCap) && r.criticalCap > 0 && r.criticalCap <= 1) {

@@ -42,7 +42,7 @@ DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`（面板名�
 | 面板名 | 配置键 | 含义 |
 | --- | --- | --- |
 | **智能压缩线** | `markerMinRatio` | 占用达此值时注入决策卡，**模型可自行决定压缩**并自动续跑 |
-| **强制压缩线** | `criticalRatio` | 占用达此值**无条件强制压缩**（pre-step / idle 兜底） |
+| **强制压缩线** | `criticalRatio` | 占用达此值**无条件强制压缩**（pre-step / idle 兜底）。**生效值 = min(配置, DSH 引擎阈值 − 0.5pp)**，即内置 80% ⇒ 上限 **79.5%** |
 
 推荐值（按计费口径，计算器可按实价实时推导）：
 
@@ -67,7 +67,8 @@ DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`（面板名�
 > 而 pre-step 天然在下一步请求之前。压缩与「叫醒」因此解耦——**不需要叫醒**。
 > 详见 [`docs/r4-compaction-tool-design.md`](docs/r4-compaction-tool-design.md)。
 >
-> 占用达强制压缩线（默认 80%）时，仍由既有 pre-step / idle 安全网自动压缩，无需模型操作。
+> 占用达强制压缩线（生效值 = min(配置, DSH 引擎阈值 − 0.5pp)；内置 80% ⇒ 79.5%）时，
+> 仍由既有 pre-step / idle 安全网自动压缩，无需模型操作。
 
 ### 2.2b 智能思考（可选，默认关闭）
 
@@ -229,11 +230,11 @@ npm run test:report   # 只跑报告形状
 
 | 套件 | 断言数 | 查什么 | 能抓到什么 |
 | --- | --- | --- | --- |
-| `contract.mjs` | 231 | face 方法表 ↔ client 描述符 ↔ TYPERT 三端对账；Config 字段在 FIELDS/schema/M3_DEFAULTS 三处齐全；退役字段未复活；`mergeConfig` 读取集 ⊆ schema；**getHud 作用域契约**（防 ReferenceError 回归）；**弹窗/阈值行排版契约**；**智能思考 UI 契约**（开关尺寸/右对齐/字段三端/chip 两态色 token）；**压缩工具化契约**（工具注册/意图 TTL/消费顺序/pressure→overflow/伪造恢复零残留）；**智能思考 8 条实证结论**（prepend 最外层 / pending 持久 / 冷却基准 / 计数语义 / 两侧校验 / agent.ctx / sid 现读 / 删 maxTokens） | **调用静默失败**（P29：三端漂移不报错、只是拿不到数据）；已实测抓过 4 个真 bug |
+| `contract.mjs` | 243 | face 方法表 ↔ client 描述符 ↔ TYPERT 三端对账；Config 字段在 FIELDS/schema/M3_DEFAULTS 三处齐全；退役字段未复活；`mergeConfig` 读取集 ⊆ schema；**getHud 作用域契约**（防 ReferenceError 回归）；**弹窗/阈值行排版契约**；**智能思考 UI 契约**（开关尺寸/右对齐/字段三端/chip 两态色 token）；**压缩工具化契约**（工具注册/意图 TTL/消费顺序/pressure→overflow/伪造恢复零残留）；**智能思考 8 条实证结论**（prepend 最外层 / pending 持久 / 冷却基准 / 计数语义 / 两侧校验 / agent.ctx / sid 现读 / 删 maxTokens） | **调用静默失败**（P29：三端漂移不报错、只是拿不到数据）；已实测抓过 4 个真 bug |
 | `static.mjs` | 37 | 真实 `node --check`；client 自足（无外部 import，require 仅 react）；entry 薄壳（<40 行、有静态 Config、动态 import 带 `?ts=`）；模块依赖方向无环；热换纪律；调试残留扫描 | 语法错误、破坏热换、client 引入依赖、循环依赖、`TODO`/`XXX`/`console.log` 残留 |
 | `report.mjs` | 57 | 产出侧字段契约；`bfOnce` 回填链依赖；C3② 关键事件必须走 full 档；**getHud 作用域与 criticalCap 实参契约**；**调查结论留档**（探针退役后结论不得丢）；真实报告结构自洽；`hud-acts.json` 去重；dump 工具可跑 | 报告形状无声破坏（本项目踩过 2 次：顶层读 m3/m5、脚本读已删字段） |
 
-合计 **325 条断言**。
+合计 **337 条断言**。
 
 **已验证有效**：注入 3 个人为 bug（`m3-act` 误入精简档 / client face 改名 / host 引用 client.js），
 三套件全部抓到且定位精准。**新增断言均实测验证过「对回归确实失败」**（两边都通过的测试等于没测）。
@@ -290,7 +291,7 @@ npm run asar -- grep --pattern compactIfNeeded --ext js --ctx 3
 | **智能思考** | `effortEnabled` | false | 开=暴露思考档位 + 注册 `set_reasoning_effort` 工具；关=提示词不注入、工具也不注册 |
 | **换档冷却(秒)** | `effortCooldownMs` | 30 | 两次换档的最小间隔（存储为 ms）。**换档会使前缀缓存失效 ⇒ 计费敏感**，故可配（R3-S7） |
 | **智能压缩线** | `markerMinRatio` | 0.2 | 占用达此值时模型可自行决定压缩并自动续跑 |
-| **强制压缩线** | `criticalRatio` | 0.85 | 占用达此值无条件强制压缩 |
+| **强制压缩线** | `criticalRatio` | 0.85 | 占用达此值无条件强制压缩；**生效值 = min(配置, 引擎阈值 − 0.5pp)** |
 | 压缩标记 | `marker` | `[cp:compact]` | 模型回复尾行标记；置空则关闭智能压缩 |
 | 标记有效期(秒) | `armedTtlMs` | 120 | 标记后多久内有效（存储为 ms） |
 | 强制压缩冷却(秒) | `sweepMinIntervalMs` | 600 | 两次强制压缩的最小间隔（存储为 ms） |
