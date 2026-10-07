@@ -1317,11 +1317,34 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
         onGetHud: (sid) => {
           const list = Array.isArray(state.m5.acts) ? state.m5.acts : [];
           const filtered = sid ? list.filter((a) => a.sid === sid) : list;
+          /* 占用读数：让弹窗能显示「距智能压缩线还差多少」（client 侧可选消费，缺省不影响）。
+           * 取目标会话的实时 measure —— sid 传了就测该会话，否则测最热的那个。 */
+          const occ = (() => {
+            try {
+              const agents = svc('agents')?.list?.() ?? [];
+              const sess = svc('sessions')?.list?.() ?? [];
+              const pickTarget = () => {
+                if (sid) {
+                  const a = agents.find((x) => String(pick(x?.session?.id, x?.sessionId, x?.id)) === sid);
+                  if (a?.session) return a.session;
+                  return sess.find((s) => String(pick(s?.id, s?.header?.id)) === sid) ?? null;
+                }
+                return sess[0] ?? agents[0]?.session ?? null;
+              };
+              const target = pickTarget();
+              if (!target) return { ratio: null, window: null };
+              const r = measureRatio(target);
+              if (!r.ok || r.ratio == null) return { ratio: null, window: null };
+              return { ratio: r.ratio, window: r.window ?? null };
+            } catch { return { ratio: null, window: null }; }
+          })();
           return {
             ok: true,
             ...state.m5.hud,
             hudLastAct: filtered[0]?.text || '',
             acts: filtered.slice(0, 8).map((a) => a.text),
+            occupancyRatio: occ.ratio,
+            occupancyWindow: occ.window,
             at: new Date().toISOString(),
           };
         },

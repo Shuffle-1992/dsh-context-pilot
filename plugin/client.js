@@ -714,6 +714,20 @@ window.__ModuleLoader__.load({
 							/* 阈值速览：智能压缩线 / 强制压缩线（配置镜像实时跟随） */
 							const pct = (x, d) => `${Math.round((Number.isFinite(Number(x)) ? Number(x) : d) * 100)}%`;
 							thr.textContent = `智能压缩线 ${pct(v.markerMinRatio, 0.2)} ｜ 强制压缩线 ${pct(v.criticalRatio, 0.85)}`;
+							/* 「距离触发还差多少」——弹窗已在顶部显示当前占用，这里补最有决策价值的一行：
+							 * 距智能压缩线还有多少（达线后模型可自行决定压缩），以及是否已越线。 */
+							const num = (x, d) => (Number.isFinite(Number(x)) ? Number(x) : d);
+							const occ = num(v.occupancyRatio, null); // host 侧未提供时跳过（保持向后兼容）
+							if (occ != null) {
+								const smart = num(v.markerMinRatio, 0.2);
+								const crit = num(v.criticalRatio, 0.85);
+								const fmtK = (t) => (t >= 1000 ? `${(t / 1000).toFixed(0)}K` : String(Math.round(t)));
+								let hint;
+								if (occ >= crit) hint = "已达强制压缩线";
+								else if (occ >= smart) hint = `已过智能压缩线（距强制线 ${fmtK(v.occupancyWindow * (crit - occ))}）`;
+								else hint = `距智能压缩线 ${fmtK(v.occupancyWindow * (smart - occ))}`;
+								thr.textContent += ` ｜ ${hint}`;
+							}
 						} catch { /* 快照失败保持现状 */ }
 					};
 					if (typeof settingsScope.subscribe === "function") liveRows.push({ row, off: settingsScope.subscribe(renderHud) }); // C4：off 在册
