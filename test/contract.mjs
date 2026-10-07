@@ -326,6 +326,20 @@ ok('钩子懒安装（新会话自动覆盖）', /const ensureEffortHooks = \(\)
   '无懒安装 ⇒ 新会话拿不到钩子');
 ok('pre-step 会触发懒安装', /if \(M3\.effortEnabled === true\) \{[\s\S]{0,120}?ensureEffortHooks\(\)/.test(host),
   'pre-step 未调用 ensureEffortHooks ⇒ 钩子永不安装');
+/* 实测风险（2026-10-07 E2E 排查中发现）：sid 若只在**安装期**捕获一次，而本项目实测
+ * session id 会轮转（压缩后 / 多会话交错）⇒ 标记解析路径写入的 sid 与钩子查询的 sid
+ * 可能不一致 ⇒ pendingEffortBySid 查不到 ⇒ **换档静默失效**。
+ * 修复：请求时**现读** sid（优先），安装期值仅作兜底（两者取并集查找）。 */
+ok('sid 在请求时现读（不只依赖安装期捕获）',
+  /const sidNow = String\(pick\(agent\.session\?\.id/.test(host),
+  'sid 仅在安装期捕获 ⇒ id 轮转后 pending 查不到，换档静默失效');
+ok('现读 sid 未命中时回退安装期值（并集查找）',
+  /pendingEffortBySid\.get\(sidNow\) \?\? \(sidAtInstall !== sidNow \? pendingEffortBySid\.get\(sidAtInstall\)/.test(host),
+  '无回退 ⇒ 两种 sid 不一致时丢失待应用档位');
+ok('删除/记忆用实际命中的 key（避免孤儿 pending）',
+  /const sidKey = pendingEffortBySid\.get\(sidNow\) \? sidNow : sidAtInstall;/.test(host) &&
+  /pendingEffortBySid\.delete\(sidKey\)/.test(host),
+  '用固定 sid 删除 ⇒ 命中另一 key 时留下孤儿 pending（下次误触发）');
 // 声明顺序（const 无提升，TDZ 会抛 ReferenceError）
 for (const [name, def, use] of [
   ['EFFORT_MARKER_RE', 'const EFFORT_MARKER_RE', 'etext.matchAll(EFFORT_MARKER_RE)'],

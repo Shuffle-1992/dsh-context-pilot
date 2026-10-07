@@ -718,20 +718,28 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     try {
       if (!agent?.ctx || typeof agent.ctx.on !== 'function') return false;
       if (effortHookInstalled.has(agent)) return true;
-      const sid = String(pick(agent.session?.id, agent.sessionId, agent.id, ''));
-      if (!sid) return false;
+      /* 安装时捕获一次（兜底），但**请求时重读**（见下）——本项目实测 session id 会轮转
+       * （压缩后 / 多会话交错），安装期捕获的 id 可能与标记解析路径写入的 sid 不一致，
+       * 导致 pendingEffortBySid 查不到 ⇒ 换档静默失效。 */
+      const sidAtInstall = String(pick(agent.session?.id, agent.sessionId, agent.id, ''));
+      if (!sidAtInstall) return false;
       effortHookInstalled.add(agent);
       agent.ctx.on('agent/request', async (payload, next) => {
         const config = await next();
         try {
           if (!effEnabled() || M3.effortEnabled !== true) return config;
-          const pend = pendingEffortBySid.get(sid);
+          /* ⚠️ sid **现读**（优先），安装期捕获值仅作兜底——防 id 轮转导致 pending 查不到。
+           * 两条读法都试：先现读，命中即用；未命中再回退安装期值（两者取并集查找）。 */
+          const sidNow = String(pick(agent.session?.id, agent.sessionId, agent.id, ''));
+          const pend = pendingEffortBySid.get(sidNow) ?? (sidAtInstall !== sidNow ? pendingEffortBySid.get(sidAtInstall) : undefined);
           if (!pend) return config;
+          /* 实际命中的 key（用于后续 delete / 记忆写入，避免留下孤儿 pending） */
+          const sidKey = pendingEffortBySid.get(sidNow) ? sidNow : sidAtInstall;
           /* 尊重「他人显式指定」：若当前 config 带 effort 且**不是我们上次写的**，
            * 说明是用户手动选档或 subagent 自带 ⇒ 让位（router-laya carriesExplicitRoute 语义）。 */
-          const applied = appliedEffortBySid.get(sid);
+          const applied = appliedEffortBySid.get(sidKey);
           if (config?.reasoningEffort !== undefined && applied !== undefined && config.reasoningEffort !== applied) {
-            pendingEffortBySid.delete(sid);
+            pendingEffortBySid.delete(sidKey);
             state.m3.effortSkips = state.m3.effortSkips ?? {};
             state.m3.effortSkips.foreign = (state.m3.effortSkips.foreign ?? 0) + 1;
             log('info', `R1 换档让位：当前请求档位 ${config.reasoningEffort} 非本插件所写（他人显式指定）`);
@@ -741,17 +749,17 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
           const eff = await readEffort(agent);
           const opts = Array.isArray(eff?.efforts) ? eff.efforts : null;
           if (!eff?.ok) {
-            pendingEffortBySid.delete(sid);
+            pendingEffortBySid.delete(sidKey);
             state.m3.effortSkips = state.m3.effortSkips ?? {};
             state.m3.effortSkips.noRoute = (state.m3.effortSkips.noRoute ?? 0) + 1;
             return config;
           }
           if (opts && !opts.includes(pend.effort)) {
-            pendingEffortBySid.delete(sid);
+            pendingEffortBySid.delete(sidKey);
             state.m3.effortSkips = state.m3.effortSkips ?? {};
             state.m3.effortSkips.invalid = (state.m3.effortSkips.invalid ?? 0) + 1;
             state.m3.lastEffortApply = {
-              at: new Date().toISOString(), sessionId: sid, want: pend.effort, applied: false,
+              at: new Date().toISOString(), sessionId: sidKey, want: pend.effort, applied: false,
               error: `档位不在当前模型可选集内（可选 ${opts.join('/')}）`,
             };
             log('warn', `R1 换档忽略：${pend.effort} 不在 ${eff.provider}/${eff.model} 的可选集（${opts.join('/')}）`);
@@ -761,14 +769,15 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
           /* 应用（去掉 maxTokens：换档不应把上个 adapter 的 cap 钉住——router-laya applyRoute 同款） */
           const out = { ...config, reasoningEffort: pend.effort };
           delete out.maxTokens;
-          pendingEffortBySid.delete(sid);
-          effortSwitchAtBySid.set(sid, Date.now());
-          appliedEffortBySid.set(sid, pend.effort);
+          pendingEffortBySid.delete(sidKey);
+          effortSwitchAtBySid.set(sidKey, Date.now());
+          appliedEffortBySid.set(sidKey, pend.effort);
           state.m3.effortSwitches = (state.m3.effortSwitches ?? 0) + 1;
           state.m3.lastEffortApply = {
-            at: new Date().toISOString(), sessionId: sid, want: pend.effort,
+            at: new Date().toISOString(), sessionId: sidKey, want: pend.effort,
             from: config?.reasoningEffort ?? null, applied: true,
             provider: eff.provider, model: eff.model, options: opts,
+            sidNow, sidAtInstall,
           };
           log('info', `R1 换档应用：${config?.reasoningEffort ?? '(默认)'} → ${pend.effort}（${eff.provider}/${eff.model}，下一步生效）`);
           schedule('r1-effort', 400);
