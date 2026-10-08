@@ -1317,3 +1317,24 @@ M2 的 `clearBriefed`、报告 `schedule` ⇒ 必须先做成显式注入才有�
 「宿主不得再出现 `api.RETAIN_RATIO` / `api.selectRange(`」。教训：**变异必须忠实于断言的语义**。
 
 **验证**：contract **306** + static 48 + report 59 = **413 断言**全绿。
+
+### R10 解耦第二刀（续）：M3 编排层搬出宿主 —— 第二个障碍显式化 —— ✅ 已实施（2026-10-08）
+
+`preStepCompaction` + `sweepInFlight`/`idleSweep` **整体搬进 plugin/m3.compact.mjs**；
+宿主只剩四个薄转发。`host.impl.mjs` **1765 → 1551 行**；M3 域的「执行核心 + 编排层」现同处一个模块。
+
+**第二个解耦障碍（闭包穿透别人的域）被显式化**：五个跨域依赖改成 deps 注入——
+`publishHud`/`recordHudAct`/`formatAct`（M5）、`clearBriefed`（M2）、`schedule`（报告）、
+`criticalCapOf`/`resolveCompactionFor`（R8 阈值叶子）、`getCompactTool`/`awaitRange`（另两个模块的取用口）。
+
+**搬出来才发现的顺序问题**：M3 的依赖清单里出现了 M5 与 M2 的四个回调 ⇒ 说明
+**必须先把 M5 HUD 独立、再 M2 注入**，否则 M3 始终要反向依赖它们。⇒ 第三刀顺序确定为
+**M5 → M2 → M1 → core 收尾**。
+
+⚠️ **接线位置有个 TDZ 陷阱**：R9 时接线块在文件前部；R10 起必须下移到 `preStepCompaction` 原位置——
+deps 对象是**立即构造**的，而 `schedule` 在文件更后面才定义，放前面直接 TDZ 崩激活。
+（`measureRatio` 虽在更早的 `renderUsageText` 里被引用，但那只受**调用时刻**的 TDZ 约束，两者易混。）
+
+**验证**：contract **308** + static 48 + report 59 = **415 断言**全绿；**变异 6/6 被捕获**。
+新绊线刻意**不查函数名**（改名即可躲过），改查「编排层独有产物是否回流宿主」：
+`state.m3.lastPreStep = {` / `sweepInFlight` / `M3.sweepMinIntervalMs` / `state.m3.actErrors[code]`。

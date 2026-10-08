@@ -388,6 +388,9 @@ console.log('\n== 6.15 自动压缩工具触发（替代 marker + 伪造恢复�
 /* 用户明确要求（2026-10-08）：「自动压缩时，**不用伪造一条我的信息**重新拉起会话」。
  * 证据链与方案取舍见 docs/r4-compaction-tool-design.md；本段把该结论固化成绊线。 */
 const ct = read('compact-tool.mjs');
+/* R9/R10：M3 压缩域（执行核心 + 编排层）已整体搬进 plugin/m3.compact.mjs ⇒
+ * 凡引用该域实现的断言一律从**模块**取切片，并额外钉「宿主不得把它抄回来」。 */
+const m3src = read('m3.compact.mjs');
 /* 说明性文字（文件头会把旧机制当反例写出来）不能参与「未出现某字符串」的判定 ⇒ 剥注释后再查。
  * 踩过的坑：`!/本轮先不执行任务/.test(ct)` 被**文件头里描述旧机制的那句话**判失败。 */
 const ctNoComment = ct.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
@@ -424,17 +427,19 @@ ok('工具返回 scheduled=next-step（模型据此知道「可以继续干活�
   /return \{ ok: true, scheduled: 'next-step' \};/.test(ct),
   '未告知执行时机 ⇒ 模型会退回「停下等压缩」的旧习惯');
 
-const ctPreStep = /const preStepCompaction = async \(payload\) => \{([\s\S]*?)\n  \};/.exec(host)?.[1] ?? '';
+const ctPreStep = /const preStepCompaction = async \(payload\) => \{([\s\S]*?)\n  \};/.exec(m3src)?.[1] ?? '';
 ok('解析出 preStepCompaction 函数体', ctPreStep.length > 0, '未找到 preStepCompaction');
 ok('pre-step 先装工具、再消费意图（与 R3 那个真 bug 同款护栏）',
   /await ensureCompactTool\(\);\s*\n\s*await preStepCompaction\(payload\);/.test(host),
   '懒安装排在消费之后 ⇒ 「工具接受了却没人消费意图」重演 R3 真 bug');
 ok('意图门在 critical 门之前（低占用也能按模型请求压缩）',
-  /const intent = compactToolApi \? compactToolApi\.peekIntent\(sid\) : null;/.test(ctPreStep)
+  /* R10：意图表经 `getCompactTool()` 显式注入（不再直接闭包引用宿主的 compactToolApi）。 */
+  /const tool = getCompactTool\(\);/.test(ctPreStep)
+  && /const intent = tool \? tool\.peekIntent\(sid\) : null;/.test(ctPreStep)
   && /const wanted = !!intent;/.test(ctPreStep)
-  && /if \(wanted\) compactToolApi\.takeIntent\(sid\);/.test(ctPreStep)
+  && /if \(wanted\) tool\.takeIntent\(sid\);/.test(ctPreStep)
   && /if \(!wanted && ratio < effCritical\) return;/.test(ctPreStep),
-  '顺序错 ⇒ 模型主动请求在低于强制线时被静默丢弃');
+  '顺序错 ⇒ 模型主动请求在低于强制线时被静默丢弃；工具也必须经注入取得');
 ok('意图先消费后执行（防每个 step 反复重试）',
   (() => {
     /* 必须比**调用点**而非首次出现：函数体注释里也写了 compactIfNeeded（signal 守卫那条）。
@@ -450,9 +455,8 @@ ok('意图先消费后执行（防每个 step 反复重试）',
  * 旧断言在此**退役**（它固化的正是那条「53% 占用就把 1117 节点砍到 4 个」的路径）。
  * 自选范围本体见下方 §R5 段与 plugin/compact-range.mjs。 */
 /* R9 解耦第二刀：`compactWithOwnRange` 的实现已搬进 plugin/m3.compact.mjs（宿主只留同名转发）
- * ⇒ 断言改从模块取切片；同时新增「宿主不得再自带一份实现」。 */
-const m3core = read('m3.compact.mjs');
-const ctOwnRange = /const compactWithOwnRange = async \(agent, compaction, ctx\) => \{([\s\S]*?)\n  \};/.exec(m3core)?.[1] ?? '';
+ * ⇒ 断言改从模块取切片（`m3src` 在文件前部已读入）；同时新增「宿主不得再自带一份实现」。 */
+const ctOwnRange = /const compactWithOwnRange = async \(agent, compaction, ctx\) => \{([\s\S]*?)\n  \};/.exec(m3src)?.[1] ?? '';
 ok('M3 执行核心已抽为叶子模块，且宿主不再重复实现',
   ctOwnRange.length > 0
   && /import\(`\.\/m3\.compact\.mjs\?ts=\$\{IMPL_TS\}`\)/.test(host)
@@ -464,13 +468,25 @@ ok('M3 执行核心已抽为叶子模块，且宿主不再重复实现',
   && !/const compactWithOwnRange = async \(agent, compaction, ctx\) => \{\n    const \{ forced, sig, sid, window, measure \} = ctx;/.test(host),
   '宿主仍自带一份自选范围实现（比例读取/selectRange）⇒ 两套真相，本次解耦要消除的正是这个');
 ok('M3 核心模块依赖全部注入（对宿主内部件零 import ⇒ 依赖图叶子）',
-  !/^\s*import .*from ['"]\.\//m.test(m3core) && !/require\(/.test(m3core),
+  !/^\s*import .*from ['"]\.\//m.test(m3src) && !/require\(/.test(m3src),
   '叶子模块 import 了宿主内部件 ⇒ 打破依赖图约束');
-ok('M3 核心模块未就绪时不中断：降级为「本轮不压」并留痕',
+ok('M3 压缩域未就绪时不中断：降级为「本轮不压」并留痕',
   /const measureRatio = \(session\) => \(m3Ctl \? m3Ctl\.measureRatio\(session\) : \{ ok: false, error: 'm3-module-pending' \}\);/.test(host)
   && /skipWhy: 'm3-module-pending'/.test(host)
-  && /M3 压缩核心模块加载失败（吞/.test(host),
+  && /M3 压缩域模块加载失败（吞/.test(host),
   '未做空值降级 ⇒ 激活期会 TypeError（apply 不是 async，不能 await）');
+/* R10：编排层（preStepCompaction / idleSweep）也已搬走 ⇒ 宿主只许留**薄转发**。
+ * 用「宿主不得再出现编排层的独有产物」判定，而不是只查函数名（改名就能躲过）。 */
+ok('R10 编排层已抽：宿主不再自带 preStepCompaction / idleSweep 实现',
+  /const preStepCompaction = async \(payload\) => \{\n    if \(!m3Ctl\)/.test(host)
+  && /const idleSweep = \(agent\) => \{\n    if \(!m3Ctl\) return;/.test(host)
+  && /getCompactTool: \(\) => compactToolApi,/.test(host)
+  && /clearBriefed,/.test(m3src)
+  && !/state\.m3\.lastPreStep = \{/.test(hostNoComment)
+  && !/sweepInFlight/.test(hostNoComment)
+  && !/M3\.sweepMinIntervalMs/.test(hostNoComment)
+  && !/state\.m3\.actErrors\[code\]/.test(hostNoComment),
+  '宿主仍带编排层实现/留痕 ⇒ 两套真相，且跨域回调会退化成闭包穿透（R7 审计的第二个解耦障碍回归）');
 ok('R5 保留策略：自选范围优先 + 官方 overflow 兜底',
   /const out = await compactWithOwnRange\(agent, compaction, \{ forced, sig, sid, window: mr\.window, measure: mr\.measure \}\);/.test(ctPreStep)
   && /const forced = ratio >= effCritical;/.test(ctPreStep)
@@ -598,7 +614,7 @@ ok('错误文案与引擎源码逐字一致（引擎改文案时这里先响）'
 
 /* ---- host 接线 ---- */
 ok('host 把 measure 本体带进自选范围（不二次测量、不猜节点）',
-  /return \{ ok: true, used, surface, window, ratio, measure: m\.value \};/.test(m3core)
+  /return \{ ok: true, used, surface, window, ratio, measure: m\.value \};/.test(m3src)
   && /api\.selectRange\(\{ session: agent\.session, measurement: measure, retainTokens: budget \}\)/.test(ctOwnRange),
   '没带 measure ⇒ 只能退化成官方路径，自选范围形同未接');
 ok('保留比例来自模块常量，不进 M3（M3 语义 = 用户可配项）',
@@ -733,12 +749,13 @@ ok('阈值模块定义 5pp 余量常量', /const ENGINE_CAP_MARGIN = 0\.05;/.tes
 ok('生效上限抽成单一来源 criticalCapOf（= 引擎阈值 − 余量，下限 0）',
   /const criticalCapOf = \(agent\) => Math\.max\(0, engineThreshold\(agent\) - ENGINE_CAP_MARGIN\);/.test(threshold),
   '未抽单一上限函数 ⇒ 三处门控各写一遍必然漂移');
-for (const [label, re] of [
-  ['pre-step 门控', /const effCritical = Math\.min\(M3\.criticalRatio, criticalCapOf\(agent\)\);/],
-  ['idle safety-net 门控', /if \(mr\.ratio < Math\.min\(M3\.criticalRatio, criticalCapOf\(agent\)\)\) return;/],
-  ['getHud 下发', /criticalCap: criticalCapOf\(targetAgent\),/],
+/* R10：两条门控随编排层搬进 plugin/m3.compact.mjs ⇒ 断言改查模块；宿主只保留 getHud 下发点。 */
+for (const [label, re, src] of [
+  ['pre-step 门控（m3.compact.mjs）', /const effCritical = Math\.min\(M3\.criticalRatio, criticalCapOf\(agent\)\);/, m3src],
+  ['idle safety-net 门控（m3.compact.mjs）', /if \(mr\.ratio < Math\.min\(M3\.criticalRatio, criticalCapOf\(agent\)\)\) return;/, m3src],
+  ['getHud 下发（host）', /criticalCap: criticalCapOf\(targetAgent\),/, host],
 ]) {
-  ok(`强制线三处同源：${label}`, re.test(host), '该处未用 criticalCapOf ⇒ 与其余两处不一致');
+  ok(`强制线三处同源：${label}`, re.test(src), '该处未用 criticalCapOf ⇒ 与其余两处不一致');
 }
 ok('不再有任何一处用裸引擎阈值做门控 / 下发',
   !/Math\.min\(M3\.criticalRatio, engineThreshold\(agent\)\)/.test(host) && !/criticalCap: engineThreshold\(/.test(host),
@@ -991,11 +1008,18 @@ ok('存在 clearBriefed 清除函数', /const clearBriefed = \(sid\) => \{/.test
 ok('clearBriefed 同时清两个集合（压缩说明 + 智能思考教学）',
   /briefedBySid\.delete\(sid\)[\s\S]{0,120}?effBriefedBySid\.delete\(sid\)/.test(host),
   '只清一个 ⇒ 另一个仍永不重讲');
-const clearCalls = (host.match(/clearBriefed\(sid\)/g) || []).length;
-ok(`clearBriefed 在两条压缩路径都被调用（实际 ${clearCalls} 处）`, clearCalls >= 2,
+/* R10：两条压缩路径（pre-step / idle）已随编排层搬进 m3.compact.mjs ⇒ 调用点查模块。
+ * `clearBriefed` 本体仍在宿主（属 M2 教学域），因此还要钉「模块经**显式注入**拿到它」—— */
+const clearCalls = (m3src.match(/clearBriefed\(sid\)/g) || []).length;
+ok(`clearBriefed 在两条压缩路径都被调用（实际 ${clearCalls} 处，查 m3.compact.mjs）`, clearCalls >= 2,
   '只在一条路径清除 ⇒ 另一条压缩路径后说明仍丢失');
-ok('clearBriefed 声明早于调用点（无 TDZ 风险）',
-  host.indexOf('const clearBriefed = ') < host.indexOf('clearBriefed(sid)'),
+ok('clearBriefed 经显式注入进 M3 模块（不再靠闭包穿透 M2 域）',
+  /clearBriefed,/.test(m3src)
+  && /publishHud, recordHudAct, formatAct, clearBriefed,/.test(host)
+  && !/const clearBriefed = /.test(m3src),
+  'M3 模块自己声明 clearBriefed / 或宿主没注入 ⇒ 依赖方向被破坏（R7 审计的第二个解耦障碍回归）');
+ok('clearBriefed 声明早于模块接线（无 TDZ 风险）',
+  host.indexOf('const clearBriefed = ') < host.indexOf('publishHud, recordHudAct, formatAct, clearBriefed,'),
   'clearBriefed 声明在调用之后 ⇒ const TDZ 会抛 ReferenceError');
 
 /* ═══════════ 6.12 换档执行通道（agent.ctx 作用域，非 global）═══════════ */
@@ -1322,7 +1346,7 @@ ok('checkEffort 与 renderBrief 用同一判据（length 而非 isArray）',
 
 /* ═══════════ 6f. 压缩两条路径的**顺序**契约（F1/F5 真缺陷） ═══════════ */
 console.log('\n== 6f. pre-step / idle 顺序契约 ==');
-const idleBody = /const idleSweep = \(agent\) => \{([\s\S]*?)\n  \};/.exec(host)?.[1] ?? '';
+const idleBody = /const idleSweep = \(agent\) => \{([\s\S]*?)\n  \};/.exec(m3src)?.[1] ?? '';
 ok('解析出 idleSweep', idleBody.length > 0, '未找到 idleSweep ⇒ 顺序契约失效');
 /* F5：意图只能在**确认能执行**之后消费。原实现先 takeIntent 再 resolveCompactionFor，
  * 服务解析不到就直接 return ⇒ 意图已丢、工具却回了 scheduled ⇒ 模型以为压过了、实际没压且不重试。 */

@@ -672,35 +672,6 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       return null;
     });
 
-  /* ═══ R9 解耦第二刀：M3 压缩**执行核心**已搬进 plugin/m3.compact.mjs ═══
-   * 搬的是 `measureRatio` / `compactWithOwnRange` 两个纯执行函数（M3 里最大、最自包含的一块）；
-   * **编排层**（preStepCompaction / idleSweep）仍在宿主——它与 M2 注入、M5 HUD 回调、
-   * clearBriefed 交织最多，需要先把这些回调做成显式注入（第三刀）。
-   * 依赖同样是「懒加载 + 空值降级」（宿主 apply 不是 async，不能 await）：
-   * 未就绪时 `measureRatio` 返回 `{ok:false}` ⇒ 本轮不压（安全侧），
-   * `compactWithOwnRange` 返回 `source:'none'` + `skipWhy` 留痕。实测窗口只在激活后头几个微任务内。 */
-  let m3Ctl = null;
-  const m3Ready = import(`./m3.compact.mjs?ts=${IMPL_TS}`)
-    .then((m) => {
-      m3Ctl = m.createM3Compaction({
-        svc,
-        tryOf,
-        state,
-        /* range 模块的生命周期由宿主拥有（它自己也是 ?ts= 懒加载）⇒ 交给核心模块一个 async 取用口。 */
-        awaitRange: async () => rangeApi ?? (await rangeReady),
-      });
-      return m3Ctl;
-    })
-    .catch((e) => {
-      log('warn', `M3 压缩核心模块加载失败（吞，本轮不压）：${msg(e)}`);
-      return null;
-    });
-  const measureRatio = (session) => (m3Ctl ? m3Ctl.measureRatio(session) : { ok: false, error: 'm3-module-pending' });
-  const compactWithOwnRange = async (agent, compaction, ctx) =>
-    (m3Ctl
-      ? m3Ctl.compactWithOwnRange(agent, compaction, ctx)
-      : { result: null, source: 'none', skipWhy: 'm3-module-pending', retainBudget: null, walkBacks: 0 });
-
   /** 智能压缩工具懒安装入口（由 pre-step 最前面调用；幂等；总开关关闭时内部直接返回）。 */
   const ensureCompactTool = async () => {
     try {
@@ -1177,142 +1148,47 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
    *   source ∈ 'own'（自选范围成功）| 'official'（沿用官方 overflow）| 'none'（判定无需压缩）
    * 异常语义：**非校验类错误一律上抛**（由 preStepCompaction 的 catch 统一记录）——
    *   摘要 LLM 失败、`busy`、abort 等重试/兜底都无意义（官方路径会同样失败）。 */
+  /* ═══ R9/R10 解耦第二刀：M3 压缩域（执行核心 + 编排层）已整体搬进 plugin/m3.compact.mjs ═══
+   * 跨域回调（`publishHud` / `recordHudAct` / `formatAct` / `clearBriefed`）与 `schedule`
+   * 由宿主**显式注入**——R7 审计列的第二个解耦障碍（「靠闭包穿透别人的域」）就此消除。
+   * ⚠️ 接线必须放在这里（而非文件前部的模块区）：`schedule` 在下方才定义，deps 对象是**立即构造**的，
+   *    放前面会 TDZ。而 `measureRatio` 虽在更早的 `renderUsageText` 里被引用，但只要**调用发生在初始化之后**
+   *    就不受 TDZ 约束（const 的 TDZ 只看运行时求值时刻）。
+   * 依赖同样是「懒加载 + 空值降级」（宿主 apply 不是 async，不能 await）：
+   * 未就绪时 `measureRatio` 返回 `{ok:false}` ⇒ 本轮不压（安全侧）；`compactWithOwnRange` 返回
+   * `source:'none'`；两个编排入口直接 no-op 并留痕。实测窗口只在激活后头几个微任务内。 */
+  let m3Ctl = null;
+  const m3Ready = import(`./m3.compact.mjs?ts=${IMPL_TS}`)
+    .then((m) => {
+      m3Ctl = m.createM3Compaction({
+        svc, tryOf, state, M3, effEnabled, criticalCapOf, resolveCompactionFor,
+        log, msg, pick, nfmt, errCodeOf, schedule,
+        publishHud, recordHudAct, formatAct, clearBriefed,
+        /* range 模块与压缩工具的生命周期都由宿主拥有 ⇒ 交给模块 async 取用口。 */
+        awaitRange: async () => rangeApi ?? (await rangeReady),
+        getCompactTool: () => compactToolApi,
+        COMPACT_TIMEOUT_MS, SET_CAP,
+      });
+      return m3Ctl;
+    })
+    .catch((e) => {
+      log('warn', `M3 压缩域模块加载失败（吞，本轮不压）：${msg(e)}`);
+      return null;
+    });
+  const measureRatio = (session) => (m3Ctl ? m3Ctl.measureRatio(session) : { ok: false, error: 'm3-module-pending' });
+  const compactWithOwnRange = async (agent, compaction, ctx) =>
+    (m3Ctl
+      ? m3Ctl.compactWithOwnRange(agent, compaction, ctx)
+      : { result: null, source: 'none', skipWhy: 'm3-module-pending', retainBudget: null, walkBacks: 0 });
+  /** pre-step 轮内先压（M3.5 通道 1）：模块未就绪时 no-op 并留痕（绝不上抛）。 */
   const preStepCompaction = async (payload) => {
-    try {
-      if (!effEnabled()) return; // 总开关活读（演习模式已随 2026-10-07 面板精简退役：压缩路径无影子模式）
-      const { agent, signal } = payload ?? {};
-      if (!agent?.session) return;
-      /* A5（审查）：signal 缺失守卫——compactIfNeeded 契约首行 throwIfAborted(signal)，undefined 放行=首跑即败
-       * （M5.5 通道 A 已实证同款）。payload 未带 signal 时兜底 180s 超时信号（与 idle compactNow 同参）。 */
-      const sig = signal && typeof signal === 'object' ? signal : AbortSignal.timeout(COMPACT_TIMEOUT_MS);
-      if (sig.aborted) return;
-      const sid = String(pick(agent.session.id, agent.sessionId, agent.id, 'unknown'));
-      const mr = measureRatio(agent.session); // B2：读取收敛
-      if (!mr.ok || mr.ratio == null) return;
-      const ratio = mr.ratio;
-      /* ═══ R4（2026-10-08）：模型主动登记「下一步压缩」意图 ⇒ 轮内执行，本轮无缝继续 ═══
-       * 这是替代「marker + 伪造恢复消息」的核心：工具调用必然产生下一步 ⇒ 下一步的 pre-step
-       * 就在这里执行压缩 ⇒ 之后的步骤都在压缩后的上下文上继续，**不需要任何消息**。
-       * ⚠️ F5（R7 审查修）：意图**只能在「确实能执行」时才消费**。原实现在 `resolveCompactionFor`
-       *    之前就 takeIntent，服务解析不到就直接 return ⇒ 意图已丢、工具却早已回 `scheduled:'next-step'`
-       *    ⇒ **模型以为压过了、实际没压，而且不会重试**（最典型的静默降级）。
-       *    现在：服务不可用 ⇒ 意图保留（下一步会再试；TTL 到期由模块清扫）。 */
-      const intent = compactToolApi ? compactToolApi.peekIntent(sid) : null;
-      const wanted = !!intent;
-      /* 诊断：本 sid 无意图、但表里还有**别的 sid** 的未过期意图 ⇒ 很可能是 session id 轮转导致
-       * 意图登记在旧键上（工具已回 scheduled，压缩却不会发生）。只留痕，**不跨会话执行**——
-       * 在别的 agent 上执行压缩比不压更糟。 */
-      if (!intent && compactToolApi?.pending) {
-        const others = compactToolApi.pending();
-        if (others.length) state.m3.compactIntentMiss = { at: new Date().toISOString(), sessionId: sid, pending: others };
-      }
-      /* C-own：生效强制线 = min(用户配置, 引擎阈值 − 5pp)——插件线必须**确定性地先行**，
-       * 引擎只是插件关闭/卸载后的安全网。 */
-      const effCritical = Math.min(M3.criticalRatio, criticalCapOf(agent));
-      if (!wanted && ratio < effCritical) return;
-      const compaction = resolveCompactionFor(agent);
-      if (!compaction.service) {
-        log('warn', `M3.5 pre-step 先压：解析不到作用域 compaction，跳过（意图保留待下次）`);
-        return;
-      }
-      if (wanted) compactToolApi.takeIntent(sid); // F5：确能执行才消费
-      state.m3.preStepActs += 1;
-      const t0 = Date.now();
-      /* R5：trigger 现在只表达**触发原因**；实际执行策略（自选范围/官方兜底）记在 rangeSource。
-       *   - 模型主动请求（wanted）⇒ overflow 语义（原本就是「轮内强制压一次」）
-       *   - 越强制线（forced）  ⇒ pressure 语义（原本就是「无条件兜底压」） */
-      const forced = ratio >= effCritical;
-      const trigger = wanted ? 'context-overflow' : 'pressure';
-      log(
-        'info',
-        `M3.5 pre-step 先压开始：${wanted ? '模型主动请求' : '越强制线'}（占用 ${(ratio * 100).toFixed(1)}%，强制线 ${(effCritical * 100).toFixed(1)}%，via ${compaction.via}）`,
-      );
-      const out = await compactWithOwnRange(agent, compaction, { forced, sig, sid, window: mr.window, measure: mr.measure });
-      let result = out.result;
-      let rangeSource = out.source;
-      let ratioAfter = null;
-      /* 强制线收口：自选范围若保留过多、压完仍在线之上 ⇒ 追加官方 overflow 再压一次。
-       * 保证「越强制线必定压到线下」这条旧承诺不因换了保留策略而丢失。 */
-      if (forced && rangeSource === 'own' && result != null) {
-        const mr2 = measureRatio(agent.session);
-        ratioAfter = mr2.ok ? mr2.ratio : null;
-        if (mr2.ok && mr2.ratio != null && mr2.ratio >= effCritical) {
-          log('info', `M3.5 自选范围后占用仍 ${(mr2.ratio * 100).toFixed(1)}% ≥ 强制线 ${(effCritical * 100).toFixed(1)}% ⇒ 追加官方 overflow 收口`);
-          const r2 = await compaction.service.compactIfNeeded(agent, 'context-overflow', sig);
-          if (r2) {
-            result = r2;
-            rangeSource = 'own+official';
-          }
-        }
-      }
-      state.m3.preStepOk += 1;
-      /* R5 取证口径：rangeSource 说明**实际用了哪条保留策略**（own=自选范围 / official=官方 overflow 兜底 /
-       * own+official=自选后仍越线再收口 / none=判定无需压）。retainBudget 是自选预算（token）。 */
-      const rangeInfo = {
-        rangeSource,
-        retainBudget: out.retainBudget ?? null,
-        walkBacks: out.walkBacks ?? 0,
-        skipWhy: out.skipWhy ?? null,
-        officialWhy: out.officialWhy ?? null,
-        ratioAfter: ratioAfter != null ? +(ratioAfter * 100).toFixed(1) : null,
-        ownRange: out.range ?? null,
-      };
-      if (wanted) {
-        state.m3.compactIntents += 1;
-        state.m3.lastCompactIntent = {
-          at: new Date().toISOString(),
-          sessionId: sid,
-          reason: intent?.reason || null,
-          ratio: +(ratio * 100).toFixed(1),
-          trigger,
-          acted: result != null,
-          shadowedTokens: result?.shadowedTokenCount ?? null,
-          ms: Date.now() - t0,
-          ...rangeInfo,
-        };
-      }
-      state.m3.lastPreStep = {
-        at: new Date().toISOString(),
-        sessionId: sid,
-        trigger,
-        ratio: +(ratio * 100).toFixed(1),
-        acted: result != null,
-        shadowedTokens: result?.shadowedTokenCount ?? null,
-        range: result?.shadowedRange ?? null,
-        ms: Date.now() - t0,
-        ...rangeInfo,
-      };
-      if (result) {
-        /* D8/F13（R7 审查修）：HUD 文案必须用**真实触发原因**——原先写死 `'pressure'`，
-         * 于是「模型主动请求压缩」在弹窗与 hud-acts 里被标成「强制压缩」，与实际动机不符
-         * （而 `lastPreStep.trigger` 记的是真值 ⇒ 同一件事两个说法）。 */
-        const __t = formatAct(trigger, result?.shadowedTokenCount);
-        publishHud({ hudLastAct: __t }); // M5
-        recordHudAct(sid, __t);
-        clearBriefed(sid); // R1：同 idle 路径——压缩后一次性说明需重讲
-      }
-      log(
-        'info',
-        `M3.5 pre-step 先压完成（${Date.now() - t0}ms）：${
-          result ? `shadowed ~${nfmt(result.shadowedTokenCount ?? 0)} tokens（seq ${result.shadowedRange?.start ?? '?'}-${result.shadowedRange?.end ?? '?'}）` : '引擎判定无需压（null）'
-        }`,
-      );
-      schedule('m3.5-prestep', 500);
-    } catch (e) {
-      const code = errCodeOf(e);
-      state.m3.preStepErrors[code] = (state.m3.preStepErrors[code] ?? 0) + 1;
-      /* ⚠️ 2026-10-08：此前**只记错误码、错误正文只进 log**——压缩全线失败（preStepOk=0）
-       * 时报告里看不到原因，无法定位。现保留最近一次失败的完整信息。 */
-      state.m3.lastPreStepError = {
-        at: new Date().toISOString(),
-        code,
-        message: String(msg(e)).slice(0, 400),
-        name: e?.name ?? null,
-        stack: String(e?.stack ?? '').split('\n').slice(0, 3).join(' | ').slice(0, 400),
-      };
-      log('warn', `M3.5 pre-step 先压失败（吞掉，本轮照常继续）：${msg(e)}`);
-      schedule('m3.5-prestep', 500);
-    }
+    if (!m3Ctl) { log('warn', 'M3 pre-step 先压：压缩域模块未就绪，本轮跳过'); return; }
+    return m3Ctl.preStepCompaction(payload);
+  };
+  /** idle 安全网（M3-b）：模块未就绪时 no-op（下次状态翻转会再来）。 */
+  const idleSweep = (agent) => {
+    if (!m3Ctl) return;
+    return m3Ctl.idleSweep(agent);
   };
 
   /* ---- M2.5 新会话一次性插件说明：让任何新会话的 Agent 不靠外部文档就明白压缩流程与用法 ----
@@ -1432,96 +1308,6 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
    *   ② 关键词「先压缩」武装 —— 该通道已于 2026-10-06 按用户决定裁撤。
    * ⇒ 监听器连同 `decideCompaction` 的审计出口一起删除。**压缩触发只剩两条**：
    *   pre-step 轮内（工具意图 / 越强制线）与 idle 安全网（sweepBelow）。 */
-
-  /* ═══════════ M3-b：idle 安全网（R7 起**只剩一种模式**） ═══════════
-   * 会话被撂在高占用（≥ 生效强制线）→ idle 时兜底清场，受 sweepMinIntervalMs 冷却。
-   * ⚠️ 原来的第二模式 `marker`（模型回复尾行标记 → idle 立即压缩）已随 marker 通道整体退役：
-   *    压缩现在由模型调用工具 `compact_context` 在**轮内**完成，idle 路径不再承担「模型请求」职责。 */
-  const sweepInFlight = new Set();
-  const idleSweep = (agent) => {
-    try {
-      if (!effEnabled()) return; // 总开关活读（演习模式已随 2026-10-07 面板精简退役：压缩路径无影子模式）
-      const sid = String(pick(agent?.session?.id, agent?.id, 'unknown'));
-      if (sweepInFlight.has(sid)) return;
-      const mr = measureRatio(agent?.session); // idle：只看占用比，任务文本无关
-      if (!mr.ok || mr.ratio == null) return;
-      const now = Date.now();
-      /* C-own：safety-net 同样钳到「引擎阈值 − 5pp」之下（同 pre-step，理由见 ENGINE_CAP_MARGIN） */
-      if (mr.ratio < Math.min(M3.criticalRatio, criticalCapOf(agent))) return; // 仅越强制线才兜底
-      if (now - (state.m3.sweeps[sid] ?? 0) < M3.sweepMinIntervalMs) return; // 兜底受冷却限制
-      const reason = 'safety-net';
-      const compaction = resolveCompactionFor(agent);
-      if (!compaction.service) {
-        log('warn', `M3 idle 扫除：解析不到作用域 compaction（${JSON.stringify(compaction.probe)}）`);
-        return;
-      }
-      state.m3.acts += 1;
-      log('info', `M3 idle 扫除（${reason}）：compactNow（ratio ${(mr.ratio * 100).toFixed(1)}%，via ${compaction.via}）`);
-      /* ⚠️ F2（R7 审查修）：`add` 必须**紧贴** promise 链。原顺序是 add → 取冷却 → log → compactNow，
-       * 这段同步代码里任何抛错（审计窗口内真的发生过：日志模板引用了已删变量）都会让 sid 永久驻留
-       * `sweepInFlight` ⇒ 该会话**永久失去 idle 安全网**，而且没有任何显式日志。
-       * 现在：「可能抛的语句」全在 add 之前，add 之后立即注册 `.finally` ⇒ 结构上不存在这个窗口。
-       * ⚠️ F1（同批修）：冷却 `state.m3.sweeps[sid]` 改为**只在成功分支**记录——原实现发起前就记，
-       * 一次失败即消耗掉 `sweepMinIntervalMs`（默认 10 分钟）安全网。 */
-      sweepInFlight.add(sid);
-      compaction.service
-        .compactNow(agent, AbortSignal.timeout(COMPACT_TIMEOUT_MS), 'context-pilot')
-        .then((result) => {
-          state.m3.sweeps[sid] = Date.now(); // F1：成功才记冷却
-          /* C4（审查）：`sweeps` 以 sid 为键且从不清理 ⇒ 有界化（只用于冷却判定，淘汰无害）。 */
-          const sweepKeys = Object.keys(state.m3.sweeps);
-          if (sweepKeys.length > SET_CAP) {
-            const oldest = sweepKeys.reduce((a, b) => (state.m3.sweeps[a] <= state.m3.sweeps[b] ? a : b));
-            if (oldest !== sid) delete state.m3.sweeps[oldest];
-          }
-          state.m3.actOk += 1;
-          state.m3.lastAct = {
-            at: new Date().toISOString(),
-            sessionId: sid,
-            reason,
-            via: compaction.via,
-            shadowedNodes: result?.shadowedSeqs?.length ?? null,
-            shadowedTokens: result?.shadowedTokenCount ?? null,
-            range: result?.shadowedRange ?? null,
-          };
-          const __actText = formatAct(reason, result?.shadowedTokenCount);
-          publishHud({ hudLastAct: __actText }); // M5
-          recordHudAct(sid, __actText);
-          /* R1：压缩成功 ⇒ 一次性说明（压缩流程 + 智能思考教学）已随旧对话被收走，
-           * 清除「已讲」标记让下一轮重讲一次（否则模型永久失去用法说明）。 */
-          clearBriefed(sid);
-          /* ❌ R4（2026-10-08）**已删除伪造恢复消息**（用户明确要求：「自动压缩时，不用伪造一条
-           * 我的信息重新拉起会话」）。原实现 `maybeResumeAfterMarker` → `resumeViaAnyChannel`
-           * 会走 `sessionController.prompt(...)`，其内部是
-           * `createUserMessage({content, source:{kind:'user'}})` + `agent.followup` ⇒
-           * 等于**替用户发言**。
-           * 现在改由工具 `compact_context` 在轮内完成压缩（见 preStepCompaction），
-           * 本轮自然继续，**不需要任何消息**；若模型没有主动请求，idle 压缩就只是收尾动作
-           * （占用已降，用户下一轮直接继续即可）。 */
-          log('info', `M3 idle 扫除完成：${result ? `shadowed ${result.shadowedSeqs?.length ?? '?'} nodes / ~${result.shadowedTokenCount ?? '?'} tokens` : 'null（无可压区间）'}`);
-          schedule('m3-act', 500);
-        })
-        .catch((e) => {
-          const code = errCodeOf(e);
-          state.m3.actErrors[code] = (state.m3.actErrors[code] ?? 0) + 1;
-          /* ⚠️ 2026-10-08：同 pre-step——错误正文此前只进 log，报告只见错误码
-           * （实测 actErrors={summary:2} 而 actOk=0，无从定位）。现保留最近一次失败详情。 */
-          state.m3.lastActError = {
-            at: new Date().toISOString(),
-            code,
-            reason,
-            message: String(msg(e)).slice(0, 400),
-            name: e?.name ?? null,
-            stack: String(e?.stack ?? '').split('\n').slice(0, 3).join(' | ').slice(0, 400),
-          };
-          log('warn', `M3 idle 扫除失败（${code}）：${msg(e)}`);
-          schedule('m3-act', 500);
-        })
-        .finally(() => sweepInFlight.delete(sid));
-    } catch (e) {
-      log('warn', `M3 idle 扫除异常（吞）：${msg(e)}`);
-    }
-  };
 
   state.listeners['agent/status'] = addListener('agent/status', (payload) => {
     try {

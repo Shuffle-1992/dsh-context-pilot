@@ -131,7 +131,7 @@ R4 只删掉了「**伪造用户消息自动拉起**」这条投递链，但 **m
 | 项 | 为什么挂起 | 建议顺序 |
 | --- | --- | --- |
 | ~~抽「阈值核心」为只读服务~~ **✅ 已实施（R8）** | —— | ~~第 1 步~~ **已完成** |
-| **拆 M3 压缩域**（`measureRatio` / `compactWithOwnRange` / `preStepCompaction` / `idleSweep`） | pre-step handler 把 `ensureEffort` + `ensureCompactTool` + `preStepCompaction` 与 M2 注入**串在同一个函数**里；成功回调又要调 `publishHud`/`recordHudAct`/`clearBriefed`/`schedule`（跨 M5+M2+报告三域）⇒ 必须先有「域只读视图」+ 回调注入形状。**执行核心（`measureRatio` / `compactWithOwnRange`）已于 R9 抽出**（依赖只有 `svc`/`tryOf`/`state`/range 取用口，搬运零风险）；**编排层仍待做** | 第 2 步（**已完成一半**） |
+| ~~拆 M3 压缩域~~ **✅ 已完成（R9 + R10）** | R9 抽执行核心、R10 搬编排层并把五个跨域回调显式注入（见 §10/§11） | ~~第 2 步~~ **已完成** |
 | **拆 M1 快照 / M5 HUD** | `buildSnapshot` 直接读 m2/m3/m5 三域 state；`onGetHud` 是**跨域聚合视图**（需 `criticalCapOf`(M3) + `measureRatio`(M3) + `effortApi.hudPayload`(effort)）⇒ 不是独立域 | 第 3 步 |
 | **`host.impl.mjs` 拆分到 ≤250 行** | 上述三步做完才可能；本批已顺手把 1 个域内死函数与 1 个跨域审计块清掉（净减约 40 行，同时新增了 6 处缺陷修复的注释） | D1 任务书 |
 | **报告尾部对账的全量读放大** | 检测到「他方写入」后每次写都全量读写 MB 级报告；仅在**僵尸实例共存**时触发。修它需要改多写入者协议（写入者标识 + 分段追加），风险高于收益 | 观察 |
@@ -248,3 +248,46 @@ M2 的 `clearBriefed`、报告 `schedule` —— 这些回调必须先做成**�
 ### 10.4 验证
 
 contract **306** + static 48 + report 59 = **413 断言**全绿。
+
+---
+
+## 11. R10 解耦第二刀（续）：M3 编排层搬出宿主 —— 第二个障碍显式化（2026-10-08）
+
+### 11.1 搬了什么
+
+`preStepCompaction`（轮内先压：意图消费 / 阈值门控 / 强制线收口 / 留痕）与
+`sweepInFlight` + `idleSweep`（idle 安全网 + 冷却 + 有界化）**整体搬进 `m3.compact.mjs`**。
+宿主只剩**四个薄转发**（`measureRatio` / `compactWithOwnRange` / `preStepCompaction` / `idleSweep`）。
+⇒ M3 域的「执行核心 + 编排层」现在都在同一个模块里，`host.impl.mjs` **1765 → 1551 行**。
+
+### 11.2 关键：第二个解耦障碍被显式化
+
+R7 审计指出 M3 拆不动的第二个原因是「靠闭包穿透别人的域」。这次把五个跨域依赖
+**全部改成 deps 注入**，并在模块里直接可见：
+
+| 注入项 | 原本的穿透方式 | 现在 |
+| --- | --- | --- |
+| `publishHud` / `recordHudAct` / `formatAct` | M5 HUD 域（闭包） | deps 字段 |
+| `clearBriefed` | M2 教学域（闭包） | deps 字段 |
+| `schedule` | 报告域（闭包） | deps 字段 |
+| `criticalCapOf` / `resolveCompactionFor` | R8 的阈值叶子（闭包转发） | deps 字段 |
+| `getCompactTool` / `awaitRange` | 另两个模块的单例（闭包 + 变量） | deps **取用口**（模块生命周期仍归宿主） |
+
+**搬出来才发现的一个真问题**：M3 模块现在的依赖清单里出现了
+`publishHud`/`recordHudAct`/`formatAct`/`clearBriefed` 四项——**这说明 M5 与 M2 必须先于 M3 稳定**。
+下一步的顺序因此明确了：**先抽 M5 HUD（谁被依赖谁先独立），再 M2 注入，最后 M1 快照 + core 收尾**。
+
+### 11.3 接线位置的一个 TDZ 陷阱（值得记）
+
+R9 时接线块在文件前部（`IMPL_TS` 之后）；R10 起必须**下移到 `preStepCompaction` 原来的位置**
+——因为 deps 对象是**立即构造**的，而 `schedule` 在文件更后面才定义，放前面直接 TDZ 崩激活。
+`measureRatio` 虽在更早的 `renderUsageText`（第 ~1067 行）里被引用，但只要**调用发生在初始化之后**
+就不受 TDZ 约束（const 的 TDZ 只看运行时求值时刻）——两者容易混淆，已在宿主注释里写明。
+
+### 11.4 验证
+
+- contract **308** + static 48 + report 59 = **415 断言**全绿。
+- **变异 6/6 被捕获**：宿主又抄回编排实现 / 去掉 `getCompactTool` 注入 / 去掉 `clearBriefed` 注入 /
+  模块里退掉 `sweepInFlight` 释放 / 冷却退回发车前记录 / 模块丢 `?ts=`。
+- 新绊线刻意**不查函数名**（改名就能躲过），而是查「编排层的独有产物是否回流宿主」：
+  `state.m3.lastPreStep = {`、`sweepInFlight`、`M3.sweepMinIntervalMs`、`state.m3.actErrors[code]`。
