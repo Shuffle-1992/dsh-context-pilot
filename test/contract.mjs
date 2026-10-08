@@ -623,6 +623,14 @@ ok('保留比例来自模块常量，不进 M3（M3 语义 = 用户可配项）'
 ok('自选范围全程留痕（rangeProbe + rangeSource）',
   /state\.m3\.rangeProbe = \{/.test(ctOwnRange) && /rangeSource,/.test(ctPreStep) && /rangeProbe: null,/.test(hostNoComment),
   '范围算错时无现场 ⇒ 只剩「压了个奇怪的东西」这一句现象');
+/* 2026-10-08 实测教训：真机出现过 `rangeProbe = {start: 20897, end: 19958}`（起点 seq > 终点 seq）。
+ * 原因是**压缩检查点插在表头**（`source.kind='compact-checkpoint'`，其 seq 比所保留的旧尾部更大）
+ * ⇒ **seq 在 surface 上并不单调**，只有 surface 位置能自证顺序（引擎也按位置校验，
+ * 错误文案即 `start seq N (position P) is after end seq M (position Q)`）。
+ * 没有位置字段时，这条记录会让人白查一轮（本次真的查了）。 */
+ok('rangeProbe 同时记 surface 位置（seq 在 surface 上不单调，只有位置能自证顺序）',
+  /startIdx: sel\.startIdx \?\? null,/.test(m3src) && /endIdx: sel\.endIdx \?\? null,/.test(m3src),
+  '只记 seq ⇒ 检查点插入表头后必然出现「起点 seq > 终点 seq」的记录，读者会误判为 bug');
 ok('强制线收口：自选范围后仍越线则追加官方 overflow（保住旧的强制承诺）',
   /if \(forced && rangeSource === 'own' && result != null\) \{/.test(ctPreStep)
   && /mr2\.ratio >= effCritical/.test(ctPreStep)

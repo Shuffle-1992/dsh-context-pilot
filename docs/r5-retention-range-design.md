@@ -202,6 +202,15 @@ compaction/end     = 18991，随后 step/start 正常推进 ⇒ 本轮未中断
 
 ### 6.4 诚实说明（哪些还没被真机覆盖）
 
+> ⚠️ **取证陷阱（2026-10-08 R10 实测补充）**：`rangeProbe` 里会看到
+> `start: 20897, end: 19958` 这种「**起点 seq 大于终点 seq**」的记录，它**不是 bug**：
+> 每次压缩都会在 **surface 表头**插入一条 `source.kind='compact-checkpoint'` 的 user/message，
+> 它的 seq 是当时的**全局新事件序号**，比所保留的旧尾部更大 ⇒ **seq 在 surface 上并不单调**。
+> 真正的顺序看 **surface 位置**（`startIdx → endIdx`，例如 `1 → 640`）；引擎也按位置校验
+> （错误文案：`compactRegion: start seq N (position P) is after end seq M (position Q)`）。
+> 为此 `rangeProbe` 现在**同时记 `startIdx`/`endIdx`**，并有绊线钉住。
+> （原文：2026-10-08 我看到那条倒序记录后白查了一轮，先怀疑 `prevEnd` 回退走过头。）
+
 1. ~~**边界回退分支（`prevEnd` 重试）未在真机被触发**~~ —— ✅ **2026-10-08 R9 已观测到**：
    当次 `lastPreStep.walkBacks = 1`（首次末端 seq 19504 判为不合法 ⇒ 回退到 19501 ⇒ 压缩成功），
    会话存储逐字吻合：`compaction/summary range={"start":18990,"end":19501}`。

@@ -79,7 +79,13 @@ export function createM3Compaction(deps) {
     const ratioKept = api.RETAIN_RATIO;
     const budget = api.retainBudgetTokens(window, ratioKept);
     const sel = api.selectRange({ session: agent.session, measurement: measure, retainTokens: budget });
-    /* 取证：无论成败都留一次范围读数（范围不对时这是唯一的现场） */
+    /* 取证：无论成败都留一次范围读数（范围不对时这是唯一的现场）。
+     * ⚠️ **必须同时记 surface 位置（startIdx/endIdx）**：seq 是全局事件序号，**在 surface 上并不单调**——
+     * 每次压缩都会在**表头**插入一条 `source.kind='compact-checkpoint'` 的 user/message，其 seq
+     * 比所保留的旧尾部**更大**。于是真机会出现 `rangeProbe = {start: 20897, end: 19958}` 这种
+     * 「起点 seq > 终点 seq」的记录：位置是 `1 → 640`（合法且有序），只是 seq 看起来倒序。
+     * 引擎同样按**位置**校验（错误文案：`start seq N (position P) is after end seq M (position Q)`）。
+     * 2026-10-08 实测：没有位置字段时，这条记录让我白查了一轮。 */
     state.m3.rangeProbe = {
       at: new Date().toISOString(),
       sessionId: sid,
@@ -92,6 +98,8 @@ export function createM3Compaction(deps) {
       firstIdx: sel.firstIdx ?? null,
       start: sel.start ?? null,
       end: sel.end ?? null,
+      startIdx: sel.startIdx ?? null,
+      endIdx: sel.endIdx ?? null,
       retainedTokens: sel.retainedTokens ?? null,
       shadowTokens: sel.shadowTokens ?? null,
     };
