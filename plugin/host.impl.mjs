@@ -672,6 +672,35 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       return null;
     });
 
+  /* ═══ R9 解耦第二刀：M3 压缩**执行核心**已搬进 plugin/m3.compact.mjs ═══
+   * 搬的是 `measureRatio` / `compactWithOwnRange` 两个纯执行函数（M3 里最大、最自包含的一块）；
+   * **编排层**（preStepCompaction / idleSweep）仍在宿主——它与 M2 注入、M5 HUD 回调、
+   * clearBriefed 交织最多，需要先把这些回调做成显式注入（第三刀）。
+   * 依赖同样是「懒加载 + 空值降级」（宿主 apply 不是 async，不能 await）：
+   * 未就绪时 `measureRatio` 返回 `{ok:false}` ⇒ 本轮不压（安全侧），
+   * `compactWithOwnRange` 返回 `source:'none'` + `skipWhy` 留痕。实测窗口只在激活后头几个微任务内。 */
+  let m3Ctl = null;
+  const m3Ready = import(`./m3.compact.mjs?ts=${IMPL_TS}`)
+    .then((m) => {
+      m3Ctl = m.createM3Compaction({
+        svc,
+        tryOf,
+        state,
+        /* range 模块的生命周期由宿主拥有（它自己也是 ?ts= 懒加载）⇒ 交给核心模块一个 async 取用口。 */
+        awaitRange: async () => rangeApi ?? (await rangeReady),
+      });
+      return m3Ctl;
+    })
+    .catch((e) => {
+      log('warn', `M3 压缩核心模块加载失败（吞，本轮不压）：${msg(e)}`);
+      return null;
+    });
+  const measureRatio = (session) => (m3Ctl ? m3Ctl.measureRatio(session) : { ok: false, error: 'm3-module-pending' });
+  const compactWithOwnRange = async (agent, compaction, ctx) =>
+    (m3Ctl
+      ? m3Ctl.compactWithOwnRange(agent, compaction, ctx)
+      : { result: null, source: 'none', skipWhy: 'm3-module-pending', retainBudget: null, walkBacks: 0 });
+
   /** 智能压缩工具懒安装入口（由 pre-step 最前面调用；幂等；总开关关闭时内部直接返回）。 */
   const ensureCompactTool = async () => {
     try {
@@ -742,24 +771,6 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
     if (!event) return '';
     const m = event.type === 'user/message' ? event.data : event.data?.message;
     return messageText(m);
-  };
-
-  /* B2（审查）：measure+pressure 读取收敛——renderUsageText / preStepCompaction / idleSweep 三处共用
-   * （R7：原第三个调用点是 decideCompaction，该函数已删除）。 */
-  const measureRatio = (session) => {
-    const tm = svc('tokenMeter');
-    const m = tryOf(() => tm?.measure?.(session));
-    if (m.error || !m.value) return { ok: false, error: m.error ?? 'no measure' };
-    const sp = svc('sessionProjections');
-    const pressure = tryOf(() => sp?.stateOf?.(session, 'contextPressure'));
-    const pressureRec = pressure.error ? null : pressure.value ?? null;
-    const used = m.value.totalTokens ?? null;
-    const surface = m.value.surfaceTokens ?? null;
-    const window = pressureRec?.contextWindow ?? null;
-    const ratio = window && used != null ? used / window : null;
-    /* R5：带上 measure 本体（`nodes` = `{seq,tokens,heuristicTokens}[]`，官方承诺 deeply immutable
-     * ⇒ 持有引用安全）。自选范围需要它；报告侧仍走 compactMeasure 的白名单，不会因此膨胀。 */
-    return { ok: true, used, surface, window, ratio, measure: m.value };
   };
 
   /* R7：`decideCompaction` 已删除。
@@ -1166,73 +1177,6 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
    *   source ∈ 'own'（自选范围成功）| 'official'（沿用官方 overflow）| 'none'（判定无需压缩）
    * 异常语义：**非校验类错误一律上抛**（由 preStepCompaction 的 catch 统一记录）——
    *   摘要 LLM 失败、`busy`、abort 等重试/兜底都无意义（官方路径会同样失败）。 */
-  const compactWithOwnRange = async (agent, compaction, ctx) => {
-    const { forced, sig, sid, window, measure } = ctx;
-    const official = async (why) => ({
-      result: await compaction.service.compactIfNeeded(agent, 'context-overflow', sig),
-      source: 'official',
-      officialWhy: why ?? null,
-      retainBudget: null,
-      walkBacks: 0,
-    });
-    const api = rangeApi ?? (await rangeReady);
-    if (!api) return official('no-range-module');
-    /* 保留比例是**范围模块自己的常量**（= 引擎 DEFAULT_RETAIN_RATIO 0.16），不放进 M3：
-     * M3 的语义是「用户可配项」（且有「M3 字段必须在 schema 中」的护栏），而面板可调需要
-     * plugin-config.schema.mjs 新增字段 + DSH 重启——待用户确认后再补，届时在这里读配置即可。 */
-    const ratioKept = api.RETAIN_RATIO;
-    const budget = api.retainBudgetTokens(window, ratioKept);
-    const sel = api.selectRange({ session: agent.session, measurement: measure, retainTokens: budget });
-    /* 取证：无论成败都留一次范围读数（范围不对时这是唯一的现场） */
-    state.m3.rangeProbe = {
-      at: new Date().toISOString(),
-      sessionId: sid,
-      window,
-      retainRatio: ratioKept,
-      budget,
-      ok: sel.ok === true,
-      why: sel.why ?? null,
-      surfaceNodes: sel.surfaceNodes ?? null,
-      firstIdx: sel.firstIdx ?? null,
-      start: sel.start ?? null,
-      end: sel.end ?? null,
-      retainedTokens: sel.retainedTokens ?? null,
-      shadowTokens: sel.shadowTokens ?? null,
-    };
-    if (!sel.ok) {
-      /* 「没什么可压」而占用又没越强制线 ⇒ **就此收手**。
-       * 回退官方 = retainTokens 0 = 把整段砍光，与「本来就没多少可压」自相矛盾。
-       * 其余原因（读不到 nodes / surface 与 measurement 不一致）语义上等价于「自选不可用」⇒ 官方兜底。 */
-      if (sel.why === 'nothing-to-compact' && !forced) {
-        return { result: null, source: 'none', skipWhy: sel.why, retainBudget: budget, walkBacks: 0 };
-      }
-      return official(sel.why);
-    }
-    let end = sel.end;
-    let endIdx = sel.endIdx;
-    let walkBacks = 0;
-    for (;;) {
-      try {
-        const result = await compaction.service.compactRegion(sel.start, end, agent, sig);
-        return { result, source: 'own', retainBudget: budget, walkBacks, range: { start: sel.start, end } };
-      } catch (e) {
-        /* 末端不合法 ⇒ 回退一个 surface 节点重试。校验在 compaction/start（lib:469）之前发生
-         * （lib:452）⇒ 这一步是零副作用、零 LLM 成本的纯读，故可放心循环。 */
-        if (api.isEndBoundaryError(e)) {
-          const prev = api.prevEnd(agent.session?.surface?.nodes, sel.firstIdx, endIdx);
-          if (!prev || walkBacks + 1 > api.MAX_WALK_BACK) return official('boundary-exhausted');
-          walkBacks += 1;
-          end = prev.end;
-          endIdx = prev.endIdx;
-          continue;
-        }
-        /* 起点不合法 / 找不到 seq / 无 open turn 等：重试无意义 ⇒ 官方兜底（官方若也失败由外层记录） */
-        if (api.isValidationError(e)) return official('invalid-boundary');
-        throw e;
-      }
-    }
-  };
-
   const preStepCompaction = async (payload) => {
     try {
       if (!effEnabled()) return; // 总开关活读（演习模式已随 2026-10-07 面板精简退役：压缩路径无影子模式）

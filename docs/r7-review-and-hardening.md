@@ -131,7 +131,7 @@ R4 只删掉了「**伪造用户消息自动拉起**」这条投递链，但 **m
 | 项 | 为什么挂起 | 建议顺序 |
 | --- | --- | --- |
 | ~~抽「阈值核心」为只读服务~~ **✅ 已实施（R8）** | —— | ~~第 1 步~~ **已完成** |
-| **拆 M3 压缩域**（`measureRatio` / `compactWithOwnRange` / `preStepCompaction` / `idleSweep`） | pre-step handler 把 `ensureEffort` + `ensureCompactTool` + `preStepCompaction` 与 M2 注入**串在同一个函数**里；成功回调又要调 `publishHud`/`recordHudAct`/`clearBriefed`/`schedule`（跨 M5+M2+报告三域）⇒ 必须先有「域只读视图」+ 回调注入形状 | 第 2 步 |
+| **拆 M3 压缩域**（`measureRatio` / `compactWithOwnRange` / `preStepCompaction` / `idleSweep`） | pre-step handler 把 `ensureEffort` + `ensureCompactTool` + `preStepCompaction` 与 M2 注入**串在同一个函数**里；成功回调又要调 `publishHud`/`recordHudAct`/`clearBriefed`/`schedule`（跨 M5+M2+报告三域）⇒ 必须先有「域只读视图」+ 回调注入形状。**执行核心（`measureRatio` / `compactWithOwnRange`）已于 R9 抽出**（依赖只有 `svc`/`tryOf`/`state`/range 取用口，搬运零风险）；**编排层仍待做** | 第 2 步（**已完成一半**） |
 | **拆 M1 快照 / M5 HUD** | `buildSnapshot` 直接读 m2/m3/m5 三域 state；`onGetHud` 是**跨域聚合视图**（需 `criticalCapOf`(M3) + `measureRatio`(M3) + `effortApi.hudPayload`(effort)）⇒ 不是独立域 | 第 3 步 |
 | **`host.impl.mjs` 拆分到 ≤250 行** | 上述三步做完才可能；本批已顺手把 1 个域内死函数与 1 个跨域审计块清掉（净减约 40 行，同时新增了 6 处缺陷修复的注释） | D1 任务书 |
 | **报告尾部对账的全量读放大** | 检测到「他方写入」后每次写都全量读写 MB 级报告；仅在**僵尸实例共存**时触发。修它需要改多写入者协议（写入者标识 + 分段追加），风险高于收益 | 观察 |
@@ -199,3 +199,52 @@ R4 只删掉了「**伪造用户消息自动拉起**」这条投递链，但 **m
 
 contract **303** + static 45 + report 57 = **405 断言**全绿；**变异验证 5/5 被捕获**
 （host 重复定义常量 / 模块丢 `?ts=` / 去掉空值降级 / 满环退回无差别淘汰 / 弹窗提示拼回同一串）。
+
+---
+
+## 10. R9 解耦第二刀：M3 **执行核心**抽出 + 首次真机观测到边界回退（2026-10-08）
+
+### 10.1 抽了什么
+
+新增 `plugin/m3.compact.mjs`（第六个叶子模块），搬出 M3 里最大、最自包含的一块：
+`measureRatio`（测量读数收敛）+ `compactWithOwnRange`（自选范围执行 + `prevEnd` 回退 + 官方兜底 + 留痕）。
+宿主只留懒加载 + 两个同名转发；`range` 模块的生命周期仍由宿主拥有，通过 `awaitRange()` 注入给核心模块。
+
+**为什么只搬这两个**（而 `preStepCompaction` / `idleSweep` 留着）：编排层同时触碰
+M2 注入（决策卡/一次性说明）、M5 HUD（`publishHud`/`recordHudAct`/`formatAct`）、
+M2 的 `clearBriefed`、报告 `schedule` —— 这些回调必须先做成**显式注入**才有意义。
+先搬执行核心的好处是：宿主直接少掉 ~180 行，而**调用点几乎不动**（同名转发），风险最低。
+⇒ 解耦第 2 步**完成一半**（编排层待第三刀）。
+
+### 10.2 真机 E2E：一次完整的自选范围压缩（顺带补上一个诚实缺口）
+
+抽取部署后，模型恰好发起了一次压缩（`compact_context`，即「轮内工具触发」路径），
+执行全程走新模块。报告与**会话存储**双向吻合：
+
+| 观测 | 值 |
+| --- | --- |
+| `lastPreStep.trigger` / `acted` | `context-overflow` / `true` |
+| `rangeSource` / `retainBudget` | `own` / `160000`（= 1M × 0.16） |
+| `rangeProbe.ownRange` | `{start: 18990, end: 19504 → 回退 → 19501}`，surfaceNodes 997，retained 160,902 |
+| `lastPreStep.shadowedTokens` / `ms` | 175,827 / 28,403ms |
+| **`walkBacks`** | **1** 🔥 |
+| `preStepErrors` / `lastPreStepError` | `{}` / `null` |
+| 会话存储（权威源） | `compaction/summary range={"start":18990,"end":19501}` **逐字一致** |
+| `m2.skips`（旁证 `measureRatio` 正常） | `{}`，而 `m2.injections > 0` 且用量行正常渲染 |
+
+**`walkBacks = 1` 是本项目第一次在真机观测到 `prevEnd` 边界回退**：首次末端 seq 19504 被判为
+不合法（切在 step/tool 配对中间）⇒ 回退一个 surface 节点重试 ⇒ 成功。
+这正好补上 `docs/r5-retention-range-design.md` §6.4 第 1 条诚实缺口——
+那条曾经写着「不可控，只能等自然出现」，现在**真机 + 单测 + 变异**三层齐备。
+
+### 10.3 变异验证
+
+**5/5 被捕获**。其中一次逃逸值得记：我最初的 M1 变异写成「在宿主插入 `const ratioKept2 = 0.16;`」，
+而断言查的是 `const ratioKept = api.RETAIN_RATIO;` —— **逃逸的是变异脚本、不是断言太弱**。
+两处都改了：变异改成忠实复现「宿主导回范围执行」（`api.RETAIN_RATIO` + `api.selectRange`），
+断言也加强为「宿主不得再出现 `api.RETAIN_RATIO` / `api.selectRange(`」。
+⇒ 教训：**变异必须忠实于断言的语义**，否则你验证的是自己的手误。
+
+### 10.4 验证
+
+contract **306** + static 48 + report 59 = **413 断言**全绿。

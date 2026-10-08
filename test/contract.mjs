@@ -449,7 +449,28 @@ ok('意图先消费后执行（防每个 step 反复重试）',
  * 「先试 pressure、为 null 才退 overflow」改为「**自选保留范围** → 失败/仍越线才**沿用官方** overflow 兜底」。
  * 旧断言在此**退役**（它固化的正是那条「53% 占用就把 1117 节点砍到 4 个」的路径）。
  * 自选范围本体见下方 §R5 段与 plugin/compact-range.mjs。 */
-const ctOwnRange = /const compactWithOwnRange = async \(agent, compaction, ctx\) => \{([\s\S]*?)\n  \};/.exec(host)?.[1] ?? '';
+/* R9 解耦第二刀：`compactWithOwnRange` 的实现已搬进 plugin/m3.compact.mjs（宿主只留同名转发）
+ * ⇒ 断言改从模块取切片；同时新增「宿主不得再自带一份实现」。 */
+const m3core = read('m3.compact.mjs');
+const ctOwnRange = /const compactWithOwnRange = async \(agent, compaction, ctx\) => \{([\s\S]*?)\n  \};/.exec(m3core)?.[1] ?? '';
+ok('M3 执行核心已抽为叶子模块，且宿主不再重复实现',
+  ctOwnRange.length > 0
+  && /import\(`\.\/m3\.compact\.mjs\?ts=\$\{IMPL_TS\}`\)/.test(host)
+  && /const compactWithOwnRange = async \(agent, compaction, ctx\) =>\n    \(m3Ctl/.test(host)
+  /* 加强（R9 变异验证：首版只查 `const ratioKept = api.RETAIN_RATIO;`，一处改名就能躲过）：
+   * 「范围执行」整体不得回流宿主——保留比例读取与 selectRange 调用都属于模块职责。 */
+  && !/api\.RETAIN_RATIO/.test(hostNoComment)
+  && !/api\.selectRange\(/.test(hostNoComment)
+  && !/const compactWithOwnRange = async \(agent, compaction, ctx\) => \{\n    const \{ forced, sig, sid, window, measure \} = ctx;/.test(host),
+  '宿主仍自带一份自选范围实现（比例读取/selectRange）⇒ 两套真相，本次解耦要消除的正是这个');
+ok('M3 核心模块依赖全部注入（对宿主内部件零 import ⇒ 依赖图叶子）',
+  !/^\s*import .*from ['"]\.\//m.test(m3core) && !/require\(/.test(m3core),
+  '叶子模块 import 了宿主内部件 ⇒ 打破依赖图约束');
+ok('M3 核心模块未就绪时不中断：降级为「本轮不压」并留痕',
+  /const measureRatio = \(session\) => \(m3Ctl \? m3Ctl\.measureRatio\(session\) : \{ ok: false, error: 'm3-module-pending' \}\);/.test(host)
+  && /skipWhy: 'm3-module-pending'/.test(host)
+  && /M3 压缩核心模块加载失败（吞/.test(host),
+  '未做空值降级 ⇒ 激活期会 TypeError（apply 不是 async，不能 await）');
 ok('R5 保留策略：自选范围优先 + 官方 overflow 兜底',
   /const out = await compactWithOwnRange\(agent, compaction, \{ forced, sig, sid, window: mr\.window, measure: mr\.measure \}\);/.test(ctPreStep)
   && /const forced = ratio >= effCritical;/.test(ctPreStep)
@@ -577,7 +598,7 @@ ok('错误文案与引擎源码逐字一致（引擎改文案时这里先响）'
 
 /* ---- host 接线 ---- */
 ok('host 把 measure 本体带进自选范围（不二次测量、不猜节点）',
-  /return \{ ok: true, used, surface, window, ratio, measure: m\.value \};/.test(host)
+  /return \{ ok: true, used, surface, window, ratio, measure: m\.value \};/.test(m3core)
   && /api\.selectRange\(\{ session: agent\.session, measurement: measure, retainTokens: budget \}\)/.test(ctOwnRange),
   '没带 measure ⇒ 只能退化成官方路径，自选范围形同未接');
 ok('保留比例来自模块常量，不进 M3（M3 语义 = 用户可配项）',

@@ -1292,3 +1292,28 @@ contract **298** + static 42 + report 56 = **396 断言**全绿；**变异验证
 ⇒ 改为**状态提示独立成行**，断点落在自然边界。
 
 **验证**：contract **303** + static 45 + report 57 = **405 断言**全绿；**变异 5/5 被捕获**。
+
+### R9 解耦第二刀：M3 执行核心抽出 + 首次真机观测到边界回退 —— ✅ 已实施（2026-10-08）
+
+**抽了什么**：新增 `plugin/m3.compact.mjs`（第六个叶子模块），搬出 M3 里最大、最自包含的一块——
+`measureRatio` + `compactWithOwnRange`（自选范围执行 + `prevEnd` 回退 + 官方兜底 + 留痕）。
+宿主只留懒加载 + 两个同名转发；range 模块生命周期仍由宿主拥有，经 `awaitRange()` 注入。
+
+**为什么只搬这两个**：编排层（`preStepCompaction` / `idleSweep`）同时触碰 M2 注入、M5 HUD 三个回调、
+M2 的 `clearBriefed`、报告 `schedule` ⇒ 必须先做成显式注入才有意义。先搬执行核心 = 宿主少 ~180 行
+且**调用点几乎不动**，风险最低。⇒ 解耦第 2 步**完成一半**。
+
+**真机 E2E（意外拿到最强证据）**：抽取部署后模型恰好发起一次压缩（工具触发路径），全程走新模块。
+`rangeSource=own`、`retainBudget=160000`、`shadowedTokens=175827`、`ms=28403`、
+`ownRange={18990,19501}`；会话存储（权威源）逐字吻合 `compaction/summary range={"start":18990,"end":19501}`；
+`preStepErrors={}`、`lastPreStepError=null`；`m2.skips={}` 旁证 `measureRatio` 正常。
+
+🔥 **`walkBacks = 1`：本项目第一次在真机观测到 `prevEnd` 边界回退**（首次末端 19504 切在 step 配对中间
+⇒ 回退到 19501 ⇒ 成功）。这补上了 `docs/r5-retention-range-design.md` §6.4 第 1 条诚实缺口
+（原文：「不可控，只能等自然出现」）⇒ 该分支现在**真机 + 单测 + 变异**三层齐备。
+
+**变异验证 5/5**。一次逃逸是我自己的变异脚本写错变量名（`ratioKept2` vs 断言里的 `ratioKept`）——
+**逃逸的是脚本、不是断言**。已把变异改成忠实复现「宿主导回范围执行」，并把断言加强为
+「宿主不得再出现 `api.RETAIN_RATIO` / `api.selectRange(`」。教训：**变异必须忠实于断言的语义**。
+
+**验证**：contract **306** + static 48 + report 59 = **413 断言**全绿。
