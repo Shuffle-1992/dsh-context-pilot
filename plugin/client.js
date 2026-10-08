@@ -765,22 +765,27 @@ window.__ModuleLoader__.load({
 					: "换档冷却：已就绪",
 				"Agent 可调用 set_reasoning_effort 工具自主换档（本次任务内立即生效）",
 			].join("\n");
-			/* 小尺寸态专用图标（R16.5e 定稿）：**实色圆角方块 + 白色思考火花**。
-			 * 语义区分（用户指出）：这是**智能思考**的 chip，图标必须是思考语义（火花/星芒），
+			/* 小尺寸态专用图标（R16.5f 定稿）：**思考火花（四角星 + 小星点），无外框**。
+			 * 语义（用户指出）：这是**智能思考**的 chip，图标必须是思考语义（火花/星芒），
 			 * 不能沿用插件图标的压缩层叠（那是压缩域的语义）。
-			 * 实底提供对比度（上一版半透明圆底在 14px 下看不清）；
-			 * 四角星 = 思考/智能的通用符号，14px 下依然锐利；
-			 * 底色随状态（cooling=warn 橙 / ready=info 蓝）。 */
+			 * 形随状态（用户要求的冷却动画）：
+			 *   - 冷却中：**灰色**（中性灰，深浅主题下都是「未点亮」感）
+			 *     ⇒ 彩色火花放在裁剪窗里，按冷却进度**从下往上显色**（进度条式）；
+			 *   - 冷却完成：整颗彩色点亮（ready=info 蓝，与发送按钮同源）。
+			 * 无外框（上一版实底方块被指「外层的框」多余）；18px 比文字更高，图标感更强。
+			 * 显色窗与灰底是**两张同形 SVG** 对齐叠放。 */
+			const SPARK = "M10 2.2 L11.5 6.5 L15.8 8 L11.5 9.5 L10 13.8 L8.5 9.5 L4.2 8 L8.5 6.5 Z";
+			const sparkSvg = (fill) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" width="18" height="18">`
+				+ `<path d="${SPARK}" fill="${fill}"/>`
+				+ `<path d="M15.2 3.4 L15.85 5.15 L17.6 5.8 L15.85 6.45 L15.2 8.2 L14.55 6.45 L12.8 5.8 L14.55 5.15 Z" fill="${fill}" fill-opacity="0.8"/></svg>`;
 			const iconColor = cooling ? "#ff9f0a" : "#4176e6";
-			const iconSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" width="14" height="14">`
-				+ `<rect x="0.5" y="0.5" width="13" height="13" rx="3.5" fill="${iconColor}"/>`
-				+ `<path d="M7 2.6 L8.15 5.85 L11.4 7 L8.15 8.15 L7 11.4 L5.85 8.15 L2.6 7 L5.85 5.85 Z" fill="#FFFFFF"/>`
-				+ `<circle cx="10.6" cy="3.9" r="1" fill="#FFFFFF" fill-opacity="0.85"/></svg>`;
-			const iconUrl = `data:image/svg+xml;utf8,${encodeURIComponent(iconSvg)}`;
-			/* ⑦（第三次修正，最终形态）：**三个元素全部渲染**——点（宽态）、压缩图标（窄态）、
-			 * 文字（宽态）——由注入的 `@container (width<=560px)` CSS 决定显隐。
-			 * 显隐与挂载时序/JS 观察彻底解耦：模型选择器收图标的那一刻，本 chip 必然同步收
-			 * （同一 composer 容器、同一断点）。iconUrl 随冷却态换色。 */
+			const grayUrl = `data:image/svg+xml;utf8,${encodeURIComponent(sparkSvg("#9aa3ad"))}`; // 未点亮：中性灰
+			const colorUrl = `data:image/svg+xml;utf8,${encodeURIComponent(sparkSvg(iconColor))}`; // 已显色
+			/* 显色窗：高度 = progress × 100%，底部对齐 ⇒ 从下往上涨；冷却完成(progress=1)全显。 */
+			const clipPct = Math.round(progress * 100);
+			/* ⑦（最终形态）：**全部元素都渲染**——点（宽态）/ 灰+彩双层火花（窄态）/ 文字（宽态）
+			 * ——由注入的 `@container (width<=560px)` CSS 决定显隐；显隐与 JS 时序彻底解耦：
+			 * 模型选择器收图标的那一刻，本 chip 必然同步收（同一 composer 容器、同一断点）。 */
 			return el("div", {
 				ref,
 				className: "dcp-effort-chip",
@@ -826,17 +831,29 @@ window.__ModuleLoader__.load({
 							background: accent, transition: "background .3s linear",
 						},
 					}),
-					el("img", {
+					/* 窄态图标 = 双层叠放：底层灰色火花（未点亮），上层彩色火花装在
+					 * **底部对齐的裁剪窗**里（高度 = 冷却进度）⇒ 显色从下往上涨，进度条式；
+					 * 冷却完成整颗点亮。两层同形同位，显隐同样交给容器查询样式表。
+					 * ⚠️ img 不写内联 display（R16.5d 教训：内联会压过 @container 规则）。 */
+					el("span", {
 						className: "dcp-chip-icon",
 						"aria-hidden": "true",
-						src: iconUrl,
-						alt: cooling ? "智能思考冷却" : "智能思考就绪",
-						style: { width: "14px", height: "14px", flex: "none" },
-						/* ⚠️ 显隐**只**由注入的样式表管（基础规则 display:none / @container 内 inline-flex）。
-						 * 不能在这里写内联 display:none —— 内联样式优先级高于样式表，
-						 * @container 里那条 display:inline-flex 会被它压掉 ⇒ 图标永远不显示
-						 * （2026-10-08 用户实测：窄态只剩一个空的蓝框）。 */
-					}),
+						style: { position: "relative", width: "18px", height: "18px", flex: "none" },
+					},
+						el("img", { src: grayUrl, alt: "", draggable: false,
+							style: { position: "absolute", inset: 0, width: "18px", height: "18px" } }),
+						el("span", {
+							"aria-hidden": "true",
+							style: {
+								position: "absolute", left: 0, right: 0, bottom: 0,
+								height: `${clipPct}%`, overflow: "hidden",
+								transition: "height 1s linear",
+							},
+						},
+							el("img", { src: colorUrl, alt: cooling ? "智能思考冷却" : "智能思考就绪", draggable: false,
+								style: { position: "absolute", left: 0, bottom: 0, width: "18px", height: "18px" } }),
+						),
+					),
 					el("span", { className: "dcp-chip-label", style: { opacity: ".85" } },
 						cooling ? "智能思考冷却" : "智能思考就绪"),
 				),
