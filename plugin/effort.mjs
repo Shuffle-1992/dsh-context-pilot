@@ -207,7 +207,9 @@ export function createEffort(deps) {
     s.applied = want;
     const changed = config?.reasoningEffort !== want; // 结论③④
     if (changed) {
-      s.switchedAt = Date.now();
+      /* R15.1：锚点优先取**工具接受时刻**（已在上面的 accept 分支写好）。apply 与接受只差一次请求，
+       * 但客户端那一次 getHud 恰好夹在中间 ⇒ 若在这里无条件重锚，chip 就永远看不到冷却（真机实测）。 */
+      if (!s.switchedAt) s.switchedAt = Date.now();
       state.m3.effortSwitches += 1;
       state.m3.lastEffortApply = {
         at: new Date().toISOString(), sessionId: sidKey, want,
@@ -318,6 +320,13 @@ export function createEffort(deps) {
       const st = slot(sid);
       st.want = want;
       st.wantAt = Date.now();
+      /* R15.1（用户实测反馈：「切换到 Max 时 chip 没有进入冷却状态」）：
+       * **冷却锚点必须落在「接受时刻」**，而不是 apply 时刻。
+       * 实测时序：工具接受（05:02:08.696）→ 插件在**下一次请求**时 apply（.719）→ 客户端投影随之变化
+       * → chip 才去 getHud。可那次轮询就发生在同一秒、且**之后再无轮询**（投影不再变）⇒ chip 拿到的
+       * 是「还没进冷却」的那一帧，于是永远显示「就绪」。
+       * 语义上也更对：Cooldown 约束的是「两次换档请求之间的最小间隔」，从请求被接受起算即可。 */
+      st.switchedAt = Date.now();
       state.m3.effortToolCalls += 1;
       state.m3.lastEffortTool = { at: new Date().toISOString(), sessionId: sid, want };
       log('info', `智能思考 工具接受：${eff.current ?? '(默认)'} → ${want}（${eff.provider}/${eff.model}）→ 下一步生效`);

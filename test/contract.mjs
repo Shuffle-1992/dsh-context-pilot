@@ -1152,8 +1152,19 @@ ok('换档计数只在档位真变化时自增（否则变成请求次数）',
   /const changed = config\?\.reasoningEffort !== want;/.test(effort) && /effortReasserts \+= 1/.test(effort),
   '无条件自增 ⇒ effortSwitches 失去取证意义');
 ok('冷却基准只在真变化时更新（否则后续换档全被挡）',
-  /if \(changed\) \{\s*\n\s*s\.switchedAt = Date\.now\(\);/.test(effort),
+  /if \(changed\) \{[\s\S]{0,200}if \(!s\.switchedAt\) s\.switchedAt = Date\.now\(\);/.test(effort),
   '每轮刷新冷却基准 ⇒ 冷却永远处于「刚换过」，模型后续换档全被跳过');
+/* R15.1（用户实测反馈：「切换到 Max 时 chip 没有进入冷却状态」）——
+ * 实测时序：工具接受(.696) → 插件在**下一次请求** apply(.719) → 客户端投影才变 → chip 去 getHud，
+ * 而那一次轮询就夹在中间且之后再无轮询 ⇒ chip 只看到「还没起算冷却」的那一帧。
+ * 修法：冷却锚点落在**接受时刻**（事件顺序上早于客户端那次轮询）。 */
+ok('冷却锚点落在工具**接受**时刻（客户端那次 getHud 之前，chip 才看得到冷却）',
+  /st\.switchedAt = Date\.now\(\);/.test(effort) && /工具接受：/.test(effort),
+  '锚点仍在 apply 时刻 ⇒ chip 的那一次轮询永远赶在起算之前，界面永远显示「就绪」（真机实测）');
+ok('客户端在投影变化后**补拉一次**（插件状态稍后才落定）',
+  /const latePull = setTimeout\(\(\) => \{ if \(alive\) pullOnce\(\); \}, 2500\);/.test(client)
+  && /clearTimeout\(latePull\)/.test(client),
+  '只拉一次 ⇒ 状态晚于投影落定时界面永久陈旧（本次真机 bug 的另一半）');
 ok('应用时删除 maxTokens（不把上个 adapter 的 cap 钉住）',
   /const out = \{ \.\.\.config, reasoningEffort: want \};\s*\n\s*delete out\.maxTokens;/.test(effort),
   '未删 maxTokens ⇒ 换档后沿用旧 adapter 的输出上限（router-laya applyRoute 同款教训）');
@@ -1571,6 +1582,32 @@ ok('思考强度工具结果带回读与自检指引（applied + verify）',
   /applied: 'next-request',/.test(effort) && /applied: 'already',/.test(effort)
   && /下一步的用量行后缀会显示当前实际档位/.test(effort),
   '工具只回 {ok,effort} ⇒ 模型无法自检是否真的生效（与压缩那个盲区同源）');
+
+/* R15.1（用户实测反馈：切到 Max 后 chip 没进冷却）——**行为级**复现 + 回归：
+ * 时序是「工具接受 → 下一次请求才 apply → 客户端投影才变 → chip 才 getHud」，
+ * 而那次 getHud 恰好夹在中间 ⇒ 必须**在 apply 之前**就能看到冷却。 */
+{
+  let effSpec = null;
+  const effMod2 = await import(pathToFileURL(join(PLUGIN, 'effort.mjs')).href);
+  const api2 = effMod2.createEffort({
+    svc: (k) => (k === 'tools' ? { register: (t) => { effSpec = t; } } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { effortSkips: {}, effortDiag: {}, effortSwitches: 0, effortReasserts: 0, effortHooks: 0 } },
+    readCfg: () => ({ enabled: true, effortEnabled: true, effortCooldownMs: 30000 }),
+    getDefineTool: () => (spec) => spec,
+  });
+  const ag = { id: 'cd-probe', sessionId: 'cd-probe', session: { id: 'cd-probe', requestHeader: () => ({ config: { provider: 'deepseek-account', model: 'deepseek-flash', reasoningEffort: 'high' } }) } };
+  await api2.ensure();
+  const before = await api2.hudPayload(ag, 'cd-probe');
+  const res = await effSpec.execute({ effort: 'max' }, { agent: ag });
+  const after = await api2.hudPayload(ag, 'cd-probe');
+  ok('换档工具接受后**立刻**（尚未 apply）就能在 hudPayload 里看到冷却',
+    res?.ok === true && after?.cooldownUntil > Date.now() && after.cooldownUntil - Date.now() <= 30000,
+    `实际 res=${JSON.stringify(res)} cooldownUntil=${JSON.stringify(after?.cooldownUntil)}（before=${JSON.stringify(before?.cooldownUntil)}）`
+    + ' —— 锚点若在 apply 时刻，客户端那一次 getHud 就永远赶在起算之前（真机 chip 一直显示「就绪」）');
+  ok('未换档时 hudPayload 不报冷却（不能常亮）', (before?.cooldownUntil ?? 0) === 0, `实际 ${JSON.stringify(before?.cooldownUntil)}`);
+}
 
 /* ═══════════ 汇总 ═══════════ */
 console.log(`\n${'='.repeat(52)}`);

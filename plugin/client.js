@@ -668,10 +668,17 @@ window.__ModuleLoader__.load({
 					} catch { /* 吞 */ }
 				};
 				pullOnce();
-				/* 开关被面板/弹窗改动时立即重问一次（事件驱动，非定时器） */
+				/* R15.1（用户实测反馈「切换到 Max 时 chip 没进入冷却」）：
+				 * 插件的状态**在投影变化之后**才落定——换档是「工具接受 → 下一次请求 apply → 才起算冷却」，
+				 * 而 chip 恰恰是被那次投影变化叫醒的。实测：轮询与 apply 落在同一秒，之后再无轮询
+				 * ⇒ chip 永远停在「就绪」。
+				 * ⇒ 投影变化后**再补拉一次**（一次性、低频；不是定时轮询）：把「稍后才落定」的状态捞回来。
+				 * 时长取 2.5s：换档 apply 就在下一次请求（同一步内，秒级），30s 冷却有充分余量。 */
+				const latePull = setTimeout(() => { if (alive) pullOnce(); }, 2500);
+				/* 开关被面板改动时立即重问一次（事件驱动，非定时器） */
 				let off;
 				try { off = settingsScope.subscribe?.(() => { pullOnce(); }); } catch { /* 忽略 */ }
-				return () => { alive = false; try { off?.(); } catch { /* 忽略 */ } };
+				return () => { alive = false; clearTimeout(latePull); try { off?.(); } catch { /* 忽略 */ } };
 			}, [effort, pendingNow]);
 			/* 冷却倒计时（本地，仅在确实处于冷却时启用 1s tick；冷却结束自动停） */
 			const [now, setNow] = react.useState(() => Date.now());
