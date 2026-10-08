@@ -130,7 +130,7 @@ R4 只删掉了「**伪造用户消息自动拉起**」这条投递链，但 **m
 
 | 项 | 为什么挂起 | 建议顺序 |
 | --- | --- | --- |
-| **抽「阈值核心」为只读服务**（`engineThreshold` / `criticalCapOf` / `resolveCompactionFor`） | 这是拆 M3/M1/M5 的**前提**；先抽它，后面三刀才有意义 | **第 1 步** |
+| ~~抽「阈值核心」为只读服务~~ **✅ 已实施（R8）** | —— | ~~第 1 步~~ **已完成** |
 | **拆 M3 压缩域**（`measureRatio` / `compactWithOwnRange` / `preStepCompaction` / `idleSweep`） | pre-step handler 把 `ensureEffort` + `ensureCompactTool` + `preStepCompaction` 与 M2 注入**串在同一个函数**里；成功回调又要调 `publishHud`/`recordHudAct`/`clearBriefed`/`schedule`（跨 M5+M2+报告三域）⇒ 必须先有「域只读视图」+ 回调注入形状 | 第 2 步 |
 | **拆 M1 快照 / M5 HUD** | `buildSnapshot` 直接读 m2/m3/m5 三域 state；`onGetHud` 是**跨域聚合视图**（需 `criticalCapOf`(M3) + `measureRatio`(M3) + `effortApi.hudPayload`(effort)）⇒ 不是独立域 | 第 3 步 |
 | **`host.impl.mjs` 拆分到 ≤250 行** | 上述三步做完才可能；本批已顺手把 1 个域内死函数与 1 个跨域审计块清掉（净减约 40 行，同时新增了 6 处缺陷修复的注释） | D1 任务书 |
@@ -147,3 +147,55 @@ R4 只删掉了「**伪造用户消息自动拉起**」这条投递链，但 **m
 - **做得好的**：先并行三路只读审计拿到完整清单，再逐条复核后动手；每个真缺陷都配了**行为级或顺序级**绊线，并做 13 项变异验证；两次逃逸都当场定位到断言本身的缺陷（不是"再跑一遍就过了"）。
 - **做得不好的**：实施 R7 时先改代码后补测试，中间出现过 6 个测试锚点过期待修的窗口；`d.ratio` 那个运行时错误也是自己引入的——说明**大批量删除后的第一件事必须是跑测试 + 逐个消费失败**，而不是继续删。
 - **最该带走的结论**：这个插件的头号风险不是「功能不工作」，而是**「看起来工作了，其实什么都没发生」**（工具回成功但意图丢了、冷却扣了但没压、字段算了但没人读、教学 catch 了但没日志）。四个真缺陷全部属于这一类。
+
+---
+
+## 9. R8 续做：解耦第一刀 + 审查引出的一处取证静默丢失（2026-10-08）
+
+### 9.1 抽「阈值核心」为叶子模块（§7 表里的第 1 步）
+
+新增 `plugin/threshold.mjs`（DI 注入 `svc/tryOf/state/log`，对宿主内部件**零 import**），
+把 `engineThreshold` / `criticalCapOf` / `resolveCompactionFor` 及 `DEFAULT_ENGINE_THRESHOLD` /
+`ENGINE_CAP_MARGIN` 整体搬出 host。host 只留**懒加载 + 三个同名转发**。
+
+**搬迁过程中撞到的一个结构性事实**（值得记）：宿主 `apply` **不是 async**
+（`export function apply(ctx, config, …)`），而这些函数被 `getHud`（RPC 面）、报告快照、
+两条压缩路径**同步**调用 ⇒ **不能**在 apply 里 `await` 模块。最终用与
+`effortApi`/`compactToolApi`/`rangeApi` **同款**的「懒加载 + 空值降级」：模块未就绪时
+`criticalCapOf` 返回 `1`（不做上限钳制）并留一条痕 —— 关键是**降级路径不引入任何重复常量**，
+否则就又把「两套真相」请回来了。
+
+### 9.2 审查引出的真问题：报告里 FULL 条目被挤光（取证静默丢失）
+
+修 R8 时顺手核对报告，发现 **120 条 history 全是 slim、full 0 条**：
+高频 slim 事件（heartbeat 120s / agent/status / m5-publish 400ms 防抖 / m2-inject）
+把 FULL 条目（`activation+2s` / `m3-act` / `m4-probe` / `boot+10s`）**挤出环形缓冲**
+——而 FULL 恰是「压缩到底成没成」的唯一留档位。
+
+更值得记的是**为什么测试没发现**：`report.mjs` 的 `mustFull` 断言只检查那些 reason
+**不在 SLIM 名单里**，从不检查它们**真的还在历史里** ⇒ 断言全绿、证据已丢。
+⇒ R8 两处一起修：
+1. 满环时**优先淘汰最旧的 slim 条目**（没有 slim 可淘汰才退化为砍最旧）；
+2. 新增**代码级**绊线（`slimIdx = next.findIndex(profile==='slim')` + 禁止 `slice(-HISTORY_CAP)`）；
+   数据侧只打印诊断而**不做断言**——报告是运行期数据，拿修复前的旧数据跑测试会假红。
+
+**真机验证**：修复前 `{slim:120}` → 修复后 `{slim:116, full:4}`，FULL 条目为
+`m2-factory / m4-probe / activation+2s / boot+10s`。
+
+### 9.3 顺带修掉一个测试设计缺陷
+
+同一次核对发现 `report.mjs` 有两条**条件断言**（`if (full.length)` / `if (slimLast)`）
+⇒ 断言总数随报告数据在 **55/56/57 之间漂移**。已改为无条件（缺数据即失败），
+并把「档位分布」打印出来。**断言数不稳定 = 护栏会静默少跑**。
+
+### 9.4 弹窗折行（用户截图）
+
+截图里「智能压缩线 30% · 强制压缩线 75% · 已过智能压缩线（距强制线 305K）」被显示成
+「…· 已过智」/「能压缩线（距强制线 305K）」。根因：状态提示被拼进**同一个文本节点**，
+而弹窗宽仅 ~230px —— 40+ 汉字在 11px 下不可能一行放下（字号还是用户要求放大过的）。
+⇒ 改为**状态提示独立成行**：断点落在自然边界，不再切断「智能压缩线」这个词。
+
+### 9.5 验证
+
+contract **303** + static 45 + report 57 = **405 断言**全绿；**变异验证 5/5 被捕获**
+（host 重复定义常量 / 模块丢 `?ts=` / 去掉空值降级 / 满环退回无差别淘汰 / 弹窗提示拼回同一串）。

@@ -78,12 +78,22 @@ console.log('\n== 3. C3② 瘦身档位（关键事件必须走 full）==');
 const slimMatch = /const SLIM_REASONS = new Set\(\[([\s\S]*?)\]\);/.exec(host)?.[1] ?? '';
 const slimSet = new Set([...slimMatch.matchAll(/'([^']+)'/g)].map((m) => m[1]));
 ok('解析出 SLIM_REASONS', slimSet.size > 0, '未找到 SLIM_REASONS（瘦身逻辑改了？）');
-for (const mustFull of ['m3-act', 'm4-probe', 'activation+2s', 'boot+10s']) {
+const MUST_FULL = ['m3-act', 'm4-probe', 'activation+2s', 'boot+10s'];
+for (const mustFull of MUST_FULL) {
   ok(`关键事件 ${mustFull} 不在精简档`, !slimSet.has(mustFull),
     `${mustFull} 被列入 slim ⇒ 取证信息丢失（m3-act 还会破坏回填）`);
 }
 ok('slimSnapshot 函数存在且被 refresh 调用', /const slimSnapshot = /.test(host) && /SLIM_REASONS\.has\(reason\)/.test(host),
   'slimSnapshot 未被 refresh 使用（瘦身未生效）');
+/* ═══ R8 修（审查发现的取证静默丢失）═══
+ * 现场：报告 120 条**全是 slim、full 0 条** —— 高频 slim 事件（heartbeat 120s / agent/status /
+ * m5-publish 400ms 防抖 / m2-inject）把 FULL 条目挤出环形缓冲，而 FULL 恰是「压缩成没成」的唯一留档位。
+ * 上面那条「不在 slim 名单」根本抓不到这件事，因为它只查**名单**、不查**历史里到底有没有**。 */
+ok('满环时优先淘汰最旧的 slim 条目（FULL 取证不得被挤出）',
+  /const slimIdx = next\.findIndex\(\(e\) => e\?\.profile === 'slim'\);/.test(host)
+  && /next\.splice\(slimIdx === -1 \? 0 : slimIdx, 1\);/.test(host)
+  && !/\.slice\(-HISTORY_CAP\)/.test(host),
+  '仍按整体最旧淘汰 ⇒ 高频 slim 会把 activation/m3-act 等 FULL 证据挤出 120 条窗口');
 
 /* ═══════════ 3.5 getHud 作用域契约（防 ReferenceError 回归）═══════════ */
 console.log('\n== 3.5 getHud 作用域契约（2026-10-07 真根因）==');
@@ -154,17 +164,21 @@ if (!existsSync(REPORT)) {
     const full = hist.filter((e) => e.profile === 'full');
     const avg = (arr) => (arr.length ? Math.round(arr.reduce((a, e) => a + JSON.stringify(e).length, 0) / arr.length / 1024 * 100) / 100 : 0);
     console.log(`     档位分布：slim ${slim.length} 条（均 ${avg(slim)}KB）| full ${full.length} 条（均 ${avg(full)}KB）`);
-    if (slim.length && full.length) {
-      ok('slim 条目确实比 full 小', avg(slim) < avg(full), `slim=${avg(slim)}KB full=${avg(full)}KB`);
+    /* ⚠️ R8：本段**不得再有嵌套条件断言**——原先两条 `if (...)` 让断言总数随报告数据
+     * 在 55/56/57/58 之间漂移（「护栏静默少跑」）。现全部改为无条件：缺数据即失败，
+     * 失败信息本身就说明「哪个档位没在产出」。 */
+    if (full.length === 0) {
+      console.log('     ⚠️ 历史里 0 条 FULL —— 若这份报告产生于 R8 之前，属预期旧数据；修复后新 FULL 条目不再被挤出。');
     }
-    // slim 条目必须仍保留回填所需字段
     const slimLast = slim[slim.length - 1];
-    if (slimLast) {
-      ok('slim 条目仍含 m3（决策/压缩取证）', !!slimLast.m3);
-      ok('slim 条目仍含 m2（注入取证）', !!slimLast.m2);
-      ok('slim 条目丢弃 eventProbe（体积来源）', slimLast.m3?.eventProbe === undefined,
-        'slim 条目仍带 eventProbe ⇒ 瘦身不彻底');
-    }
+    ok('FULL 档位条目存在（关键取证位在产出）', full.length > 0,
+      '历史里 0 条 FULL ⇒ activation+2s / m3-act / m4-probe 已被高频 slim 挤出（R8 已修：满环优先淘汰 slim）');
+    ok('slim 条目存在（瘦身档位在产出）', !!slimLast, '只有 full 条目 ⇒ 瘦身未生效，报告体积会失控');
+    ok('slim 条目确实比 full 小', avg(slim) < avg(full), `slim=${avg(slim)}KB full=${avg(full)}KB`);
+    ok('slim 条目仍含 m3（决策/压缩取证）', !!slimLast?.m3, 'slim 丢了 m3 ⇒ 回填链与压缩取证同时失效');
+    ok('slim 条目仍含 m2（注入取证）', !!slimLast?.m2);
+    ok('slim 条目丢弃 eventProbe（体积来源）', slimLast?.m3?.eventProbe === undefined,
+      'slim 条目仍带 eventProbe ⇒ 瘦身不彻底');
   }
 }
 

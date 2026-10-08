@@ -1158,7 +1158,17 @@ window.__ModuleLoader__.load({
 								if (occ >= crit) hint = "已达强制压缩线";
 								else if (occ >= smart) hint = `已过智能压缩线（距强制线 ${fmtK(v.occupancyWindow * (crit - occ))}）`;
 								else hint = `距智能压缩线 ${fmtK(v.occupancyWindow * (smart - occ))}`;
-								thr.textContent += ` · ${hint}`;
+								/* 用户反馈（2026-10-08 截图）：「已过智能压缩线（距强制线 305K）」被**从中间断开**
+								 * （显示成「…· 已过智」/「能压缩线（距强制线 305K）」）。
+								 * 根因：两条线 + 状态提示被拼进**同一个文本节点**，而弹窗宽仅 ~230px
+								 * —— 40+ 个汉字在 11px 下**不可能**一行放下，于是浏览器逐字折行。
+								 * 正解不是缩字号（用户已明确要求放大过），而是**把状态提示单独成行**：
+								 * 断点落在自然边界，既不会切断「智能压缩线」这个词，行数与现状（2 行）一致。
+								 * ⚠️ 别退回 `thr.textContent += ' · ' + hint` —— 那正是这次的回归形态。 */
+								const hintLine = document.createElement("div");
+								hintLine.textContent = hint;
+								hintLine.style.cssText = "margin-top:1px;";
+								thr.appendChild(hintLine);
 							}
 						} catch { /* 快照失败保持现状 */ }
 					};

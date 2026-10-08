@@ -570,66 +570,13 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
   const hudLoaded = loadHudActs();
   state.m5.acts = hudLoaded?.acts ?? [];
 
-  /** 解析某 agent 作用域的 compaction 服务实例（顶层 ctx 实测 absent，必须走 agent 上下文）。 */
-  const resolveCompactionFor = (agent) => {
-    const viaCtx = tryOf(() => agent?.ctx?.get?.('compaction') ?? agent?.ctx?.compaction);
-    if (viaCtx.value && typeof viaCtx.value.compactNow === 'function') {
-      return { service: viaCtx.value, via: 'agent.ctx', probe: { ctxType: typeof viaCtx.value } };
-    }
-    const viaPresets = tryOf(() => svc('agentPresets')?.serviceFor?.(agent, 'compaction'));
-    if (viaPresets.value && typeof viaPresets.value.compactNow === 'function') {
-      return { service: viaPresets.value, via: 'agentPresets.serviceFor', probe: { presetsType: typeof viaPresets.value } };
-    }
-    return {
-      service: null,
-      via: 'unresolved',
-      probe: { ctxError: viaCtx.error ?? null, ctxType: viaCtx.value ? typeof viaCtx.value : null, presetsError: viaPresets.error ?? null },
-    };
-  };
-
-  /** C-own（2026-10-07，方案 C）：读引擎（compaction-basic）的自动压缩阈值——插件强制线的**动态上限**。
-   *  依据（源码实证）：服务实例公开属性 `config`（resolveConfig 产出的 deepFreeze 对象，含
-   *  thresholdRatio / auto / modelPolicies），见 dsh-compaction-basic lib/index.js L826/L75。
-   *  语义（用户需求）：插件开启时插件线先行（必须 ≤ 引擎线），插件关闭/卸载后引擎 80% 自然恢复——
-   *  故**不改引擎配置**，只在插件侧钳制：生效强制线 = min(用户配置, 引擎阈值)。
-   *  拿不到（服务未解析/旧版本无该属性）时回退官方默认 0.8；每次现取不缓存（配置可能被改）。 */
-  const DEFAULT_ENGINE_THRESHOLD = 0.8;
-  /* 用户要求（2026-10-08）：插件强制线**始终比 DSH 内置阈值低 5 个百分点**
-   * （内置 80% ⇒ 上限 75%）。理由：两线相等时，谁先命中取决于**各自的测量时机**
-   * ——引擎也在 step 边界自己 measure 一次，插件可能「什么都没做、占用却已经降了」，
-   * 于是 HUD 的压缩记录与原因都会失真（表现为「插件线到了却没记录」）。
-   * 5pp 同时吸收两边测量的抖动，并留出足够提前量让插件线**确定性先行**。 */
-  const ENGINE_CAP_MARGIN = 0.05;
   /* 压缩调用的超时（pre-step 兜底信号 / idle compactNow 共用）。D6（审查）：原先两处各自硬编码
    * `180_000`，改一处必漏另一处 ⇒ 收敛为一个常量。 */
   const COMPACT_TIMEOUT_MS = 180_000;
-  const engineThreshold = (agent) => {
-    const r = resolveCompactionFor(agent);
-    const t = tryOf(() => r.service?.config?.thresholdRatio);
-    const v = t.value;
-    const ok = typeof v === 'number' && Number.isFinite(v) && v > 0 && v <= 1;
-    const raw = ok ? v : DEFAULT_ENGINE_THRESHOLD;
-    /* 取证同时记**原始引擎阈值**与**减去余量后的生效上限**，否则报告里看不出 5pp 被扣在哪。
-     * ⚠️ F6（R7 审查修）：这是**读路径**（`getHud` 每 5s 经 `criticalCapOf` 进来一次），
-     *    原先每次都重写 probe ⇒ RPC 面非幂等、报告字段被轮询不断刷成同一份新时间戳。
-     *    现在只在「还没有探针」或「探到的值变了」时写，读操作不再产生写。 */
-    const prev = state.m3.engineCapProbe;
-    const changed = !prev || prev.raw !== (ok ? v : null) || prev.fallback !== !ok || prev.via !== r.via;
-    if (changed) {
-      state.m3.engineCapProbe = {
-        at: new Date().toISOString(),
-        via: r.via,
-        ratio: ok ? v : null,
-        raw: ok ? v : null,
-        fallback: !ok,
-        cap: +Math.max(0, raw - ENGINE_CAP_MARGIN).toFixed(4),
-        margin: ENGINE_CAP_MARGIN,
-      };
-    }
-    return raw;
-  };
-  /** 生效强制线上限 = 引擎阈值 − 5pp（下限 0，防引擎阈值被配成极小值后出现负数）。 */
-  const criticalCapOf = (agent) => Math.max(0, engineThreshold(agent) - ENGINE_CAP_MARGIN);
+  /* R8 解耦第一刀：`engineThreshold` / `criticalCapOf` / `resolveCompactionFor` 及其常量
+   * （`DEFAULT_ENGINE_THRESHOLD` / `ENGINE_CAP_MARGIN`）**已整体搬进 plugin/threshold.mjs**。
+   * 搬迁理由与「为何先抽这一个」见该文件头；`criticalCapOf` 被 M1/M2/M3/M5 四处复用的局面
+   * 由此收敛为一个叶子模块。宿主只保留**懒加载 + 三个同名转发**（见下方 IMPL_TS 之后）。 */
 
   /* ═══════════ 智能思考（reasoning effort）：模块接线（R3 解耦，2026-10-08）═══════════
    * 实现全部搬进 plugin/effort.mjs（配置/状态/读取/钩子/工具/注入文本/HUD 载荷）；
@@ -642,6 +589,32 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
   const IMPL_TS = (() => {
     try { return new URL(import.meta.url).searchParams.get('ts') || String(Date.now()); } catch { return String(Date.now()); }
   })();
+
+  /* ═══════════ 阈值核心（R8 解耦第一刀）═══════════
+   * `engineThreshold` / `criticalCapOf` / `resolveCompactionFor` 的**实现**已搬进
+   * plugin/threshold.mjs（为何先抽这一个、搬迁顺序见该文件头）。
+   * ⚠️ 这里**不能 `await`**：宿主 `apply` 不是 async，而 `criticalCapOf` 被 getHud（RPC 面）、
+   *    报告快照、两条压缩路径**同步**调用 ⇒ 用与 effort/compact-tool 同款的「懒加载 + 空值降级」。
+   * 降级语义（模块未就绪，实测只在激活后头几个微任务内）：**不做上限钳制**（上限返回 1），
+   * 于是生效线 = 用户配置值（等价于 R5 之前的行为），并留一条痕。绝不中断激活。 */
+  let thresholdCtl = null;
+  const thresholdReady = import(`./threshold.mjs?ts=${IMPL_TS}`)
+    .then((m) => {
+      thresholdCtl = m.createThreshold({ svc, tryOf, state, log });
+      return thresholdCtl;
+    })
+    .catch((e) => {
+      log('warn', `阈值核心模块加载失败（吞，压缩线退化为「不做 5pp 钳制」）：${msg(e)}`);
+      return null;
+    });
+  const NO_CAP = 1; // 降级时的「无上限」：min(配置, 1) = 配置
+  const criticalCapOf = (agent) => (thresholdCtl ? thresholdCtl.criticalCapOf(agent) : NO_CAP);
+  const engineThreshold = (agent) => (thresholdCtl ? thresholdCtl.engineThreshold(agent) : NO_CAP);
+  const resolveCompactionFor = (agent) =>
+    (thresholdCtl
+      ? thresholdCtl.resolveCompactionFor(agent)
+      : { service: null, via: 'threshold-module-pending', probe: {} });
+
   let defineToolFn = null; // 官方 defineTool（工具定义器），由 loadDefineTool 异步填充
   let effortApi = null; // effort.mjs 实例（异步就绪）
   const effortReady = import(`./effort.mjs?ts=${IMPL_TS}`)
@@ -843,7 +816,18 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       };
       reportBase = data;
       data.updated = entry.at;
-      data.history = [...(data.history || []), entry].slice(-HISTORY_CAP);
+      /* R8 修（审查发现的**取证静默丢失**）：满环时优先淘汰**最旧的 slim 条目**，而不是无差别砍最旧的。
+       * 现场：报告 120 条**全是 slim、full 0 条** —— heartbeat(120s) / agent/status / m5-publish(400ms 防抖) /
+       * m2-inject 这些高频 slim 事件把 FULL 条目（activation / m3-act / m4-probe / boot+10s）
+       * **挤出环形缓冲**，而 FULL 档位恰是「压缩到底成没成」的唯一留档位置。
+       * 而 report.mjs 的 `mustFull` 断言只检查那些 reason**不在 SLIM 名单里**，
+       * 从不检查它们**真的还在历史里** ⇒ 断言全绿、证据已丢。两处一起修。 */
+      const next = [...(data.history || []), entry];
+      while (next.length > HISTORY_CAP) {
+        const slimIdx = next.findIndex((e) => e?.profile === 'slim');
+        next.splice(slimIdx === -1 ? 0 : slimIdx, 1); // 没有 slim 可淘汰时退化为「砍最旧」
+      }
+      data.history = next;
       mkdirSync(dirname(reportPath), { recursive: true });
       writeFileSync(reportPath, JSON.stringify(data, null, 2));
       lastWrittenAt = entry.at;

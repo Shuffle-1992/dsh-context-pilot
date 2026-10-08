@@ -687,10 +687,30 @@ console.log('\n== 6.16 强制压缩线：恒低于 DSH 内置阈值 5pp ==');
 /* 用户要求（2026-10-08）：「设置的强制压缩线永远低于 DSH 内置 5%（内置 80% ⇒ 上限 75%），计算也改」。
  * （⚠️ 首版我按 0.5pp 实现，用户随即更正为 **5pp**——余量得够大才让插件线确定性先行。）
  * 理由：两线相等时谁先命中取决于各自测量时机，插件可能「什么都没做、占用却降了」⇒ HUD 记录失真。 */
-ok('host 定义 5pp 余量常量', /const ENGINE_CAP_MARGIN = 0\.05;/.test(host),
+/* R8 解耦第一刀：实现搬进 plugin/threshold.mjs（叶子模块），host 只留懒加载 + 三个同名转发。
+ * ⇒ 下列断言改指向**模块**，并新增「host 不得再重复定义」的反向断言（防搬完又抄一份回来）。 */
+const threshold = read('threshold.mjs');
+ok('R8 阈值核心已抽为叶子模块，且 host 不再重复定义',
+  /export function createThreshold\(\{ svc, tryOf, state, log \}\) \{/.test(threshold)
+  && /import\(`\.\/threshold\.mjs\?ts=\$\{IMPL_TS\}`\)/.test(host)
+  && !/const ENGINE_CAP_MARGIN = 0\.05;/.test(host)
+  && !/const DEFAULT_ENGINE_THRESHOLD = 0\.8;/.test(host),
+  'host 仍自带一份阈值实现/常量 ⇒ 两套真相必然漂移（正是本次解耦要消除的东西）');
+ok('阈值模块依赖全部注入（对宿主内部件零 import ⇒ 依赖图叶子）',
+  !/^\s*import .*from ['"]\.\//m.test(threshold) && !/require\(/.test(threshold),
+  '叶子模块 import 了宿主内部件 ⇒ static.mjs 的依赖图约束会被打破（并形成环）');
+ok('阈值模块按热换纪律动态加载（带 ?ts=）',
+  /import\(`\.\/threshold\.mjs\?ts=\$\{IMPL_TS\}`\)/.test(host),
+  '未带 ?ts= ⇒ 改模块后不随 toggle 生效（P16 教训）');
+ok('阈值模块未就绪时不中断：降级为「不做上限钳制」并留痕',
+  /const criticalCapOf = \(agent\) => \(thresholdCtl \? thresholdCtl\.criticalCapOf\(agent\) : NO_CAP\);/.test(host)
+  && /const NO_CAP = 1;/.test(host)
+  && /阈值核心模块加载失败（吞/.test(host),
+  '未做空值降级 ⇒ 激活期调用会 TypeERrror/静默失效（apply 不是 async，不能 await）');
+ok('阈值模块定义 5pp 余量常量', /const ENGINE_CAP_MARGIN = 0\.05;/.test(threshold),
   '缺余量常量 / 值不是 5pp（写死在多处还会改一处漏两处）');
 ok('生效上限抽成单一来源 criticalCapOf（= 引擎阈值 − 余量，下限 0）',
-  /const criticalCapOf = \(agent\) => Math\.max\(0, engineThreshold\(agent\) - ENGINE_CAP_MARGIN\);/.test(host),
+  /const criticalCapOf = \(agent\) => Math\.max\(0, engineThreshold\(agent\) - ENGINE_CAP_MARGIN\);/.test(threshold),
   '未抽单一上限函数 ⇒ 三处门控各写一遍必然漂移');
 for (const [label, re] of [
   ['pre-step 门控', /const effCritical = Math\.min\(M3\.criticalRatio, criticalCapOf\(agent\)\);/],
@@ -703,7 +723,7 @@ ok('不再有任何一处用裸引擎阈值做门控 / 下发',
   !/Math\.min\(M3\.criticalRatio, engineThreshold\(agent\)\)/.test(host) && !/criticalCap: engineThreshold\(/.test(host),
   '仍有裸 engineThreshold ⇒ 5pp 余量被绕过');
 ok('engineCapProbe 同时记原始阈值与生效上限（否则报告里看不出余量扣在哪）',
-  /cap: \+Math\.max\(0, raw - ENGINE_CAP_MARGIN\)\.toFixed\(4\)/.test(host) && /margin: ENGINE_CAP_MARGIN,/.test(host),
+  /cap: \+Math\.max\(0, raw - ENGINE_CAP_MARGIN\)\.toFixed\(4\)/.test(threshold) && /margin: ENGINE_CAP_MARGIN,/.test(threshold),
   '取证只记原始值');
 ok('client 提示语说明「DSH 内置阈值 − 5 个百分点」（未探测到时也说规则）',
   /DSH 内置阈值 − 5 个百分点/.test(client),
@@ -718,6 +738,13 @@ ok('弹窗阈值行显示**生效值** min(配置, 上限) 而非裸配置',
 ok('弹窗「距强制线」也用生效值（否则在不会触发的线上报已达线）',
   /const crit = critEff;/.test(client),
   '距线提示仍用裸配置 ⇒ 误导');
+/* R8（用户截图反馈）：状态提示原先**拼进同一个文本节点**，而弹窗宽仅 ~230px
+ * ⇒ 40+ 汉字在 11px 下不可能一行放下，浏览器逐字折行成「…· 已过智」/「能压缩线（距强制线 305K）」。 */
+ok('弹窗状态提示独立成行（不在窄弹窗里从中间断开）',
+  /const hintLine = document\.createElement\("div"\)/.test(client)
+  && /thr\.appendChild\(hintLine\)/.test(client)
+  && !/thr\.textContent \+= ` · \$\{hint\}`/.test(clientNoComment),
+  '提示又拼回同一串 ⇒ 弹窗会从「智能压缩线」中间逐字断开（用户截图反馈）');
 ok('hudRemote 带上 criticalCap（弹窗才能算生效值）',
   /criticalCap: typeof r\.criticalCap === "number"/.test(client),
   'hudRemote 缺 criticalCap ⇒ 弹窗拿不到上限');
