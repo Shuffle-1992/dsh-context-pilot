@@ -62,7 +62,7 @@
 - **报告字段**：`m3.markerHits`；`lastAct.reason='marker'|'safety-net'` 区分两模式。
 - **透明性**：标记写在回复正文里，用户看得见（相当于模型"公开提案"）；不想要可等 M4 把 `marker` 配成空串关闭。
 - **实弹通过（2026-10-06 02:18:39，本插件模型自己按政策卡写标记触发）**：22.8%（used 227,659）回复自检（关键产物已落盘 README+报告）后尾行写 `[cp:compact]` → idle 翻转 → marker 扫除 → `lastAct{at:02:18:39, reason:'marker', shadowedNodes:471, shadowedTokens:181,485, range:seq 761–1952}`，官方引擎事件 `compaction/start→summary→end` 各 1 次全见，`acts:1 actOk:1 actErrors:{}`。占用轨迹 **227,659 (22.8%) → 52,205 (5.2%，摘要落定中) → 17,214 (1.7%)**；最终 measure：totalTokens 17,356 / nodeCount 10（压缩前 ~480 节点）。
-- **用户疑问裁决（2026-10-06 02:2x）：「是不是要结束会话→重新拉起→拉起前压缩？」——不需要，实测证伪**。压缩前后 session id 同为 `session-16616c07…`（同一 Session 对象存活，无 `session/created`），插件宿主计数（markerHits/acts）跨事件连续（DSH 与插件宿主均未重启）。观察到的「结束/重新拉起」是两层渲染假象：① harness 对长对话自身的 checkpoint 摘要块（模型上下文管理，与本插件无关）；② 压缩后客户端把折叠上下文重新呈现。底层机制 = **存活会话内就地影子化 + 摘要**。时序上用户的直觉「拉起前已压完」成立：02:18:39 压完，02:20 用户下一条消息看到的已是压后读数。原方案（挂定时器+结束会话+重拉）也能通（武装态在插件宿主内存，比会话活得久），但纯多余且有真实代价：120s TTL 可能在拆/拉间隙过期、用户可见中断；idle 本身就是免费压缩窗口。
+- **用户疑问裁决（2026-10-06 02:2x）：「是不是要结束会话→重新拉起→拉起前压缩？」——不需要，实测证伪**。压缩前后 session id 同为**同一个**（同一 Session 对象存活，无 `session/created`），插件宿主计数（markerHits/acts）跨事件连续（DSH 与插件宿主均未重启）。观察到的「结束/重新拉起」是两层渲染假象：① harness 对长对话自身的 checkpoint 摘要块（模型上下文管理，与本插件无关）；② 压缩后客户端把折叠上下文重新呈现。底层机制 = **存活会话内就地影子化 + 摘要**。时序上用户的直觉「拉起前已压完」成立：02:18:39 压完，02:20 用户下一条消息看到的已是压后读数。原方案（挂定时器+结束会话+重拉）也能通（武装态在插件宿主内存，比会话活得久），但纯多余且有真实代价：120s TTL 可能在拆/拉间隙过期、用户可见中断；idle 本身就是免费压缩窗口。
 
 ### M4 自身 Config 面 —— ✅ 编码完成 + 加载验证，配置卡片待重启验证（2026-10-06 01:3x）
 - **三件套**：`plugin-config.schema.mjs`（schemastery 四级候选链，独立解析 OK）+ entry 静态 `export Config`（薄壳备案例外）+ impl `M3_DEFAULTS` 与 apply 内 config 字段级类型守卫合并（报告 `m3.eff` 落生效值）。
@@ -1555,7 +1555,7 @@ entry 另加 `overrides.reportPath`（**仅供测试**，把报告写临时目�
 
 #### 二、旧会话 `INVALID_REQUEST` 的归因：**与插件无关**（有决定性证据）
 
-报错会话 = `session-cb8d115e`（zcode-dispatch 工作区），错误在 turn 25/26/28/29 **反复出现**：
+报错会话在 **zcode-dispatch 工作区**（会话 id 从略），错误在 turn 25/26/28/29 **反复出现**：
 
 ```
 messages.251.1: 'tool_use' ids were found without 'tool_result' blocks immediately after:
