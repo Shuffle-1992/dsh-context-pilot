@@ -633,6 +633,29 @@ window.__ModuleLoader__.load({
 		 */
 		function EffortChip(props) {
 			const ref = react.useRef(null);
+			/* ⑦ 小尺寸自适应（2026-10-08 用户要求）：容器窄时收成**纯图标态**（只留状态点）。
+			 * 观察手段：ResizeObserver（宽度变化实时回调）+ 1s 兜底 tick（冷却进度本来就在用，
+			 * 复用同一 tick 意味着冷却期间每秒都会重评一次宽度，覆盖 RO 不触发的极端布局）。
+			 * 阈值 96px：容得下「智能思考就绪」6 字 + 点 + padding；再窄就藏文字。 */
+			const [narrow, setNarrow] = react.useState(false);
+			react.useEffect(() => {
+				const node = ref.current;
+				if (!node) return undefined;
+				let alive = true;
+				const evalW = () => {
+					if (!alive) return;
+					const w = node.getBoundingClientRect().width;
+					if (w > 0) setNarrow(w < 96);
+				};
+				evalW();
+				let ro = null;
+				try {
+					ro = typeof ResizeObserver === "function" ? new ResizeObserver(evalW) : null;
+					if (ro) ro.observe(node);
+				} catch { ro = null; }
+				const t = setInterval(evalW, 1000); // 兜底：RO 不可用/不触发的布局
+				return () => { alive = false; clearInterval(t); if (ro) { try { ro.disconnect(); } catch { /* 忽略 */ } } };
+			}, []);
 			/* ② 档位：响应式投影（事件驱动，零轮询）。useProjection 由 slot 标准 props 提供。 */
 			let sel = null;
 			try {
@@ -780,11 +803,14 @@ window.__ModuleLoader__.load({
 					el("span", {
 						"aria-hidden": "true",
 						style: {
-							width: "6px", height: "6px", borderRadius: "50%", flex: "none",
-							background: accent, transition: "background .3s linear",
+							width: narrow ? "10px" : "6px", height: narrow ? "10px" : "6px",
+							borderRadius: "50%", flex: "none",
+							background: accent, transition: "background .3s linear, width .2s linear, height .2s linear",
+							/* 小尺寸态：点就是图标（略加外环增强辨识），title 仍承载全部信息 */
+							boxShadow: narrow ? `0 0 0 2px ${accent}33` : "none",
 						},
 					}),
-					el("span", { style: { opacity: ".85" } }, cooling ? "智能思考冷却" : "智能思考就绪"),
+					!narrow && el("span", { style: { opacity: ".85" } }, cooling ? "智能思考冷却" : "智能思考就绪"),
 				),
 			);
 		}

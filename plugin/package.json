@@ -1,6 +1,7 @@
 {
   "name": "@local/dsh-context-pilot",
   "version": "0.1.0",
+  "icon": "./icon.svg",
   "private": true,
   "type": "module",
   "description": "DSH 上下文智能压缩 + 智能思考：读取上下文用量、每轮注入、按任务复杂度决策压缩（自算保留范围）；达强制压缩线时插件在 pre-step 无条件发起压缩（同样先自算范围，官方 overflow 兜底）。可选让模型自主调整思考强度档位",

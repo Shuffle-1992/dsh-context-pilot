@@ -12,7 +12,7 @@
  * 用法：node test/contract.mjs
  * 退出码：0 = 全通过；1 = 有漂移
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -32,6 +32,18 @@ const ok = (name, cond, detail) => {
 };
 
 const read = (f) => readFileSync(join(PLUGIN, f), 'utf8');
+
+/* R16.5：插件图标声明与文件必须同在（官方插件形态：package.json "icon": "./icon.svg"）。
+ * icon 缺文件时 DSH 插件列表的图标会 404/空图。 */
+{
+  const pkg = JSON.parse(readFileSync(join(PLUGIN, 'package.json'), 'utf8'));
+  const iconRel = typeof pkg.icon === 'string' ? pkg.icon.replace(/^\.\//, '') : null;
+  let iconOk = false;
+  if (iconRel) { try { iconOk = statSync(join(PLUGIN, iconRel)).isFile(); } catch { iconOk = false; } }
+  ok('插件图标：package.json 声明 icon 且文件存在（插件列表显示用）',
+    iconRel === 'icon.svg' && iconOk,
+    `实际 icon=${JSON.stringify(pkg.icon)}，文件存在=${iconOk} —— 缺一 ⇒ 插件列表无图标`);
+}
 
 /* ═══════════ 1. FACE_NAME 三处一致 ═══════════ */
 console.log('\n== 1. FACE_NAME 一致性（wire ↔ client）==');
