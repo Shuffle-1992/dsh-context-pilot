@@ -147,6 +147,40 @@ export function createM2Injection(deps) {
    *  `skip` 取值：`aborted` / `not-step-1` / `noFactory` / `noSession` / `measureFail` / `error`
    *  —— 每一种都**不注入且不影响原决策**（调用方直接放行）。
    */
+  /**
+   * R15：取一次「压缩自检」回执（**一次性**——读过即置 `read`，避免每轮重复）。
+   * 回执由 M3 域产生（工具只登记、执行在 pre-step）⇒ 这是「工具回 ok 但实际没执行」的**唯一可见通道**。
+   */
+  const takeCompactReceipt = () => {
+    try {
+      const v = state.m3?.lastCompactVerify;
+      if (!v || v.read) return null;
+      v.read = true;
+      return v;
+    } catch { return null; }
+  };
+
+  /** 把回执渲染成一行给模型看的话（含「要不要重试」的明确指引）。 */
+  const renderCompactReceipt = (v) => {
+    try {
+      if (!v) return null;
+      if (v.state === 'executed') {
+        const k = Number.isFinite(v.shadowedTokens) ? `省 ~${(v.shadowedTokens / 1000).toFixed(1)}K token` : '已执行';
+        return `【压缩自检】你上次请求的压缩**已执行**：${k}（保留策略 ${v.rangeSource ?? '?'}，${v.ms ?? '?'}ms）。`;
+      }
+      if (v.state === 'no-need') {
+        return `【压缩自检】你上次请求的压缩**已执行但判定无需压缩**（${v.skipWhy ?? 'nothing-to-compact'}）`
+          + '——当前保留预算内没有可压区间，直接继续即可。';
+      }
+      const why = v.why === 'm3-module-missing' || v.why === 'm3-module-pending'
+        ? '压缩域模块未加载（插件内部问题，与用户无关）'
+        : String(v.why ?? '未知原因');
+      return `【压缩自检】你上次请求的压缩**未执行**（${why}）。`
+        + '如果上下文压力仍需要压缩，请**再调用一次** compact_context；否则忽略本行继续即可——'
+        + '并请在回复正文里说明这次压缩没有生效。';
+    } catch { return null; }
+  };
+
   const buildInjection = async (payload) => {
     try {
       const { agent, turn, step, signal } = payload ?? {};
@@ -160,6 +194,22 @@ export function createM2Injection(deps) {
       }
       const r = renderUsageText(agent.session);
       if (r.error || !r.text) {
+        /* R15：量测失败**不再一律静默跳过**——若手里有一条待读的压缩自检回执，就只注入回执。
+         * 理由（真机教训）：量测本身依赖 M3 域；M3 域挂掉时「压缩没执行」这条最要紧的信息
+         * 会跟着一起消失（2026-10-08 就是这么静默了两版）。宁可这一条没有用量行，也不能没有它。 */
+        const receiptOnly = renderCompactReceipt(takeCompactReceipt());
+        if (receiptOnly) {
+          const message = createUserMessage({
+            content: [{ type: 'text', text: receiptOnly }],
+            source: { kind: SOURCE_KIND, form: 'snapshot', sections: [{ name: SOURCE_KIND, text: receiptOnly }] },
+          });
+          state.m2.injections += 1;
+          state.m2.lastText = receiptOnly;
+          state.m2.lastAt = new Date().toISOString();
+          log('warn', `M2 量测失败，但仍有压缩自检回执 ⇒ 只注入回执：${receiptOnly}`);
+          schedule('m2-inject', 500);
+          return { message, text: receiptOnly, card: false, receiptOnly: true };
+        }
         const key = 'measure:' + String(pick(agent.session.id, agent.sessionId, 'unknown'));
         if (!measuredFailedOnce.has(key)) {
           remember(measuredFailedOnce, key);
@@ -195,7 +245,7 @@ export function createM2Injection(deps) {
         remember(briefedBySid, sid); // C 类审查：有界化（原先无上限）
         state.m2.briefings = (state.m2.briefings ?? 0) + 1;
       }
-      const fullText = [baseText, card, brief, effBrief].filter(Boolean).join('\n\n');
+      const fullText = [baseText, card, brief, effBrief, renderCompactReceipt(takeCompactReceipt())].filter(Boolean).join('\n\n');
       const message = createUserMessage({
         content: [{ type: 'text', text: fullText }],
         source: { kind: SOURCE_KIND, form: 'snapshot', sections: [{ name: SOURCE_KIND, text: fullText }] },

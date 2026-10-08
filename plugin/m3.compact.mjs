@@ -174,6 +174,11 @@ export function createM3Compaction(deps) {
       if (!wanted && ratio < effCritical) return;
       const compaction = resolveCompactionFor(agent);
       if (!compaction.service) {
+        /* R15：**未执行**也要留回执——这是模型自检的唯一依据。 */
+        state.m3.lastCompactVerify = {
+          at: new Date().toISOString(), sessionId: sid, state: 'not-executed',
+          why: 'no-compaction-service', trigger: wanted ? 'context-overflow' : 'pressure', read: false,
+        };
         log('warn', `M3.5 pre-step 先压：解析不到作用域 compaction，跳过（意图保留待下次）`);
         return;
       }
@@ -208,6 +213,22 @@ export function createM3Compaction(deps) {
         }
       }
       state.m3.preStepOk += 1;
+      /* R15（用户要求「工具完成后进行检查，起码 agent 自己过一遍」）：
+       * 工具只登记、执行在这里 ⇒ **回执由这里产出**，M2 域在下一次注入时把它送给模型。
+       * 这是把「工具回 ok 但实际没执行」变成**模型可见**的唯一手段（2026-10-08 真机踩过：
+       * M3 域加载失败两版，工具一直回 ok/scheduled，压缩一次都没发生，而模型毫无察觉）。 */
+      state.m3.lastCompactVerify = {
+        at: new Date().toISOString(),
+        sessionId: sid,
+        state: result != null ? 'executed' : 'no-need',
+        trigger,
+        rangeSource,
+        shadowedTokens: result?.shadowedTokenCount ?? null,
+        skipWhy: out.skipWhy ?? null,
+        officialWhy: out.officialWhy ?? null,
+        ms: Date.now() - t0,
+        read: false, // M2 域读到后置 true（一次性回执）
+      };
       /* R5 取证口径：rangeSource 说明**实际用了哪条保留策略**（own=自选范围 / official=官方 overflow 兜底 /
        * own+official=自选后仍越线再收口 / none=判定无需压）。retainBudget 是自选预算（token）。 */
       const rangeInfo = {
@@ -263,6 +284,8 @@ export function createM3Compaction(deps) {
     } catch (e) {
       const code = errCodeOf(e);
       state.m3.preStepErrors[code] = (state.m3.preStepErrors[code] ?? 0) + 1;
+      /* R15：失败同样留回执（模型要能看见「未执行 + 原因」）。 */
+      state.m3.lastCompactVerify = { at: new Date().toISOString(), state: 'not-executed', why: code, read: false };
       /* ⚠️ 2026-10-08：此前**只记错误码、错误正文只进 log**——压缩全线失败（preStepOk=0）
        * 时报告里看不到原因，无法定位。现保留最近一次失败的完整信息。 */
       state.m3.lastPreStepError = {

@@ -337,9 +337,23 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
     (m3Ctl
       ? m3Ctl.compactWithOwnRange(agent, compaction, ctx)
       : { result: null, source: 'none', skipWhy: 'm3-module-pending', retainBudget: null, walkBacks: 0 });
-  /** pre-step 轮内先压（M3.5 通道 1）：模块未就绪时 no-op 并留痕（绝不上抛）。 */
+  /** pre-step 轮内先压（M3.5 通道 1）：模块未就绪时 no-op 并留痕（绝不上抛）。
+   *  R15：**仅当有人登记了压缩意图**时补一条「未执行」自检回执——这正是 R11–R13 真机失效的形态
+   *  （工具回 `ok/scheduled`，而消费者模块不在），必须让模型看得见。 */
   const preStepCompaction = async (payload) => {
-    if (!m3Ctl) { log('warn', 'M3 pre-step 先压：压缩域模块未就绪，本轮跳过'); return; }
+    if (!m3Ctl) {
+      try {
+        const sid = String(pick(payload?.agent?.session?.id, payload?.agent?.sessionId, payload?.agent?.id, 'unknown'));
+        if (compactToolApi?.peekIntent?.(sid)) {
+          state.m3.lastCompactVerify = {
+            at: new Date().toISOString(), sessionId: sid, state: 'not-executed',
+            why: 'm3-module-missing', read: false,
+          };
+        }
+      } catch { /* 吞 */ }
+      log('warn', 'M3 pre-step 先压：压缩域模块未就绪，本轮跳过');
+      return;
+    }
     return m3Ctl.preStepCompaction(payload);
   };
   /** idle 安全网（M3-b）：模块未就绪时 no-op（下次状态翻转会再来）。 */

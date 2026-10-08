@@ -435,8 +435,13 @@ ok('意图有 TTL（防陈旧意图在下一轮任务里突然触发）',
   /export const INTENT_TTL_MS = 120_000;/.test(ct) && /Date\.now\(\) - it\.at > INTENT_TTL_MS/.test(ct),
   '意图永不过期 ⇒ 登记后隔很久仍会触发压缩');
 ok('工具返回 scheduled=next-step（模型据此知道「可以继续干活」）',
-  /return \{ ok: true, scheduled: 'next-step' \};/.test(ct),
+  /scheduled: 'next-step',/.test(ct),
   '未告知执行时机 ⇒ 模型会退回「停下等压缩」的旧习惯');
+/* R15（用户要求「工具完成后进行检查，起码 agent 自己过一遍」）：工具只能登记，执行在下一步 ⇒
+ * 结果必须带**自检契约**；否则「回 ok 但实际没执行」对模型完全不可见（2026-10-08 真机踩过）。 */
+ok('压缩工具结果带自检契约（下一步会有「压缩自检」回执 + 未执行时怎么办）',
+  /verify: '下一步开头会有一条「压缩自检」回执；若显示「未执行」，请再调用一次 compact_context，或直接告知用户。',/.test(ct),
+  '缺自检契约 ⇒ 工具回 ok 但没执行时，模型无从察觉（真机踩过的盲区）');
 
 const ctPreStep = /const preStepCompaction = async \(payload\) => \{([\s\S]*?)\n  \};/.exec(m3src)?.[1] ?? '';
 ok('解析出 preStepCompaction 函数体', ctPreStep.length > 0, '未找到 preStepCompaction');
@@ -1495,6 +1500,77 @@ ok('F2 可能在 add 与 .finally 之间抛错的语句已前移',
   idleBody.indexOf('sweepInFlight.add(sid);') < idleBody.indexOf('.compactNow(')
   && idleBody.indexOf('log(\'info\', `M3 idle 扫除') < idleBody.indexOf('sweepInFlight.add(sid);'),
   'add 之后仍有可抛语句 ⇒ 同步异常会让该会话永久失去 idle 安全网（无日志）');
+
+/* ═══════════ 6.20 R15：工具后自检回执 + 思考强度「时刻可切」 ═══════════
+ * 用户要求（2026-10-08）：
+ *   ① 「调用工具执行压缩/切换思考强度时，工具完成后进行检查…起码 agent 自己过一遍」
+ *      —— 起因：真机上一次 compact_context 回了 ok/scheduled，但压缩一次都没发生（消费者模块缺失），
+ *         而模型毫无察觉，连「当前档位/用量行」也一起消失了。
+ *   ② 「每次发起任务…都时刻可以进行思考强度切换；长任务有必要可以增加次数，以实际需求为准」。 */
+console.log('\n== 6.20 工具后自检回执 + 思考强度可切性 ==');
+const m2Mod = await import(pathToFileURL(join(PLUGIN, 'm2.inject.mjs')).href);
+const mkM2 = (state, measure) => m2Mod.createM2Injection({
+  state, log: () => {}, msg: (e) => String(e?.message ?? e), pick: (...a) => a.find((x) => x != null),
+  schedule: () => {}, svc: () => null,
+  tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+  nfmt: (n) => String(n), summarizeBreakdown: () => null, remember: () => {},
+  M3: { criticalRatio: 0.85, markerMinRatio: 0.3, effortEnabled: false },
+  effEnabled: () => true, criticalCapOf: () => 0.8,
+  measureRatio: measure ?? (() => ({ ok: true, used: 500000, surface: 300000, window: 1000000, ratio: 0.5, measure: {} })),
+  getRangeApi: () => ({ RETAIN_RATIO: 0.16 }), getCompactToolApi: () => null, getEffortApi: () => null,
+  getCreateUserMessage: () => () => ({ fake: 'user-message' }), SOURCE_KIND: 'context-pilot',
+});
+const agent = { session: { id: 'selfcheck-1' }, id: 'selfcheck-1' };
+
+for (const [st, must] of [
+  ['executed', /【压缩自检】.*已执行.*省 ~64\.6K token/],
+  ['no-need', /【压缩自检】.*已执行但判定无需压缩/],
+  ['not-executed', /【压缩自检】[\s\S]*未执行[\s\S]*再调用一次[\s\S]*compact_context/],
+]) {
+  const state = { m2: { skips: {}, injections: 0 }, m3: { lastCompactVerify: { at: new Date().toISOString(), state: st, shadowedTokens: 64640, rangeSource: 'own', ms: 2400, skipWhy: 'nothing-to-compact', why: 'no-compaction-service', read: false } } };
+  const api = mkM2(state);
+  const out = await api.buildInjection({ agent, step: 1, turn: 1 });
+  ok(`自检回执按状态注入（${st}）`, must.test(out?.text ?? ''), `实际：${String(out?.text ?? '').slice(0, 120)}`);
+  const again = await api.buildInjection({ agent, step: 1, turn: 1 });
+  ok(`自检回执是一次性的（${st} 不重复刷屏）`, !/【压缩自检】/.test(again?.text ?? ''),
+    '回执每轮重复 ⇒ 噪声，且会掩盖新的回执');
+}
+{
+  /* 最坏情况：量测失败（= M3 域挂掉，正是真机踩过的形态）——仍然要把「未执行」送到模型眼前。 */
+  const state = { m2: { skips: {}, injections: 0 }, m3: { lastCompactVerify: { at: new Date().toISOString(), state: 'not-executed', why: 'm3-module-missing', read: false } } };
+  const api = mkM2(state, () => ({ ok: false, error: 'm3-module-pending' }));
+  const out = await api.buildInjection({ agent, step: 1, turn: 1 });
+  ok('量测失败时**只注入自检回执**（压缩没执行这件事不得静默）',
+    out?.receiptOnly === true && /【压缩自检】.*未执行.*压缩域模块未加载/.test(out?.text ?? ''),
+    `实际：${JSON.stringify(out)?.slice(0, 160)}`);
+  ok('该路径不计入 skips.measureFail（它不是「跳过」，而是「换了内容注入」）',
+    state.m2.skips.measureFail === undefined, `实际 ${JSON.stringify(state.m2.skips)}`);
+}
+/* 思考强度：可选项必须**每轮可见**（原先只在会话最早的一次性教学里） */
+const suffixWithOpts = effApi.renderSuffix({ ok: true, current: 'high', efforts: ['off', 'low', 'high', 'max'] }) ?? '';
+ok('每轮后缀列出**可选档位**（不只当前档 ⇒ 时刻可切）',
+  /思考强度 high/.test(suffixWithOpts) && /可选 off\/low\/high\/max/.test(suffixWithOpts) && /set_reasoning_effort/.test(suffixWithOpts),
+  `实际：${JSON.stringify(suffixWithOpts)}`);
+ok('取不到可选集时不编造（保持纯档位后缀）',
+  (effApi.renderSuffix({ ok: true, current: 'high', efforts: null }) ?? '') === '思考强度 high',
+  '凭空写可选集 ⇒ 教错档位');
+const effBriefNow = effApi.renderBrief({ ok: true, current: 'high', efforts: ['off', 'low', 'high', 'max'] }) ?? '';
+ok('思考强度教学改为「按需可多次」（删掉「1-2 次为宜」的抑制性措辞）',
+  !/1-2 次/.test(effBriefNow) && /阶段变化/.test(effBriefNow) && /可以切多次/.test(effBriefNow) && /冷却/.test(effBriefNow),
+  '仍未按用户目标（长任务按实际需求可多次）改写教学');
+ok('M3 域在每条路径都产出执行回执（executed / no-need / not-executed）',
+  /state\.m3\.lastCompactVerify = \{[\s\S]{0,260}state: result != null \? 'executed' : 'no-need'/.test(m3src)
+  && /state: 'not-executed',\n\s+why: 'no-compaction-service'/.test(m3src)
+  && /state: 'not-executed', why: code/.test(m3src),
+  '缺任一条路径的回执 ⇒ 那种情形下模型看不到「未执行」（正是真机静默失效的形态）');
+ok('宿主为「消费者模块缺失」补回执（仅当确有意图时，避免健康路径噪声）',
+  /if \(compactToolApi\?\.peekIntent\?\.\(sid\)\)/.test(host)
+  && /why: 'm3-module-missing'/.test(host),
+  '消费者模块缺失时不留痕 ⇒ 又回到「工具回 ok 但没人说没执行」的真机形态');
+ok('思考强度工具结果带回读与自检指引（applied + verify）',
+  /applied: 'next-request',/.test(effort) && /applied: 'already',/.test(effort)
+  && /下一步的用量行后缀会显示当前实际档位/.test(effort),
+  '工具只回 {ok,effort} ⇒ 模型无法自检是否真的生效（与压缩那个盲区同源）');
 
 /* ═══════════ 汇总 ═══════════ */
 console.log(`\n${'='.repeat(52)}`);
