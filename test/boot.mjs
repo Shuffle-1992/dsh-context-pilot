@@ -49,9 +49,19 @@ const reportPath = join(tmp, 'm1-report.json');
 const provided = new Map();
 const handlers = new Map();
 let effects = 0;
+/* R14：**收集宿主吞掉的告警**。这是本项目最深的验证盲区——宿主纪律是「异常逐支吞掉只记录」，
+ * 于是「域模块加载失败（ReferenceError）」只会变成一条 warn，源断言看不到、行为断言也看不到
+ * （各域都做了空值降级 ⇒ 只是静默不工作）。
+ * 实证代价：`COMPACT_TIMEOUT_MS` 的定义在 R12 搬迁中被静默丢掉，M3 域整整两版加载失败
+ * （**压缩全链路静默失效**），而当时 454 条断言全绿。 */
+const warns = [];
+const logger = {
+  info() {}, debug() {}, error: (...a) => warns.push(['error', a.join(' ')]),
+  warn: (...a) => warns.push(['warn', a.join(' ')]),
+};
 
 const ctx = {
-  logger: { info() {}, warn() {}, error() {}, debug() {} },
+  logger,
   get: () => null, // 所有服务都拿不到 ⇒ 走「降级」分支（这正是要验证的鲁棒性）
   on: (name, handler) => { handlers.set(name, handler); },
   provide: (name, face) => { provided.set(name, face); },
@@ -59,10 +69,12 @@ const ctx = {
 };
 
 let applyFn = null;
+let createCoreFn = null;
 try {
   ({ apply: applyFn } = await import(pathToFileURL(join(PLUGIN, 'host.impl.mjs')).href));
+  ({ createCore: createCoreFn } = await import(pathToFileURL(join(PLUGIN, 'core.mjs')).href));
 } catch (e) {
-  ok('host.impl.mjs 可被 import', false, String(e?.message ?? e));
+  ok('host.impl.mjs / core.mjs 可被 import', false, String(e?.message ?? e));
 }
 if (typeof applyFn !== 'function') {
   console.log(`\n${'='.repeat(52)}\n宿主启动冒烟：${checks - failures}/${checks} 通过\n${'='.repeat(52)}`);
@@ -71,12 +83,31 @@ if (typeof applyFn !== 'function') {
 
 let ret = null;
 try {
-  ret = applyFn(ctx, {}, { pluginDir: PLUGIN, reportPath });
+  /* R14：core 由**调用方预加载后传入**（entry.mjs 就是这么做的一一因为 state/log/svc/schedule
+   * 在 apply 期同步使用，而 ?ts= 动态 import 是异步的）。这里如实复现 entry 的调用形态。 */
+  const core = createCoreFn({ ctx, config: {}, pluginDir: PLUGIN, reportPath });
+  ret = applyFn(ctx, {}, { pluginDir: PLUGIN, reportPath, core });
 } catch (e) {
   ok('apply() 不抛（激活绝不失败）', false, String(e?.stack ?? e).split('\n').slice(0, 3).join(' | '));
 }
 ok('apply() 同步返回 reportPath', !!ret && ret.reportPath === reportPath, `实际 ${JSON.stringify(ret)}`);
 ok('ctx.effect 收到清理注册（卸载器形态）', effects >= 1, `effects=${effects}`);
+
+/* R14：**未注入 core 时必须降级不崩**（= entry.mjs 尚未重启的形态）——
+ * 这条断言把「部署窗口期不会炸掉用户会话」变成可回归的契约。 */
+{
+  const tmp2 = mkdtempSync(join(tmpdir(), 'dcp-boot-degraded-'));
+  const ctx2 = { ...ctx, provide: () => {}, on: () => {}, effect: () => {}, logger: { info() {}, warn() {}, error() {}, debug() {} } };
+  let degradedRet = null;
+  let degradedErr = null;
+  try {
+    degradedRet = applyFn(ctx2, {}, { pluginDir: PLUGIN, reportPath: join(tmp2, 'r.json') });
+  } catch (e) { degradedErr = e; }
+  ok('未注入 core 时降级不崩（entry 未重启的形态）',
+    !degradedErr && degradedRet?.degraded === 'core-missing-need-restart',
+    degradedErr ? String(degradedErr?.message ?? degradedErr) : `实际 ${JSON.stringify(degradedRet)}`);
+  try { rmSync(tmp2, { recursive: true, force: true }); } catch { /* 吞 */ }
+}
 
 /* 让所有 `?ts=` 模块 import 完成（每个都是一次 microtask+IO；1.5s 足够且与真实激活同量级）。 */
 await sleep(1500);
@@ -186,6 +217,16 @@ if (storedActs > 0) {
 ok('报告已落盘且 history 非空（激活快照管线可达）',
   existsSync(reportPath) && (JSON.parse(readFileSync(reportPath, 'utf8')).history ?? []).length > 0,
   `reportPath=${reportPath}`);
+
+/* ⑥ R14：**没有任何域模块加载失败**（宿主把这类失败吞成 warn ⇒ 只有在这里才看得见）。
+ * 这是对「静默丢失/静默降级」这一类缺陷的通用兜底：任何 `?ts=` 模块因未定义标识符而加载失败，
+ * 都会在报告里表现为「该域悄悄不工作」，而本断言把它变成硬失败。 */
+{
+  const bad = warns.filter(([, m]) => /模块加载失败|未定义|is not defined|ReferenceError|TypeError/.test(m));
+  ok('没有域模块加载失败 / 未定义标识符（收集宿主吞掉的 warn）',
+    bad.length === 0,
+    bad.length ? bad.map(([, m]) => m).slice(0, 4).join('\n       ') : '');
+}
 
 try { rmSync(tmp, { recursive: true, force: true }); } catch { /* 吞 */ }
 

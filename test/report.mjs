@@ -35,6 +35,9 @@ const ok = (name, cond, detail) => {
 };
 
 const host = readFileSync(join(PLUGIN, 'host.impl.mjs'), 'utf8');
+/* R14：core 属宿主侧 ⇒ 「宿主侧形状」类断言查 hostOrCore。 */
+const coreSrc = readFileSync(join(PLUGIN, 'core.mjs'), 'utf8');
+const hostOrCore = host + '\n' + coreSrc;
 /* R3（2026-10-08）：智能思考功能域已抽独立模块，相关断言随之改指向模块。 */
 const effort = readFileSync(join(PLUGIN, 'effort.mjs'), 'utf8');
 /* R11：M5 HUD 域（含 getHud 聚合响应主体 + 启动回填主体）已抽 plugin/m5.hud.mjs ⇒ 断言改指模块。 */
@@ -92,18 +95,19 @@ for (const mustFull of MUST_FULL) {
     `${mustFull} 被列入 slim ⇒ 取证信息丢失（m3-act 还会破坏回填）`);
 }
 ok('slimSnapshot 由 refresh 按 isSlimReason 调用（判定口径在 M1 域）',
-  /const slimSnapshot = \(snap\) => \(m1Ctl/.test(host)
-  && /writeReport\(isSlimReason\(reason\) \? slimSnapshot\(snap\)/.test(host)
+  /let slimSnapshot = \(snap\) => \(\{ \.\.\.snap, profile: 'slim' \}\);/.test(coreSrc)
+  && /writeReport\(isSlimReason\(reason\) \? slimSnapshot\(snap\)/.test(coreSrc)
   && /const isSlim = \(reason\) => SLIM_REASONS\.has\(reason\);/.test(m1src),
-  't 瘦身未生效，或判定口径散在两处（R13 踩过：漏改 refresh 的引用 ⇒ ReferenceError ⇒ 报告永不落盘）');
+  '瘦身未生效，或判定口径散在两处（R13 踩过：漏改 refresh 的引用 ⇒ ReferenceError ⇒ 报告永不落盘）');
 /* ═══ R8 修（审查发现的取证静默丢失）═══
  * 现场：报告 120 条**全是 slim、full 0 条** —— 高频 slim 事件（heartbeat 120s / agent/status /
  * m5-publish 400ms 防抖 / m2-inject）把 FULL 条目挤出环形缓冲，而 FULL 恰是「压缩成没成」的唯一留档位。
  * 上面那条「不在 slim 名单」根本抓不到这件事，因为它只查**名单**、不查**历史里到底有没有**。 */
 ok('满环时优先淘汰最旧的 slim 条目（FULL 取证不得被挤出）',
-  /const slimIdx = next\.findIndex\(\(e\) => e\?\.profile === 'slim'\);/.test(host)
-  && /next\.splice\(slimIdx === -1 \? 0 : slimIdx, 1\);/.test(host)
-  && !/\.slice\(-HISTORY_CAP\)/.test(host),
+  /* R14：writeReport（含淘汰策略）已搬进 core.mjs。 */
+  /const slimIdx = next\.findIndex\(\(e\) => e\?\.profile === 'slim'\);/.test(coreSrc)
+  && /next\.splice\(slimIdx === -1 \? 0 : slimIdx, 1\);/.test(coreSrc)
+  && !/\.slice\(-HISTORY_CAP\)/.test(coreSrc),
   '仍按整体最旧淘汰 ⇒ 高频 slim 会把 activation/m3-act 等 FULL 证据挤出 120 条窗口');
 
 /* ═══════════ 3.5 getHud 作用域契约（防 ReferenceError 回归）═══════════ */

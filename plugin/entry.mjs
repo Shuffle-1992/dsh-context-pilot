@@ -23,6 +23,8 @@ const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 const IMPL_PATH = join(PLUGIN_DIR, 'host.impl.mjs');
 /** M1 验证报告（重启/运行期随时可读，取证入口）。 */
 const REPORT_PATH = join(PLUGIN_DIR, '.data', 'm1-report.json');
+/** R14 解耦第六刀：core.mjs 也走同一套 ts —— 必须**先加载完再调 apply**（见下）。 */
+const CORE_PATH = join(PLUGIN_DIR, 'core.mjs');
 
 export const name = 'dsh-context-pilot';
 
@@ -43,8 +45,14 @@ export function apply(ctx, config = {}) {
     mtime = statSync(IMPL_PATH).mtimeMs;
   } catch { /* impl 缺失时 URL 仍可构造，import 会报出可读错误 */ }
   const url = `./host.impl.mjs?ts=${mtime}-${seq}`;
-  import(url)
-    .then((impl) => impl.apply(ctx, config, { pluginDir: PLUGIN_DIR, reportPath: REPORT_PATH }))
+  /* R14：core.mjs 用**同一个 ts** `预加载`后作为第 4 个参数传给 apply。
+   * 为什么必须由入口预加载：`state` / `log` / `svc` / `schedule` / `addListener` 都在 apply 期
+   * **同步**使用，而 `?ts=` 动态 import 是异步的——只有让调用方先加载才能同时满足「热换」（P16）
+   * 与「同步可用」。两者共用 ts ⇒ 同批热换。
+   * ⚠️ 本文件属「改它必须重启 DSH」的薄壳：未重启时旧 entry 不会传 core，宿主已做**降级不崩**。 */
+  const coreUrl = `./core.mjs?ts=${mtime}-${seq}`;
+  Promise.all([import(coreUrl), import(url)])
+    .then(([core, impl]) => impl.apply(ctx, config, { pluginDir: PLUGIN_DIR, reportPath: REPORT_PATH, core }))
     .catch((e) => {
       try {
         const m = e && e.message ? e.message : String(e);

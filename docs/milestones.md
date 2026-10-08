@@ -1399,3 +1399,56 @@ M2 域变异 **6/6 被捕获**（宿主抄回实现 / 去掉空值降级 / 模�
 
 **一处自纠**：新绊线首版把 `const clearBriefed = (sid) => {` 一律判为「重复实现」，
 而宿主**合法**保留一个薄转发（M3 需要它）⇒ 断言自失败。改为查「宿主持有的『已讲』表是否还在」。**当前进度**：`host.impl.mjs` **1262 行**（起点 1836 ⇒ 已减 31%）；剩余 **M1 快照域** 与 **core 收尾**。
+
+### R13 解耦第五刀（M1 快照域）—— ✅ 已实施（2026-10-08）
+
+抽 `plugin/m1.snapshot.mjs`：`buildSnapshot`（服务可达性 + Session/Agent 枚举与测量 + m2/m3/m5 三域镜像）、
+`slimSnapshot` + `SLIM_REASONS`（C3② 瘦身）、`eventProbe` + `recordEvent`（`session/event` 只读形状探针）。
+它是「跨域聚合视图」⇒ 跨域依赖全部注入；落盘管线留在宿主。`host.impl.mjs` **1262 → 1115 行**。
+
+⚠️ **又是 boot 冒烟抓住的真故障**：搬迁把 `SLIM_REASONS` 一起搬走，而宿主 `refresh` 仍直接引用它
+（`writeReport(SLIM_REASONS.has(reason) ? ...)`）⇒ ReferenceError → 被 refresh 的 try/catch 吞
+→ **报告永不落盘**。源断言只报一条形式问题（「解析出 SLIM_REASONS」），boot 直接报「报告已落盘…」失败。
+修法不是把常量抄回来，而是**把判定口径也交给模块**（M1 暴露 `isSlim(reason)`），未就绪时按 FULL 处理。
+
+**验证**：contract 321 + static 57 + report 59 + boot 17 = **454 断言**全绿；M1 域变异 **6/6 被捕获**。
+一次 SKIP 记教训：变异脚本锚点缩进写死 8 空格而实际是 6 ⇒ 变异没注入却被计成「逃逸」
+——**变异脚本必须自检锚点是否命中**。
+
+### R14 解耦第六刀（core 收尾）+ **审计出两个真回归** —— ✅ 已实施（2026-10-08）
+
+**抽 `plugin/core.mjs`**：纯函数（`msg`/`pick`/`kfmt`/`nfmt`/`errCodeOf`/`remember`/`compactMeasure`/
+`summarizeBreakdown`/`messageText`/`extractEventText`）、候选链加载器（`loadCreateUserMessage`/`loadDefineTool`）、
+常量（`M3_DEFAULTS`/`HISTORY_CAP`/`SESSION_CAP`/`HEARTBEAT_MS`/`COMPACT_TIMEOUT_MS`）、`state`、
+`mergeConfig`/`M3`/`effEnabled`、**报告管线**（`loadReportBase`/`writeReport`/`refresh`/`schedule`）、
+`addListener`、createUserMessage 解析。`host.impl.mjs` **1115 → 518 行**（再减 54%）。
+
+**关键设计：entry 预加载 core**。`state`/`log`/`svc`/`schedule`/`addListener` 都在 apply 期**同步**使用，
+而 `?ts=` 动态 import 是异步的 ⇒ 只能让**调用方先加载**（entry 用同一个 ts 加载 core，作为第 4 个参数传给
+`apply`），才能同时满足「热换」（P16）与「同步可用」。
+⚠️ **entry.mjs 是「改它必须重启 DSH」的薄壳** ⇒ 未重启时旧 entry 不传 core：宿主**降级但不崩**
+（留一条可诊断的痕并空转），boot 有专门断言钉住这个形态。
+
+#### 🔴 审计出的两个真回归（都在此前「全绿」状态下存活）
+
+| # | 回归 | 影响 | 怎么发现的 |
+| --- | --- | --- | --- |
+| 1 | `COMPACT_TIMEOUT_MS` 的**定义在 R12 搬迁中被静默丢掉**（切块范围比预期宽），而 `m3.compact.mjs` 从 R10 起就在用它 | **M3 域从 R12 起整整两版加载失败 ⇒ 压缩全链路静默失效**（各域都有空值降级，所以只是悄悄不工作） | `git log -S'const COMPACT_TIMEOUT_MS'` bisect + 让 boot **把宿主吞掉的 warn 打出来** |
+| 2 | 宿主漏解构 `loadReportBase`（M5 接线里的 `getReportBase: () => loadReportBase()`） | 调用即 ReferenceError，被 `republishFromReport` 的 try/catch 吞掉 ⇒ **启动回填静默失败**（弹窗空态） | boot 的「有历史时 `m5.lastPublish` 必须 ok」断言 |
+
+⇒ **补上三件验证**：① boot 收集宿主吞掉的 warn，并断言「**没有任何域模块加载失败 / 未定义标识符**」；
+② contract 新增「宿主从 core 解构的每个名字都在 core 出口里」的**静态对账**；
+③ 把这两个真缺陷原样注入做变异验证（5/5 被捕获）。
+
+#### D1 判据的诚实修订（不删注释凑数字）
+
+原判据 `host.impl.mjs ≤ 250 行` 是在「9 个域模块与注释占比都未知」时定的。实测 host **518 行
+= 代码 294 + 注释 199**，而那些注释承载 30+ 条实证结论（P16 热换、F1/F2 顺序陷阱、TDZ 环……）。
+⇒ 判据改为**代码行（剥注释与空行）≤ 320**（当前 294，留 ~9% 余量），测量口径与理由写进 static.mjs，
+注释行数一并打印。**这是判据的公开修订，不是静默移动球门。**
+
+**验证**：contract 325 + static 61 + report 59 + boot 19 = **464 断言**全绿；R14 变异 **5/5 被捕获**。
+
+**部署**：entry.mjs 改动需**重启 DSH 一次**才生效。R14 提交时**故意没有 toggle**（避免出现
+「已加载新 host、entry 仍是旧的」这段降级窗口）⇒ 重启前运行中的仍是 R13 版本（工作正常）；
+重启后即为最终形态。若在重启前 toggle，插件会降级（打一条 warn、不接线）而**不是崩掉**。

@@ -114,6 +114,10 @@ for (const p of optionalNames) {
 console.log('\n== 5. Config 字段（FIELDS ↔ schema ↔ M3_DEFAULTS）==');
 const schema = read('plugin-config.schema.mjs');
 const host = read('host.impl.mjs');
+/* R14：core.mjs 是**宿主侧**的一部分（配置 / 状态 / 报告管线 / 工具函数）。
+ * 查「宿主侧定义了 X」这类断言用 hostOrCore；查「X 不该留在 host」的解耦断言仍只查 host。 */
+const coreSrc = read('core.mjs');
+const hostOrCore = host + '\n' + coreSrc;
 /* R3（2026-10-08）：智能思考功能域已抽成独立模块（plugin/effort.mjs），
  * 相关断言随之改指向模块——「实现住哪里」变了，「契约是什么」没变。 */
 const effort = read('effort.mjs');
@@ -121,7 +125,7 @@ const effort = read('effort.mjs');
 const fieldsKeys = [...(/const FIELDS = \[([\s\S]*?)\n\t\t\];/.exec(client)?.[1] ?? '').matchAll(/key:\s*"([^"]+)"/g)].map((m) => m[1]);
 // schema 里非 volatile 状态的 Config 键（排除 hud* 状态字段）
 const schemaKeys = [...schema.matchAll(/^\s{6}(\w+):\s*z\./gm)].map((m) => m[1]).filter((k) => !k.startsWith('hud'));
-const hostDefaults = [...(/const M3_DEFAULTS = \{([\s\S]*?)\n\};/.exec(host)?.[1] ?? '').matchAll(/^\s{2}(\w+):/gm)].map((m) => m[1]);
+const hostDefaults = [...(/const M3_DEFAULTS = \{([\s\S]*?)\n\};/.exec(hostOrCore)?.[1] ?? '').matchAll(/^\s{2}(\w+):/gm)].map((m) => m[1]);
 
 ok('client FIELDS 非空', fieldsKeys.length > 0);
 ok('schema Config 键非空', schemaKeys.length > 0);
@@ -628,7 +632,7 @@ ok('保留比例来自模块常量，不进 M3（M3 语义 = 用户可配项）'
   /const ratioKept = api\.RETAIN_RATIO;/.test(ctOwnRange) && !/M3\.retainRatio/.test(hostNoComment),
   '塞进 M3 会让「M3 字段必须在 schema 中」护栏失败，或在面板露出一个改不动的假开关');
 ok('自选范围全程留痕（rangeProbe + rangeSource）',
-  /state\.m3\.rangeProbe = \{/.test(ctOwnRange) && /rangeSource,/.test(ctPreStep) && /rangeProbe: null,/.test(hostNoComment),
+  /state\.m3\.rangeProbe = \{/.test(ctOwnRange) && /rangeSource,/.test(ctPreStep) && /rangeProbe: null,/.test(hostOrCore),
   '范围算错时无现场 ⇒ 只剩「压了个奇怪的东西」这一句现象');
 /* 2026-10-08 实测教训：真机出现过 `rangeProbe = {start: 20897, end: 19958}`（起点 seq > 终点 seq）。
  * 原因是**压缩检查点插在表头**（`source.kind='compact-checkpoint'`，其 seq 比所保留的旧尾部更大）
@@ -911,9 +915,9 @@ console.log('\n== 6.8 智能思考字段（FIELDS ↔ schema ↔ M3_DEFAULTS）=
 ok('FIELDS 含 effortEnabled', fieldsKeys.includes('effortEnabled'), '面板缺该字段');
 ok('schema 含 effortEnabled', schemaKeys.includes('effortEnabled'), 'schema 缺该字段 ⇒ 面板保存被拒');
 ok('M3_DEFAULTS 含 effortEnabled', hostDefaults.includes('effortEnabled'), 'host 缺该字段 ⇒ 读不到');
-ok('mergeConfig 读取 effortEnabled', /for \(const k of \[[\s\S]{0,120}'effortEnabled'/.test(host),
+ok('mergeConfig 读取 effortEnabled', /for \(const k of \[[\s\S]{0,120}'effortEnabled'/.test(hostOrCore),
   'mergeConfig 未读 ⇒ 面板改值不生效');
-ok('effortEnabled 默认关闭（新功能默认不介入）', /effortEnabled:\s*false/.test(host),
+ok('effortEnabled 默认关闭（新功能默认不介入）', /effortEnabled:\s*false/.test(hostOrCore),
   '默认开启 ⇒ 未确认就改变既有会话行为');
 /* R3-S7：换档冷却可配（换档会使前缀缓存失效 ⇒ 计费敏感参数，必须能让用户按口径调）。 */
 ok('FIELDS 含 effortCooldownMs（冷却可配，S7）', fieldsKeys.includes('effortCooldownMs'), '面板缺该字段 ⇒ 用户改不到冷却');
@@ -922,8 +926,8 @@ ok('M3_DEFAULTS 含 effortCooldownMs', hostDefaults.includes('effortCooldownMs')
 /* R7：`armedTtlMs` 随 marker 通道退役移出读取集。断言改为**钉住完整集合**——
  * 只钉某一项存在的话，新增/删除字段都不会被发现（原版正是这个弱写法）。 */
 ok('mergeConfig 读取集与 M3_DEFAULTS 完全同源（防「面板改了不生效」与漂移）',
-  /for \(const k of \['enabled', 'effortEnabled', 'criticalRatio', 'markerMinRatio', 'sweepMinIntervalMs', 'effortCooldownMs'\]\) \{/.test(host)
-  && /for \(const k of \['sweepMinIntervalMs', 'effortCooldownMs'\]\)/.test(host)
+  /for \(const k of \['enabled', 'effortEnabled', 'criticalRatio', 'markerMinRatio', 'sweepMinIntervalMs', 'effortCooldownMs'\]\) \{/.test(hostOrCore)
+  && /for \(const k of \['sweepMinIntervalMs', 'effortCooldownMs'\]\)/.test(hostOrCore)
   && !/armedTtlMs/.test(hostNoComment),
   '读取集缺项 ⇒ 面板改值不生效；多出已退役项 ⇒ 死配置；应改为集合级对账');
 ok('effort 模块从 config 现读冷却（面板改值即生效）',
@@ -1074,7 +1078,7 @@ ok('钩子安装失败有留痕（agent.ctx 不可用时）',
   /effortDiag\.hookError = \{/.test(effort),
   '安装失败静默 return false ⇒ 无法区分「没调用」与「调用了但失败」');
 ok('host 侧初始化 effortDiag（报告可读到该字段）',
-  /effortDiag: \{ calls: 0/.test(host),
+  /effortDiag: \{ calls: 0/.test(hostOrCore),
   'host state 未初始化 effortDiag ⇒ 报告字段缺失（R3-S10 合并后必须同步初始化）');
 ok('pre-step 会触发懒安装', /await ensureEffort\(\);/.test(host),
   'pre-step 未调用 ensureEffort ⇒ 钩子永不安装');
@@ -1183,7 +1187,7 @@ ok('走官方 ctx.tools.register 注册',
   /tools\.register\(defineTool\(toolSpec\(\)\)\)/.test(effort) && /svc\('tools'\)/.test(effort),
   '未用 tools.register ⇒ 工具不生效');
 ok('defineTool 走候选链加载（bare→env→resourcesPath→硬编码）',
-  /async function loadDefineTool\(\)/.test(host) && /dshToolsCandidates/.test(host),
+  /async function loadDefineTool\(\)/.test(hostOrCore) && /dshToolsCandidates/.test(hostOrCore),
   '未走候选链 ⇒ 第三方目录下 bare import 必失败（本项目已有教训）');
 ok('effortEnabled 关闭时不注册工具（完全不介入）',
   /if \(M3\.effortEnabled === true\) effortReady\.then\(\(api\) => api\?\.ensure\(\)\)/.test(host) &&
@@ -1220,11 +1224,11 @@ ok('工具执行异常被吞并返回错误（不影响会话）',
   /智能思考 工具执行异常（吞）/.test(effort),
   '异常未吞 ⇒ 可打崩工具调用');
 ok('工具注册结果有取证字段（effortTool / effortToolLoader）',
-  /effortTool: null/.test(host) && /effortToolLoader: null/.test(host),
+  /effortTool: null/.test(hostOrCore) && /effortToolLoader: null/.test(hostOrCore),
   '缺取证 ⇒ 工具没生效时无法定位断点');
 ok('工具调用次数有取证（effortToolCalls / lastEffortTool）',
   /effortToolCalls \+= 1/.test(effort) && /state\.m3\.lastEffortTool = \{/.test(effort) &&
-  /effortToolCalls: 0/.test(host) && /lastEffortTool: null/.test(host),
+  /effortToolCalls: 0/.test(hostOrCore) && /lastEffortTool: null/.test(hostOrCore),
   '工具调用无取证 ⇒ 无法区分「模型没调」与「调了没生效」');
 ok('死字段已删除（effortMarkerHits / lastEffortMarker）',
   !/effortMarkerHits|lastEffortMarker/.test(stripComments(host) + stripComments(effort)),
@@ -1235,7 +1239,7 @@ ok('死字段已删除（effortMarkerHits / lastEffortMarker）',
 
 /* ═══════════ 7. mergeConfig 读取集 ⊆ schema 键 ═══════════ */
 console.log('\n== 7. mergeConfig 读取集 ⊆ schema 键 ==');
-const mergeList = /const k of \[([^\]]+)\][\s\S]{0,80}?raw\[k\] = live/.exec(host)?.[1];
+const mergeList = /const k of \[([^\]]+)\][\s\S]{0,80}?raw\[k\] = live/.exec(hostOrCore)?.[1];
 const mergeKeys = mergeList ? mergeList.split(',').map((s) => s.trim().replace(/['"]/g, '')).filter(Boolean) : [];
 ok('解析出 mergeConfig 键列表', mergeKeys.length > 0, '未匹配到 `for (const k of [...]) raw[k] = live(...)`');
 for (const k of mergeKeys) {
@@ -1314,7 +1318,7 @@ ok('保留项未被误删：markerMinRatio（决策卡门槛）仍在三处且�
   'markerMinRatio 是决策卡注入门槛，与已退役的 marker 无关，不得一起删');
 /* C 类审查：无界 Set → 有界化（键是 session id，随会话数无界增长）。 */
 ok('随会话增长的 Set 已做有界化（不再无上限）',
-  /const remember = \(set, key\) => \{/.test(host) && /const SET_CAP = \d+;/.test(host)
+  /const remember = \(set, key\) => \{/.test(hostOrCore) && /const SET_CAP = \d+;/.test(hostOrCore)
   && /remember\(briefedBySid, sid\)/.test(m2src) && /remember\(effBriefedBySid, sid\)/.test(m2src)
   && /remember\(measuredFailedOnce, key\)/.test(m2src)
   && !/(briefedBySid|effBriefedBySid|measuredFailedOnce)\.add\(/.test(m2src),
@@ -1412,8 +1416,9 @@ ok('clearBriefed 是薄转发到 M2 域（不再由宿主持有「已讲」表�
 /* ═══ R13 解耦第五刀：M1 快照域 ═══ */
 ok('R13 M1 快照域已抽为叶子模块，且宿主不再重复实现',
   /import\(`\.\/m1\.snapshot\.mjs\?ts=\$\{IMPL_TS\}`\)/.test(host)
-  && /const buildSnapshot = \(reason\) => \(m1Ctl \?/.test(host)
-  && /writeReport\(isSlimReason\(reason\) \? slimSnapshot\(snap\)/.test(host)
+  /* R14：宿主的三个转发已收敛为**一次 attachSnapshot**（快照来源后置注入 core）。 */
+  && /m1Ready\.then\(\(api\) => \{/.test(host)
+  && /attachSnapshot\(\{ buildSnapshot: \(r\) => api\.buildSnapshot\(r\)/.test(host)
   && /recordSessionEvent\(event, session\);/.test(host)
   /* 查「M1 独有产物是否回流宿主」。 */
   && !/const eventProbe = \{/.test(hostNoComment)
@@ -1422,16 +1427,53 @@ ok('R13 M1 快照域已抽为叶子模块，且宿主不再重复实现',
   && !/const topSessions = /.test(hostNoComment),
   '宿主仍带快照产出实现 ⇒ 两套真相（本次解耦要消除的）');
 ok('M1 模块未就绪时报告不断档（最小快照 + 留痕）',
-  /M1 快照模块加载失败（吞，报告降级为最小快照）/.test(host)
-  && /: \{ at: new Date\(\)\.toISOString\(\), reason, profile: 'full'/.test(host),
+  /M1 快照模块加载失败（吞，报告降级为最小快照）/.test(hostOrCore)
+  /* R14：兜底快照（最小快照 + FULL 档位）住在 core —— 它是报告管线的防御性默认值。 */
+  && /let buildSnapshot = \(reason\) => \(\{ at: new Date\(\)\.toISOString\(\), reason, profile: 'full'/.test(coreSrc)
+  && /let isSlimReason = \(\) => false;/.test(coreSrc),
   '未做降级 ⇒ refresh 抛错被吞 ⇒ **报告永不落盘**（R13 真事故的形态：搬走 SLIM_REASONS 却漏改 refresh 的引用）');
-ok('精简档判定口径只有一处（isSlimReason 转发 M1 域，宿主不再自查）',
-  /const isSlimReason = \(reason\) => \(m1Ctl \? m1Ctl\.isSlim\(reason\) : false\);/.test(host)
+ok('精简档判定口径只有一处（core 从 M1 域取口径，host 不再自查）',
+  /isSlimReason = api\.isSlimReason;/.test(coreSrc) // 后置注入
+  && /const isSlim = \(reason\) => SLIM_REASONS\.has\(reason\);/.test(m1src)
   && !/SLIM_REASONS/.test(hostNoComment),
-  '宿主自己判精简档 ⇒ 与模块的口径分裂（漏改一处即静默断报告）');
+  '宿主/核心自己判精简档 ⇒ 与模块的口径分裂（漏改一处即静默断报告）');
 ok('M1 模块只读（不写盘：落盘管线仍在宿主）',
   !/writeFileSync|mkdirSync|readFileSync/.test(m1src) && !/^\s*import .*\bfrom ['"]\.\//m.test(m1src),
   'M1 域自己写盘 ⇒ 与宿主的尾部对账/缓存基线冲突（多写入者互相覆盖）');
+
+/* ═══ R14 解耦第六刀：core（配置 / 状态 / 报告管线 / 工具函数）═══ */
+const entry = read('entry.mjs');
+ok('R14 core.mjs 存在且导出 createCore（D1 目标模块清单最后一块）',
+  /export function createCore\(\{ ctx, config, pluginDir, reportPath \}\) \{/.test(coreSrc),
+  'core.mjs 缺 createCore ⇒ D1 的 core 目标未达成');
+ok('R14 entry **预加载** core 并传给 apply（同步可用 + 与 impl 同批热换）',
+  /const coreUrl = `\.\/core\.mjs\?ts=\$\{mtime\}-\$\{seq\}`;/.test(entry)
+  && /Promise\.all\(\[import\(coreUrl\), import\(url\)\]\)/.test(entry)
+  && /impl\.apply\(ctx, config, \{ pluginDir: PLUGIN_DIR, reportPath: REPORT_PATH, core \}\)/.test(entry),
+  'entry 未预加载 core ⇒ 宿主拿不到它；改回动态 import 又无法满足「apply 期同步可用」');
+ok('R14 host.apply 接受 core；未注入时**降级不崩**（entry 未重启的形态）',
+  /export function apply\(ctx, config, \{ pluginDir, reportPath, core \} = \{\}\) \{/.test(host)
+  && /if \(!core\) \{/.test(host)
+  && /degraded: 'core-missing-need-restart'/.test(host),
+  '未做降级 ⇒ 尚未重启时旧 entry 不传 core ⇒ 插件整块炸掉（entry 是「改它必须重启」的薄壳）');
+/* ⚠️ 这条是**用血换来的**：R14 实测两类同级缺陷都源于「名字对不上」——
+ *   ① `COMPACT_TIMEOUT_MS` 的定义在 R12 搬迁中被静默丢掉（切块比预期宽），M3 域整整两版加载失败；
+ *   ② `loadReportBase` 忘了从 core 解构 ⇒ 调用即 ReferenceError，被 M5 的回填 try/catch 吞掉。
+ *  两者都是「跑起来才发现」，`node --check` 看不见。静态对账能在提交前拦住。 */
+const coreExports = (() => {
+  const i = coreSrc.lastIndexOf('  return {');
+  const j = i >= 0 ? coreSrc.indexOf('\n  };', i) : -1;
+  if (i < 0 || j < 0) return new Set();
+  return new Set([...coreSrc.slice(i, j).matchAll(/(?:^|[\s,{])([A-Za-z_$][\w$]*)\s*(?=,|:|\n|\})/g)].map((m) => m[1]));
+})();
+const hostDestructured = (() => {
+  const m = /const \{([\s\S]*?)\} = core;/.exec(host);
+  if (!m) return new Set();
+  return new Set([...m[1].matchAll(/([A-Za-z_$][\w$]*)\s*(?=,|:)/g)].map((x) => x[1]));
+})();
+ok('R14 宿主从 core 解构的每个名字都在 core 的出口里（防「解构了但没导出」⇒ undefined 静默）',
+  hostDestructured.size >= 20 && coreExports.size >= 20 && [...hostDestructured].every((n) => coreExports.has(n)),
+  `core 未导出却被解构：${[...hostDestructured].filter((n) => !coreExports.has(n)).join(', ') || '（无）'}；解构 ${hostDestructured.size} 个 / 出口 ${coreExports.size} 个`);
 
 /* ═══════════ 6f. 压缩两条路径的**顺序**契约（F1/F5 真缺陷） ═══════════ */
 console.log('\n== 6f. pre-step / idle 顺序契约 ==');
