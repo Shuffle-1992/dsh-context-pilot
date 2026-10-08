@@ -22,7 +22,8 @@ DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`（面板名�
           → 占用达「智能压缩线」时附决策卡，模型自行判断是否压缩
           → 模型【先在正文里说一句理由，再】调用工具 compact_context
           → 下一步的 pre-step 执行压缩（自己算保留范围）→ 之后所有步骤跑在压缩后的上下文上
-          → 占用达「强制压缩线」时无条件压缩（兜底，无需模型操作）
+          → 占用达「强制压缩线」时插件在 pre-step 无条件发起压缩（无需模型操作）
+             ※ 执行路径与上面相同：先自算保留范围；只有自算失败/压完仍在线上，才落到 DSH 官方 overflow 收口
 
 可选（智能思考开关）：
           读当前模型的思考强度档位 → 注入给 Agent → Agent 按难度自行换档
@@ -62,7 +63,7 @@ DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`（面板名�
 | 面板名 | 配置键 | 含义 |
 | --- | --- | --- |
 | **智能压缩线** | `markerMinRatio` | 占用达此值时注入决策卡，**模型可自行决定压缩**并自动续跑 |
-| **强制压缩线** | `criticalRatio` | 占用达此值**无条件强制压缩**（pre-step / idle 兜底）。**生效值 = min(配置, DSH 引擎阈值 − 5pp)**，即内置 80% ⇒ 上限 **75%** |
+| **强制压缩线** | `criticalRatio` | 占用达此值**无条件发起压缩**（pre-step / idle 兜底；执行路径同上——先自算保留范围，官方 overflow 只作兜底/收口）。**生效值 = min(配置, DSH 引擎阈值 − 5pp)**，即内置 80% ⇒ 上限 **75%** |
 
 推荐值（按计费口径，计算器可按实价实时推导）：
 
@@ -88,7 +89,8 @@ DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`（面板名�
 > 详见 [`docs/r4-compaction-tool-design.md`](docs/r4-compaction-tool-design.md)。
 >
 > 占用达强制压缩线（生效值 = min(配置, DSH 引擎阈值 − 5pp)；内置 80% ⇒ 75%）时，
-> 仍由既有 pre-step / idle 安全网自动压缩，无需模型操作。
+> 仍由既有 pre-step / idle 安全网自动发起压缩，无需模型操作
+> ——**执行路径与工具触发完全相同**（先自算保留范围），不是切到 DSH 自带压缩；详见下一条。
 >
 > **保留多少近端内容**（R5）：无论哪条触发，都先按「窗口 × 16%」自选范围 → 只压这一段
 > （1M 窗口 ⇒ 近端 **160k token** 原样保留）；边界不合法则逐节点回退；
@@ -353,7 +355,7 @@ node docs/reference/tools/session-records.cjs --find <会话 id 片段> --from 1
 | **智能思考** | `effortEnabled` | false | 开=暴露思考档位 + 注册 `set_reasoning_effort` 工具；关=提示词不注入、工具也不注册 |
 | **换档冷却(秒)** | `effortCooldownMs` | 30 | 两次换档的最小间隔（存储为 ms）。**换档会使前缀缓存失效 ⇒ 计费敏感**，故可配（R3-S7） |
 | **智能压缩线** | `markerMinRatio` | 0.2 | 占用达此值时注入决策卡，模型可自行决定压缩（**决策卡门槛**，与已退役的文本标记无关） |
-| **强制压缩线** | `criticalRatio` | 0.85 | 占用达此值无条件强制压缩；**生效值 = min(配置, 引擎阈值 − 5pp)**（内置 80% ⇒ 75%） |
+| **强制压缩线** | `criticalRatio` | 0.85 | 占用达此值无条件**发起**压缩（先自算保留范围，官方 overflow 兜底/收口）；**生效值 = min(配置, 引擎阈值 − 5pp)**（内置 80% ⇒ 75%） |
 | 强制压缩冷却(秒) | `sweepMinIntervalMs` | 600 | 两次强制压缩的最小间隔（存储为 ms） |
 | （无面板字段） | — | — | **保留预算** = 窗口 × `RETAIN_RATIO`（0.16，模块常量）= 1M 窗口 ⇒ **160k token**。取代引擎 `context-overflow` 的 `retainTokens = 0`（R5）；见 [`docs/r5-retention-range-design.md`](docs/r5-retention-range-design.md) |
 
@@ -431,7 +433,8 @@ node docs/reference/tools/asar-query.cjs extract --paths "/dsh/node_modules/..."
 
 1. 每轮 prompt 含实时用量三元组（上限/已用/占比），模型可正确复述；
 2. 占用达**智能压缩线**时，模型可写标记触发压缩，插件自动执行并自动拉起续跑任务（用户零重发）；
-3. 占用达**强制压缩线**时，插件无条件压缩（pre-step / idle 兜底），压缩事件出现在会话日志；
+3. 占用达**强制压缩线**时，插件在 pre-step / idle 无条件发起压缩（同样先自算保留范围，
+   官方 overflow 只作兜底/收口），压缩事件出现在会话日志；
 4. 两条线可经 Config 配置（面板按秒/比率显示），改后**即时生效**（活读，无需重启）；
 5. 插件任何异常不影响 DSH 主流程（激活安全零抛）。
 6. **智能思考**（开启时）：注入当前档位 + 可选档；Agent 调用工具 `set_reasoning_effort`

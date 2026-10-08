@@ -83,7 +83,7 @@ function buildWith(z) {
       /* 换档冷却（R3-S7 起可配）：换档会使前缀缓存失效（dsh-llm call-config.js 标注 effort 属
        * 缓存敏感参数）⇒ 这是**会实际影响计费**的参数，故开放配置；默认 30s。 */
       effortCooldownMs: z.number().default(30000).description('换档冷却（毫秒）：两次换档的最小间隔，防频繁换档反复打断前缀缓存').volatile(),
-      criticalRatio: z.number().default(0.85).description('强制压缩线：占用达此值无条件强制压缩').volatile(),
+      criticalRatio: z.number().default(0.85).description('强制压缩线：占用达此值由插件在 pre-step 无条件发起压缩（先自算保留范围，官方 overflow 兜底）').volatile(),
       markerMinRatio: z.number().default(0.2).description('智能压缩线：占用达此值时注入决策卡，模型可自行决定压缩').volatile(),
       /* R7（2026-10-08）：`marker`（压缩标记）与 `armedTtlMs`（标记有效期）已随 marker 通道退役删除；
        * 压缩改由工具 `compact_context` 在下一步 pre-step 执行。`markerMinRatio` 保留（决策卡门槛）。 */

@@ -68,7 +68,7 @@ window.__ModuleLoader__.load({
 			/* 换档冷却（R3-S7 起可配）：换档会使前缀缓存失效 ⇒ 属计费敏感参数，故开放配置。 */
 			{ key: "effortCooldownMs", label: "换档冷却(秒)", type: "int", def: 30000, scale: 1000, hint: "两次换档的最小间隔（防反复打断前缀缓存）" },
 			{ key: "markerMinRatio", label: "智能压缩线", type: "num", def: 0.2, hint: "占用达此值时注入决策卡，模型可自行决定压缩" },
-			{ key: "criticalRatio", label: "强制压缩线", type: "num", def: 0.85, hint: "占用达此值无条件强制压缩（先于 DSH 引擎自动压缩触发）" },
+			{ key: "criticalRatio", label: "强制压缩线", type: "num", def: 0.85, hint: "占用达此值插件无条件发起压缩（先自算保留范围，官方 overflow 兜底；先于 DSH 引擎自动压缩触发）" },
 			/* R7：`marker`（压缩标记）与 `armedTtlMs`（标记有效期）两个面板字段随 marker 通道退役删除——
 			 * 压缩已改由工具 `compact_context` 触发，回复尾行文本标记既无教学也无执行路径。
 			 * ⚠️「智能压缩线」(`markerMinRatio`) 保留：它是决策卡注入门槛，与标记无关。 */
