@@ -1433,8 +1433,13 @@ M2 域变异 **6/6 被捕获**（宿主抄回实现 / 去掉空值降级 / 模�
 
 | # | 回归 | 影响 | 怎么发现的 |
 | --- | --- | --- | --- |
-| 1 | `COMPACT_TIMEOUT_MS` 的**定义在 R12 搬迁中被静默丢掉**（切块范围比预期宽），而 `m3.compact.mjs` 从 R10 起就在用它 | **M3 域从 R12 起整整两版加载失败 ⇒ 压缩全链路静默失效**（各域都有空值降级，所以只是悄悄不工作） | `git log -S'const COMPACT_TIMEOUT_MS'` bisect + 让 boot **把宿主吞掉的 warn 打出来** |
+| 1 | `COMPACT_TIMEOUT_MS` 的**定义在 R11（M5 HUD 域搬迁）中被静默丢掉**（切块范围比预期宽，代码被丢在地上），而 `m3.compact.mjs` 从 R10 起就在用它 | **M3 域从 R11 起加载失败 ⇒ 压缩全链路静默失效**：工具调用仍回 `ok/scheduled` 并登记意图，但 pre-step 里 `m3Ctl === null` ⇒ `preStepCompaction` 是 no-op ⇒ **意图永不消费、压缩永不发生**；同一原因让 `measureRatio` 失败 ⇒ **M2 用量行/决策卡也一起消失**（各域都有空值降级，所以只是悄悄不工作） | 真机症状（用户截图：中途一次 `compact_context` 没压成）→ 会话存储确认 04:22 后再无 `compaction/summary` → 报告显示此后所有激活 `preStepActs=0` + 04:54 `m2.skips.measureFail=1` → `git log -S'const COMPACT_TIMEOUT_MS'` 定位到 `6bbc751`（R11 的删除行）；随后让 boot **把宿主吞掉的 warn 打出来**，一次列出全部缺失标识符 |
 | 2 | 宿主漏解构 `loadReportBase`（M5 接线里的 `getReportBase: () => loadReportBase()`） | 调用即 ReferenceError，被 `republishFromReport` 的 try/catch 吞掉 ⇒ **启动回填静默失败**（弹窗空态） | boot 的「有历史时 `m5.lastPublish` 必须 ok」断言 |
+
+> ⚠️ **一次自我纠错**：R14 首次定位时我写的是「R12 丢的」，依据是一张逐提交核对表——而那张表**漏了 R11 这一行**
+> （`6bbc751` 不在我列的 sha 里），于是把「定义在 R10 还在、到 R12 已不在」误判成 R12 删除。
+> 改用 `git log -S` 后立刻暴露：**R11 才是删除点**。⇒ **列证据表时必须逐项核对是否覆盖全部候选**，
+> 漏一行就会把因果链指错一个提交（影响的是「谁引入的」，而这类结论正是后续排查的起点）。
 
 ⇒ **补上三件验证**：① boot 收集宿主吞掉的 warn，并断言「**没有任何域模块加载失败 / 未定义标识符**」；
 ② contract 新增「宿主从 core 解构的每个名字都在 core 出口里」的**静态对账**；

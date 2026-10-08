@@ -33,8 +33,10 @@ const HISTORY_CAP = 120; // 报告 history 上限（防长期运行膨胀）
 const HEARTBEAT_MS = 120_000; // 心跳周期：跟踪会话出现与用量增长（回调内注册，见 apply 尾部注释）
 const SESSION_CAP = 50; // 单次快照最多测量的 Session 数
 /* 压缩调用超时（pre-step 兜底信号 / idle compactNow 共用）。
- * ⚠️ 2026-10-08 R14 审计发现：它的**定义曾在 R12 那次搬迁中被静默丢掉**（切块范围比预期宽），
- * 而 m3.compact.mjs 从 R10 起就在用它 ⇒ M3 域整整两版加载失败（压缩全链路静默失效）。
+ * ⚠️ 2026-10-08 R14 审计发现：它的**定义曾在 R11（M5 HUD 域搬迁）中被静默丢掉**（切块范围比预期宽），
+ * 而 m3.compact.mjs 从 R10 起就在用它 ⇒ **从 R11 激活起 M3 域加载失败**：
+ * 工具调用仍回 ok/scheduled，但 pre-step 里 m3Ctl 为 null ⇒ preStepCompaction 是 no-op
+ * ⇒ 意图永不消费、压缩永不发生；同一原因让 measureRatio 失败 ⇒ M2 用量行/决策卡也一起消失。
  * 现在它住 core，由 host 解构后注入 M3；新增 boot 的「无模块加载失败」断言兜住这一类。 */
 const COMPACT_TIMEOUT_MS = 180_000;
 const SOURCE_KIND = 'context-pilot'; // 注入消息的 source.kind（投影/归属标记）

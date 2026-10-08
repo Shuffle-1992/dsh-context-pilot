@@ -415,7 +415,65 @@ contract **317** + static 54 + report 59 + boot 17 = **447 断言**全绿；**�
 | ②M3 压缩域 | ✅ R9+R10 | `m3.compact.mjs`（执行核心 + 编排层） |
 | ③M5 HUD 域 | ✅ R11 | `m5.hud.mjs` |
 | ③M2 注入域 | ✅ R12 | `m2.inject.mjs` |
-| ③M1 快照域 | ⏳ 待做 | `m1.snapshot.mjs` |
-| ④core 收尾 | ⏳ 待做 | `core.mjs` ⇒ 宿主 ≤250 行 |
+| ③M1 快照域 | ✅ R13 | `m1.snapshot.mjs` |
+| ④core 收尾 | ✅ R14 | `core.mjs`（+ entry 预加载） ⇒ 宿主 **518 行**（代码 294） |
 
-`host.impl.mjs`：**1836 → 1262 行**（−31%）。
+`host.impl.mjs`：**1836 → 518 行**（−72%；代码行 690 → 294，注释行保留 199）。
+
+---
+
+## 14. R13/R14 收尾 + **一次真机静默失效的完整取证**（2026-10-08）
+
+### 14.1 R13：M1 快照域
+
+`m1.snapshot.mjs`（`buildSnapshot` / `slimSnapshot` + `SLIM_REASONS` / `eventProbe` + `recordEvent`）。
+搬迁时把 `SLIM_REASONS` 一起搬走、而宿主 `refresh` 仍直接引用它 ⇒ ReferenceError 被 refresh 的
+try/catch 吞掉 ⇒ **报告永不落盘**。**boot 冒烟当场抓住**（源断言只报一条形式问题）。
+修法是把判定口径也交给模块（M1 暴露 `isSlim(reason)`），未就绪时按 FULL 处理。
+
+### 14.2 R14：core 收尾 + entry 预加载
+
+见 milestones 的 R14 条目。要点：`state`/`log`/`svc`/`schedule`/`addListener` 在 apply 期**同步**使用，
+而 `?ts=` 动态 import 是异步的 ⇒ 只能由 **entry 预加载 core 再传给 apply**；entry 属「改它必须重启」
+的薄壳，故宿主对「拿不到 core」做了**降级不崩**（有 boot 断言钉住）。
+
+### 14.3 🔴 用户在真机上看到的现象与完整因果链
+
+**现象**：会话中途我调用 `compact_context`，工具返回 `{"ok":true,"scheduled":"next-step"}`，
+但**压缩并没有发生**。
+
+**取证链（全部来自权威源，不是推断）**：
+
+| 时间(UTC) | 事实 | 证据来源 |
+| --- | --- | --- |
+| 04:22:42 | **最后一次真正成功的压缩** | 会话存储 `compaction/summary range={20897,19955}` |
+| 04:30:13 | R11 激活 —— **从这一刻起 M3 域加载失败** | `git show 6bbc751`：`const COMPACT_TIMEOUT_MS = 180_000;` 被这一提交**删除**（不是搬走） |
+| **04:31:06** | 用户截图里的那次 `compact_context`：工具登记成功、意图进入内存表 | 报告 `reason='compact-tool'` 条目 |
+| 04:31:06 之后 | 每个 step 的 pre-step 都调 `preStepCompaction`，但 `m3Ctl === null` ⇒ **直接 no-op**（连 `preStepActs` 都不加） | 此后所有条目 `preStepActs=0` / `compactIntents=0` / 无 `rangeProbe` |
+| 04:22 之后 | 会话存储**再无** `compaction/summary` | 权威源 |
+| 04:54:15 | 新一轮首步出现 `m2.skips.measureFail = 1` | 报告 —— 因为 M2 的用量行也依赖 M3 的 `measureRatio` |
+
+**因果链**：R11 的搬迁脚本切块范围比预期宽 ⇒ 顺手删掉了 `COMPACT_TIMEOUT_MS` 的**定义**（而
+`m3.compact.mjs` 从 R10 起就在用它）⇒ M3 模块的 deps 构造抛 ReferenceError ⇒ 被 `.catch` 吞成一条 warn
+⇒ `m3Ctl` 恒为 null ⇒ ① `preStepCompaction` 变成 no-op（**工具回 ok、意图登记成功、但没人消费它**）；
+② `measureRatio` 失败 ⇒ **M2 用量行与决策卡一起消失**；③ M5 的占用读数与 idle 安全网同时失效。
+每一层都有空值降级 ⇒ 没有任何一处抛到用户眼前。
+
+**这正是 R7 审查里 F5 那条缺陷的同款形态**（「工具回 scheduled 但压缩永不发生」）——
+F5 修的是「服务不可用时意图被提前消费」，而这次是「**消费者整个模块没加载**」，属于更深一层。
+
+### 14.4 教训（两条，都写进了验证层）
+
+1. **「异常逐支吞掉只记录」的纪律有一个盲区**：域模块加载失败 = 该域静默不工作，而源断言与行为断言
+   都看不见。⇒ boot 冒烟新增**收集宿主吞掉的 warn** 并断言「没有任何域模块加载失败 / 未定义标识符」。
+2. **搬迁手术必须逐块自检**：切块范围比预期宽 ⇒ 顺手删掉别的东西，而 `node --check` 与源断言都合法。
+   ⇒ 新增静态对账「宿主从 core 解构的每个名字都在 core 出口里」，并在每次搬迁后用
+   `git log -S<被搬走的定义>` 复核它是否只是**换了位置**而不是**消失**。
+
+### 14.5 一次自我纠错（关于归因）
+
+R14 首次定位时我写「R12 丢的」，依据是一张逐提交核对表——而那张表**漏了 R11 那一行**
+（`6bbc751` 不在我列的 sha 里），于是把「R10 还在、R12 已不在」误判成 R12 删除。
+改用 `git log -S'const COMPACT_TIMEOUT_MS'` 后立刻暴露真相：**R11 才是删除点**。
+⇒ 教训：**列证据表时必须核对是否覆盖全部候选**——漏一行就会把因果链指错一个提交，
+而「谁引入的」正是后续排查的起点。
