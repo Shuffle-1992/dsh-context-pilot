@@ -287,6 +287,8 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
         M3, effEnabled, criticalCapOf,
         /* measureRatio 的宿主委托在下方 M3 接线处才声明 ⇒ 箭头包装（同上打破 TDZ）。 */
         measureRatio: (session) => (m3Ctl ? m3Ctl.measureRatio(session) : { ok: false, error: 'm3-module-pending' }),
+        /* R16.1：压缩自检回执按 sid 存（M3 域内）；M2 消费**本会话**的那份。 */
+        takeCompactVerify: (sid) => (m3Ctl ? m3Ctl.takeCompactVerify(sid) : null),
         getRangeApi: () => rangeApi,
         getCompactToolApi: () => compactToolApi,
         getEffortApi: () => effortApi,

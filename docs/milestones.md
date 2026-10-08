@@ -1678,3 +1678,27 @@ Agent 只在 3 个**语义档位**里选，选错的代价被夹取逻辑兜住�
   「拿不到活值不编数字」的护栏收窄为「当前窗口 token 数」（档位比例是模块常量，允许写死在教学里）。
 - 部署：`compact-range/compact-tool/m3/m2/host` 全部 toggle 热换；`plugin/package.json` 的
   description 变更随下次重启生效。
+
+### R16.1 压缩自检回执按 sid 存（多会话并发压缩互不覆盖）—— ✅ 已实施（2026-10-08）
+
+**用户问题**：「如果不同会话同时调用工具，是否正常工作？」——核对代码后确认：**意图/档位/idle 防重入
+都按 sid 隔离 ✓**，唯一例外是压缩自检回执（`lastCompactVerify` 全局单槽）：两会话几乎同时完成压缩时，
+后完成者**覆盖**先完成者的回执 ⇒ 前者的 Agent 看不到自己的回执（压缩本身不受影响，仅自检提示丢失）。
+用户指示补上（R16.1）。
+
+**实现**：
+- `m3.compact.mjs`：`verifyBySid`（sid → 回执，**有界化**：超出 `SET_CAP` 淘汰最旧）+
+  `setCompactVerify(sid, v)`（写入 + 全局镜像 `lastCompactVerify` 同步更新）+
+  `takeCompactVerify(sid)`（取本会话未读回执并置 read）；三处回执产出点全部改走 `setCompactVerify`；
+  M3 出口新增 `setCompactVerify`/`takeCompactVerify`。
+- `host.impl.mjs`：给 M2 注入 `takeCompactVerify: (sid) => m3Ctl?.takeCompactVerify(sid)`（箭头包装打破 TDZ）。
+- `m2.inject.mjs`：`takeCompactReceipt(sid)` 改走注入的 `takeCompactVerify`；三处消费点传 sid。
+- ⚠️ **TDZ 修复**：`sid` 原先在用量行分支里才解析，而非首步回执路径（R15.4）引用它会踩
+  ReferenceError ⇒ 外层 catch ⇒ `{skip:'error'}` **整条注入静默丢失**。`sidEarly` 提前解析
+  （buildInjection 入口处），三个消费点统一用它。
+
+**验证**：contract **369** + static 61 + report 59 + boot 21 = **510 断言**全绿；
+**变异 2/2 被捕获**（回执退回全局单槽 / 消费不置 read）——第一轮变异逃逸暴露出
+「桩测不到 M3 写入侧」的盲区，已补**行为级**测试（真跑 M3 域的 set/take，断言 A 111 / B 222 互不覆盖、
+读到即置 read、全局镜像保留）后全部捕获。
+**部署**：`m3/m2/host` toggle 热换。

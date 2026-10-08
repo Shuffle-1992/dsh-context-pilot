@@ -60,6 +60,35 @@ export function createM3Compaction(deps) {
     return { ok: true, used, surface, window, ratio, measure: m.value };
   };
 
+  /* ═══ R16.1：压缩自检回执按 sid 存 ═══
+   * 多会话并发压缩时，全局单槽 `lastCompactVerify` 会被后完成的会话覆盖 ⇒ 另一个会话的
+   * Agent 看不到自己的回执（压缩本身不受影响，但「工具完成后自检」在那条会话失效）。
+   * `verifyBySid`：每会话一份（有界化：SET_CAP，超出淘汰最旧）；
+   * `lastCompactVerify`：保留为「最近一次」的全局镜像（HUD/报告口径不变，兼容旧取证习惯）。 */
+  const setCompactVerify = (sid, v) => {
+    try {
+      const key = String(sid ?? 'unknown');
+      state.m3.verifyBySid = state.m3.verifyBySid ?? {};
+      state.m3.verifyBySid[key] = v;
+      const keys = Object.keys(state.m3.verifyBySid);
+      if (keys.length > SET_CAP) {
+        const oldest = keys.reduce((a, b) => ((state.m3.verifyBySid[a]?.at ?? '') <= (state.m3.verifyBySid[b]?.at ?? '') ? a : b));
+        if (oldest !== key) delete state.m3.verifyBySid[oldest];
+      }
+      state.m3.lastCompactVerify = v;
+    } catch { /* 吞（留痕失败不影响压缩本身） */ }
+  };
+  /** M2 域消费回执：取**本会话**的未读回执，读到即置 read（一次性）。 */
+  const takeCompactVerify = (sid) => {
+    try {
+      const key = String(sid ?? 'unknown');
+      const v = state.m3.verifyBySid?.[key];
+      if (!v || v.read) return null;
+      v.read = true;
+      return v;
+    } catch { return null; }
+  };
+
   /**
    * 执行一次压缩：**优先自选保留范围**（近端原样保留、更早转摘要），失败则按语义退回官方策略。
    * R16：保留预算按**会话档位**（Agent 经工具选择的 tier，会话级持久）解析；未选/非法 ⇒ standard。
@@ -184,11 +213,13 @@ export function createM3Compaction(deps) {
       if (!wanted && ratio < effCritical) return;
       const compaction = resolveCompactionFor(agent);
       if (!compaction.service) {
-        /* R15：**未执行**也要留回执——这是模型自检的唯一依据。 */
-        state.m3.lastCompactVerify = {
+        /* R15：**未执行**也要留回执——这是模型自检的唯一依据。
+         * R16.1：回执按 sid 存（`verifyBySid`），多会话并发压缩时各自有各自的回执；
+         * `lastCompactVerify` 保留为「最近一次」的全局镜像（HUD/报告口径不变）。 */
+        setCompactVerify(sid, {
           at: new Date().toISOString(), sessionId: sid, state: 'not-executed',
           why: 'no-compaction-service', trigger: wanted ? 'context-overflow' : 'pressure', read: false,
-        };
+        });
         log('warn', `M3.5 pre-step 先压：解析不到作用域 compaction，跳过（意图保留待下次）`);
         return;
       }
@@ -230,7 +261,7 @@ export function createM3Compaction(deps) {
        * 工具只登记、执行在这里 ⇒ **回执由这里产出**，M2 域在下一次注入时把它送给模型。
        * 这是把「工具回 ok 但实际没执行」变成**模型可见**的唯一手段（2026-10-08 真机踩过：
        * M3 域加载失败两版，工具一直回 ok/scheduled，压缩一次都没发生，而模型毫无察觉）。 */
-      state.m3.lastCompactVerify = {
+      setCompactVerify(sid, {
         at: new Date().toISOString(),
         sessionId: sid,
         state: result != null ? 'executed' : 'no-need',
@@ -243,7 +274,7 @@ export function createM3Compaction(deps) {
         officialWhy: out.officialWhy ?? null,
         ms: Date.now() - t0,
         read: false, // M2 域读到后置 true（一次性回执）
-      };
+      });
       /* R5 取证口径：rangeSource 说明**实际用了哪条保留策略**（own=自选范围 / official=官方 overflow 兜底 /
        * own+official=自选后仍越线再收口 / none=判定无需压）。retainBudget 是自选预算（token）。 */
       const rangeInfo = {
@@ -301,7 +332,7 @@ export function createM3Compaction(deps) {
       const code = errCodeOf(e);
       state.m3.preStepErrors[code] = (state.m3.preStepErrors[code] ?? 0) + 1;
       /* R15：失败同样留回执（模型要能看见「未执行 + 原因」）。 */
-      state.m3.lastCompactVerify = { at: new Date().toISOString(), state: 'not-executed', why: code, read: false };
+      setCompactVerify(sid, { at: new Date().toISOString(), sessionId: sid, state: 'not-executed', why: code, trigger: 'pressure', read: false });
       /* ⚠️ 2026-10-08：此前**只记错误码、错误正文只进 log**——压缩全线失败（preStepOk=0）
        * 时报告里看不到原因，无法定位。现保留最近一次失败的完整信息。 */
       state.m3.lastPreStepError = {
@@ -406,5 +437,5 @@ export function createM3Compaction(deps) {
     }
   };
 
-  return { measureRatio, compactWithOwnRange, preStepCompaction, idleSweep };
+  return { measureRatio, compactWithOwnRange, preStepCompaction, idleSweep, setCompactVerify, takeCompactVerify };
 }

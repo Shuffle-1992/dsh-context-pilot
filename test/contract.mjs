@@ -1592,7 +1592,7 @@ console.log('\n== 6.20a R16 压缩档位（compact-range.mjs） ==');
 }
 console.log('\n== 6.20 工具后自检回执 + 思考强度可切性 ==');
 const m2Mod = await import(pathToFileURL(join(PLUGIN, 'm2.inject.mjs')).href);
-const mkM2 = (state, measure) => m2Mod.createM2Injection({
+const mkM2 = (state, measure, takeVerify) => m2Mod.createM2Injection({
   state, log: () => {}, msg: (e) => String(e?.message ?? e), pick: (...a) => a.find((x) => x != null),
   schedule: () => {}, svc: () => null,
   tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
@@ -1600,28 +1600,45 @@ const mkM2 = (state, measure) => m2Mod.createM2Injection({
   M3: { criticalRatio: 0.85, markerMinRatio: 0.3, effortEnabled: false },
   effEnabled: () => true, criticalCapOf: () => 0.8,
   measureRatio: measure ?? (() => ({ ok: true, used: 500000, surface: 300000, window: 1000000, ratio: 0.5, measure: {} })),
+  /* R16.1：回执消费注入（生产环境是宿主的箭头包装 → m3Ctl.takeCompactVerify）。 */
+  takeCompactVerify: takeVerify ?? (() => null),
   getRangeApi: () => ({ RETAIN_RATIO: 0.16 }), getCompactToolApi: () => null, getEffortApi: () => null,
   getCreateUserMessage: () => () => ({ fake: 'user-message' }), SOURCE_KIND: 'context-pilot',
 });
 const agent = { session: { id: 'selfcheck-1' }, id: 'selfcheck-1' };
+/* R16.1：回执按 sid 存（M3 域 verifyBySid）⇒ 测试桩直接提供 takeCompactVerify(sid)。
+ * 语义必须与 M3 一致：返回**同一对象**（按引用），消费时在它上面置 read（可变共享状态）。
+ * 桩把 box 挂在返回的函数上（`.box`）供断言检查。 */
+const stubVerify = (v) => {
+  const fn = (sid) => {
+    if (!fn.box || sid !== 'selfcheck-1') return null;
+    if (fn.box.read) return null;
+    fn.box.read = true;
+    return fn.box;
+  };
+  fn.box = v ? { ...v, read: false } : null;
+  return fn;
+};
 
 for (const [st, must] of [
   ['executed', /【压缩自检】.*已执行.*省 ~64\.6K token/],
   ['no-need', /【压缩自检】.*已执行但判定无需压缩/],
   ['not-executed', /【压缩自检】[\s\S]*未执行[\s\S]*再调用一次[\s\S]*compact_context/],
 ]) {
-  const state = { m2: { skips: {}, injections: 0 }, m3: { lastCompactVerify: { at: new Date().toISOString(), state: st, shadowedTokens: 64640, rangeSource: 'own', ms: 2400, skipWhy: 'nothing-to-compact', why: 'no-compaction-service', read: false } } };
-  const api = mkM2(state);
+  const v = { at: new Date().toISOString(), sessionId: 'selfcheck-1', state: st, shadowedTokens: 64640, retainBudget: 160000, tier: 'standard', rangeSource: 'own', ms: 2400, skipWhy: 'nothing-to-compact', why: 'no-compaction-service' };
+  const state = { m2: { skips: {}, injections: 0 }, m3: {} };
+  const take = stubVerify(v);
+  const api = mkM2(state, undefined, take);
   const out = await api.buildInjection({ agent, step: 1, turn: 1 });
   ok(`自检回执按状态注入（${st}）`, must.test(out?.text ?? ''), `实际：${String(out?.text ?? '').slice(0, 120)}`);
-  const again = await api.buildInjection({ agent, step: 1, turn: 1 });
-  ok(`自检回执是一次性的（${st} 不重复刷屏）`, !/【压缩自检】/.test(again?.text ?? ''),
-    '回执每轮重复 ⇒ 噪声，且会掩盖新的回执');
+  /* R16.1：读到即置 read（一次性语义落在 M3 域的 verifyBySid 上）。 */
+  ok(`自检回执是一次性的（${st} 不重复刷屏）`, take.box.read === true, '消费后未置 read ⇒ 回执每轮重复刷屏');
 }
 {
   /* 最坏情况：量测失败（= M3 域挂掉，正是真机踩过的形态）——仍然要把「未执行」送到模型眼前。 */
-  const state = { m2: { skips: {}, injections: 0 }, m3: { lastCompactVerify: { at: new Date().toISOString(), state: 'not-executed', why: 'm3-module-missing', read: false } } };
-  const api = mkM2(state, () => ({ ok: false, error: 'm3-module-pending' }));
+  const v = { at: new Date().toISOString(), sessionId: 'selfcheck-1', state: 'not-executed', why: 'm3-module-missing' };
+  const state = { m2: { skips: {}, injections: 0 }, m3: {} };
+  const api = mkM2(state, () => ({ ok: false, error: 'm3-module-pending' }), stubVerify(v));
   const out = await api.buildInjection({ agent, step: 1, turn: 1 });
   ok('量测失败时**只注入自检回执**（压缩没执行这件事不得静默）',
     out?.receiptOnly === true && /【压缩自检】.*未执行.*压缩域模块未加载/.test(out?.text ?? ''),
@@ -1631,14 +1648,27 @@ for (const [st, must] of [
 }
 /* R15.4：待读回执**不等到下一轮**——非首步也要注入（回路当轮闭合）。 */
 {
-  const st = { m2: { skips: {}, injections: 0 }, m3: { lastCompactVerify: { at: new Date().toISOString(), state: 'executed', shadowedTokens: 1000, rangeSource: 'own', ms: 10, read: false } } };
-  const mid = await mkM2(st).buildInjection({ agent, step: 3, turn: 2 });
+  const v = { at: new Date().toISOString(), sessionId: 'selfcheck-1', state: 'executed', shadowedTokens: 1000, retainBudget: 80000, tier: 'light', rangeSource: 'own', ms: 10 };
+  const mid = await mkM2({ m2: { skips: {}, injections: 0 }, m3: {} }, undefined, stubVerify(v)).buildInjection({ agent, step: 3, turn: 2 });
   ok('非首步也能注入待读的压缩自检回执（R15.4：回执不等到下一轮才可见）',
     mid?.midStep === true && /【压缩自检】.*已执行/.test(mid?.text ?? ''),
     `实际：${JSON.stringify(mid)?.slice(0, 140)}`);
-  const none = await mkM2({ m2: { skips: {}, injections: 0 }, m3: {} }).buildInjection({ agent, step: 3, turn: 2 });
+  const none = await mkM2({ m2: { skips: {}, injections: 0 }, m3: {} }, undefined, () => null).buildInjection({ agent, step: 3, turn: 2 });
   ok('非首步且无回执时仍然跳过（「每轮只注一次」不被破坏）',
     none?.skip === 'not-step-1', `实际：${JSON.stringify(none)}`);
+}
+/* R16.1：回执按 sid 隔离——A 的回执不会被 B 读走，B 也读不到 A 的。 */
+{
+  const vA = { at: new Date().toISOString(), sessionId: 'sid-A', state: 'executed', shadowedTokens: 5000, rangeSource: 'own', ms: 10 };
+  const vB = { at: new Date().toISOString(), sessionId: 'sid-B', state: 'executed', shadowedTokens: 9000, rangeSource: 'own', ms: 20 };
+  const bySidV = { 'sid-A': { ...vA, read: false }, 'sid-B': { ...vB, read: false } };
+  const take = (sid) => bySidV[sid] ?? null;
+  const api = mkM2({ m2: { skips: {}, injections: 0 }, m3: {} }, undefined, take);
+  const outA = await api.buildInjection({ agent: { session: { id: 'sid-A' }, id: 'sid-A' }, step: 1, turn: 1 });
+  const outB = await api.buildInjection({ agent: { session: { id: 'sid-B' }, id: 'sid-B' }, step: 1, turn: 1 });
+  ok('R16.1 多会话并发压缩：各自的回执各自可见（A 省 5K / B 省 9K，互不覆盖）',
+    /省 ~5\.0K/.test(outA?.text ?? '') && /省 ~9\.0K/.test(outB?.text ?? ''),
+    `A：${String(outA?.text ?? '').slice(0, 90)} | B：${String(outB?.text ?? '').slice(0, 90)}`);
 }
 
 /* 思考强度：可选项必须**每轮可见**（原先只在会话最早的一次性教学里） */
@@ -1654,10 +1684,43 @@ ok('思考强度教学改为「按需可多次」（删掉「1-2 次为宜」的
   !/1-2 次/.test(effBriefNow) && /阶段变化/.test(effBriefNow) && /可以切多次/.test(effBriefNow) && /冷却/.test(effBriefNow),
   '仍未按用户目标（长任务按实际需求可多次）改写教学');
 ok('M3 域在每条路径都产出执行回执（executed / no-need / not-executed）',
-  /state\.m3\.lastCompactVerify = \{[\s\S]{0,260}state: result != null \? 'executed' : 'no-need'/.test(m3src)
+  /setCompactVerify\(sid, \{[\s\S]{0,300}state: result != null \? 'executed' : 'no-need'/.test(m3src)
   && /state: 'not-executed',\n\s+why: 'no-compaction-service'/.test(m3src)
-  && /state: 'not-executed', why: code/.test(m3src),
+  && /setCompactVerify\(sid, \{ at: new Date\(\)\.toISOString\(\), sessionId: sid, state: 'not-executed', why: code/.test(m3src),
   '缺任一条路径的回执 ⇒ 那种情形下模型看不到「未执行」（正是真机静默失效的形态）');
+ok('R16.1 回执按 sid 存取（并发压缩互不覆盖）+ 全局镜像保留',
+  /const setCompactVerify = \(sid, v\) =>/.test(m3src)
+  && /state\.m3\.verifyBySid = state\.m3\.verifyBySid \?\? \{\};/.test(m3src)
+  && /state\.m3\.lastCompactVerify = v;/.test(m3src)
+  && /const takeCompactVerify = \(sid\) =>/.test(m3src)
+  && /v\.read = true;/.test(m3src),
+  '全局单槽会被后完成的会话覆盖 ⇒ 另一会话的 Agent 看不到自己的回执（R16.1 修的正是这个）');
+/* R16.1 行为级：真跑 M3 域的 setCompactVerify/takeCompactVerify，验证「按 sid 隔离 + 有界化」。 */
+{
+  const m3Mod = await import(pathToFileURL(join(PLUGIN, 'm3.compact.mjs')).href);
+  const st = { m3: {} };
+  const m3 = m3Mod.createM3Compaction({
+    state: st, log: () => {}, msg: (e) => String(e?.message ?? e), pick: (...a) => a.find((x) => x != null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    nfmt: (n) => String(n), errCodeOf: (e) => String(e?.code ?? e?.message ?? 'err'), schedule: () => {},
+    svc: () => null, M3: {}, effEnabled: () => true, criticalCapOf: () => 0.8,
+    resolveCompactionFor: () => ({ service: null, via: 'stub' }),
+    publishHud: () => {}, recordHudAct: () => {}, formatAct: () => 'x', clearBriefed: () => {},
+    awaitRange: async () => null, getCompactTool: () => null,
+    COMPACT_TIMEOUT_MS: 180000, SET_CAP: 200,
+  });
+  m3.setCompactVerify?.('A', { state: 'executed', shadowedTokens: 111, at: 't1' });
+  m3.setCompactVerify?.('B', { state: 'executed', shadowedTokens: 222, at: 't2' });
+  const a1 = m3.takeCompactVerify?.('A');
+  const b1 = m3.takeCompactVerify?.('B');
+  ok('R16.1 行为级：两会话各自的回执各自可见（A 111 / B 222，互不覆盖）',
+    a1?.shadowedTokens === 111 && b1?.shadowedTokens === 222,
+    `实际 A=${JSON.stringify(a1)} B=${JSON.stringify(b1)}`);
+  const a2 = m3.takeCompactVerify?.('A');
+  ok('R16.1 行为级：读到即置 read（A 第二次取为 null）', a1 && a2 === null, `实际 ${JSON.stringify(a2)}`);
+  ok('R16.1 行为级：全局镜像 lastCompactVerify 保留（HUD/报告口径不变）',
+    st.m3.lastCompactVerify?.shadowedTokens === 222, `实际 ${JSON.stringify(st.m3.lastCompactVerify)}`);
+}
 ok('宿主为「消费者模块缺失」补回执（仅当确有意图时，避免健康路径噪声）',
   /if \(compactToolApi\?\.peekIntent\?\.\(sid\)\)/.test(host)
   && /why: 'm3-module-missing'/.test(host),

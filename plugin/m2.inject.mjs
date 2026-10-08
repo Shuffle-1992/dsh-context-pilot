@@ -37,7 +37,7 @@ export function createM2Injection(deps) {
   const {
     state, log, msg, pick, schedule, svc, tryOf, nfmt, summarizeBreakdown, remember,
     M3, effEnabled, criticalCapOf, measureRatio,
-    getRangeApi, getCompactToolApi, getEffortApi, getCreateUserMessage, SOURCE_KIND,
+    getRangeApi, getCompactToolApi, getEffortApi, getCreateUserMessage, SOURCE_KIND, takeCompactVerify,
   } = deps;
 
   /* ═══════════ 一次性说明的「已讲」标记（R1：压缩后必须重讲） ═══════════
@@ -148,15 +148,15 @@ export function createM2Injection(deps) {
    *  —— 每一种都**不注入且不影响原决策**（调用方直接放行）。
    */
   /**
-   * R15：取一次「压缩自检」回执（**一次性**——读过即置 `read`，避免每轮重复）。
-   * 回执由 M3 域产生（工具只登记、执行在 pre-step）⇒ 这是「工具回 ok 但实际没执行」的**唯一可见通道**。
+   * R15→R16.1：取**本会话**的「压缩自检」回执（一次性——读过即置 `read`，避免每轮重复）。
+   * 回执由 M3 域产生（工具只登记、执行在 pre-step）⇒ 这是「工具回 ok 但实际没执行」的唯一可见通道。
+   * R16.1：回执按 sid 存（M3 域 `verifyBySid`，经宿主注入 `takeCompactVerify(sid)` 消费）——
+   * 多会话并发压缩时各自有各自的回执，不会被后完成的会话覆盖（此前是全局单槽）。
    */
-  const takeCompactReceipt = () => {
+  const takeCompactReceipt = (sid) => {
     try {
-      const v = state.m3?.lastCompactVerify;
-      if (!v || v.read) return null;
-      v.read = true;
-      return v;
+      const v = typeof takeCompactVerify === 'function' ? takeCompactVerify(sid) : null;
+      return v ?? null;
     } catch { return null; }
   };
 
@@ -189,6 +189,9 @@ export function createM2Injection(deps) {
   const buildInjection = async (payload) => {
     try {
       const { agent, turn, step, signal } = payload ?? {};
+      /* R16.1：回执按 sid 消费 ⇒ sid 必须在**所有**回执路径之前解析
+       * （原先它在用量行分支里才算，非首步回执路径引用它会踩 TDZ ⇒ 外层 catch ⇒ 整条注入静默丢失）。 */
+      const sidEarly = String(pick(agent?.session?.id, agent?.sessionId, agent?.id, 'unknown'));
       if (signal?.aborted) return { skip: 'aborted' };
       if (step !== 1) {
         /* R15.4（用户原始诉求：「工具完成后进行检查…起码 agent 自己过一遍」）：
@@ -198,7 +201,7 @@ export function createM2Injection(deps) {
          * 安全性：非首步插入 user 消息时，上一步的 tool/result 已落在 surface 里
          * ⇒ 不会把 tool_use 与它的 tool_result 分开（那才是 `INVALID_REQUEST` 的成因）。
          * 回执一次性 ⇒ 最多多注入一步，不会刷屏。 */
-        const receiptMid = renderCompactReceipt(takeCompactReceipt());
+        const receiptMid = renderCompactReceipt(takeCompactReceipt(sidEarly));
         if (!receiptMid) return { skip: 'not-step-1' };
         const msgMid = getCreateUserMessage()({
           content: [{ type: 'text', text: receiptMid }],
@@ -223,7 +226,7 @@ export function createM2Injection(deps) {
         /* R15：量测失败**不再一律静默跳过**——若手里有一条待读的压缩自检回执，就只注入回执。
          * 理由（真机教训）：量测本身依赖 M3 域；M3 域挂掉时「压缩没执行」这条最要紧的信息
          * 会跟着一起消失（2026-10-08 就是这么静默了两版）。宁可这一条没有用量行，也不能没有它。 */
-        const receiptOnly = renderCompactReceipt(takeCompactReceipt());
+        const receiptOnly = renderCompactReceipt(takeCompactReceipt(sidEarly));
         if (receiptOnly) {
           const message = createUserMessage({
             content: [{ type: 'text', text: receiptOnly }],
@@ -271,7 +274,7 @@ export function createM2Injection(deps) {
         remember(briefedBySid, sid); // C 类审查：有界化（原先无上限）
         state.m2.briefings = (state.m2.briefings ?? 0) + 1;
       }
-      const fullText = [baseText, card, brief, effBrief, renderCompactReceipt(takeCompactReceipt())].filter(Boolean).join('\n\n');
+      const fullText = [baseText, card, brief, effBrief, renderCompactReceipt(takeCompactReceipt(sidEarly))].filter(Boolean).join('\n\n');
       const message = createUserMessage({
         content: [{ type: 'text', text: fullText }],
         source: { kind: SOURCE_KIND, form: 'snapshot', sections: [{ name: SOURCE_KIND, text: fullText }] },
