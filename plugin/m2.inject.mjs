@@ -185,7 +185,28 @@ export function createM2Injection(deps) {
     try {
       const { agent, turn, step, signal } = payload ?? {};
       if (signal?.aborted) return { skip: 'aborted' };
-      if (step !== 1) return { skip: 'not-step-1' }; // 每轮只注一次（轮首快照）
+      if (step !== 1) {
+        /* R15.4（用户原始诉求：「工具完成后进行检查…起码 agent 自己过一遍」）：
+         * 注入本身仍只在轮首（每轮一次），但**待读的压缩自检回执例外**——
+         * 否则「调用工具 → 自检」的回路要等到**下一轮**才闭合，中途压缩完的 Agent 当轮看不到结果，
+         * 而「工具回 ok 但没执行」正是这样长期不被察觉的。
+         * 安全性：非首步插入 user 消息时，上一步的 tool/result 已落在 surface 里
+         * ⇒ 不会把 tool_use 与它的 tool_result 分开（那才是 `INVALID_REQUEST` 的成因）。
+         * 回执一次性 ⇒ 最多多注入一步，不会刷屏。 */
+        const receiptMid = renderCompactReceipt(takeCompactReceipt());
+        if (!receiptMid) return { skip: 'not-step-1' };
+        const msgMid = getCreateUserMessage()({
+          content: [{ type: 'text', text: receiptMid }],
+          source: { kind: SOURCE_KIND, form: 'snapshot', sections: [{ name: SOURCE_KIND, text: receiptMid }] },
+        });
+        state.m2.injections += 1;
+        state.m2.receiptMidStep = (state.m2.receiptMidStep ?? 0) + 1;
+        state.m2.lastText = receiptMid;
+        state.m2.lastAt = new Date().toISOString();
+        log('info', `M2 压缩自检回执（非首步注入，步 ${step}）：${receiptMid}`);
+        schedule('m2-inject', 500);
+        return { message: msgMid, text: receiptMid, card: false, receiptOnly: true, midStep: true };
+      }
       const createUserMessage = getCreateUserMessage();
       if (!createUserMessage || !agent?.session) {
         const key = !createUserMessage ? 'noFactory' : 'noSession';

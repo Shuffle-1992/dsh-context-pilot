@@ -984,7 +984,7 @@ ok('懒安装不受 step 门控约束（先于注入调用）',
     const g = host.indexOf('await m2Ctl.buildInjection(payload);');
     /* R12：`step !== 1` 早退已随注入主体搬进 m2.inject.mjs ⇒ 宿主判据改为
      * 「懒安装必须早于注入调用」，模块侧另行钉住「非 step1 不注入」。 */
-    return s > 0 && g > 0 && s < g && /if \(step !== 1\) return \{ skip: 'not-step-1' \};/.test(m2src);
+    return s > 0 && g > 0 && s < g && /if \(step !== 1\) \{[\s\S]{0,900}?return \{ skip: 'not-step-1' \};/.test(m2src);
   })(),
   '懒安装仍在 step!==1 早退之后 ⇒ 首步即调工具时钩子永不安装');
 ok('注入分支内不再有任何 effort 安装/注册调用（耦合已断）',
@@ -1566,6 +1566,18 @@ for (const [st, must] of [
   ok('该路径不计入 skips.measureFail（它不是「跳过」，而是「换了内容注入」）',
     state.m2.skips.measureFail === undefined, `实际 ${JSON.stringify(state.m2.skips)}`);
 }
+/* R15.4：待读回执**不等到下一轮**——非首步也要注入（回路当轮闭合）。 */
+{
+  const st = { m2: { skips: {}, injections: 0 }, m3: { lastCompactVerify: { at: new Date().toISOString(), state: 'executed', shadowedTokens: 1000, rangeSource: 'own', ms: 10, read: false } } };
+  const mid = await mkM2(st).buildInjection({ agent, step: 3, turn: 2 });
+  ok('非首步也能注入待读的压缩自检回执（R15.4：回执不等到下一轮才可见）',
+    mid?.midStep === true && /【压缩自检】.*已执行/.test(mid?.text ?? ''),
+    `实际：${JSON.stringify(mid)?.slice(0, 140)}`);
+  const none = await mkM2({ m2: { skips: {}, injections: 0 }, m3: {} }).buildInjection({ agent, step: 3, turn: 2 });
+  ok('非首步且无回执时仍然跳过（「每轮只注一次」不被破坏）',
+    none?.skip === 'not-step-1', `实际：${JSON.stringify(none)}`);
+}
+
 /* 思考强度：可选项必须**每轮可见**（原先只在会话最早的一次性教学里） */
 const suffixWithOpts = effApi.renderSuffix({ ok: true, current: 'high', efforts: ['off', 'low', 'high', 'max'] }) ?? '';
 ok('每轮后缀列出**可选档位**（不只当前档 ⇒ 时刻可切）',
@@ -1587,8 +1599,7 @@ ok('宿主为「消费者模块缺失」补回执（仅当确有意图时，避�
   /if \(compactToolApi\?\.peekIntent\?\.\(sid\)\)/.test(host)
   && /why: 'm3-module-missing'/.test(host),
   '消费者模块缺失时不留痕 ⇒ 又回到「工具回 ok 但没人说没执行」的真机形态');
-ok('思考强度工具结果带回读与自检指引（applied + verify）',
-  /applied: 'next-request',/.test(effort) && /applied: 'already',/.test(effort)
+ok('思考强度工具结果带回读与自检指引（applied + verify）',  /applied: 'next-request',/.test(effort) && /applied: 'already',/.test(effort)
   && /下一步的用量行后缀会显示当前实际档位/.test(effort),
   '工具只回 {ok,effort} ⇒ 模型无法自检是否真的生效（与压缩那个盲区同源）');
 
