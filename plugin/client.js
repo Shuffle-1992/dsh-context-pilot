@@ -765,15 +765,17 @@ window.__ModuleLoader__.load({
 					: "换档冷却：已就绪",
 				"Agent 可调用 set_reasoning_effort 工具自主换档（本次任务内立即生效）",
 			].join("\n");
-			/* 小尺寸态图标（zcode-dispatch 风格的极简火花）：14×14 内联 SVG——
-			 * 圆底 + 三层压缩线（与 plugin/icon.svg 同构：压缩层叠语义），
-			 * 颜色随状态（cooling=warn 橙 / ready=info 蓝）。宽态仍是 6px 状态点。 */
+			/* 小尺寸态专用图标（R16.5e 定稿）：**实色圆角方块 + 白色思考火花**。
+			 * 语义区分（用户指出）：这是**智能思考**的 chip，图标必须是思考语义（火花/星芒），
+			 * 不能沿用插件图标的压缩层叠（那是压缩域的语义）。
+			 * 实底提供对比度（上一版半透明圆底在 14px 下看不清）；
+			 * 四角星 = 思考/智能的通用符号，14px 下依然锐利；
+			 * 底色随状态（cooling=warn 橙 / ready=info 蓝）。 */
 			const iconColor = cooling ? "#ff9f0a" : "#4176e6";
-			const iconSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" width="14" height="14">`
-				+ `<circle cx="10" cy="10" r="9" fill="${iconColor}" fill-opacity="0.16"/>`
-				+ `<rect x="5" y="6.2" width="10" height="1.8" rx="0.9" fill="${iconColor}"/>`
-				+ `<rect x="6.8" y="9.1" width="6.4" height="1.8" rx="0.9" fill="${iconColor}" fill-opacity="0.7"/>`
-				+ `<rect x="8.4" y="12" width="3.2" height="1.8" rx="0.9" fill="${iconColor}" fill-opacity="0.42"/></svg>`;
+			const iconSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" width="14" height="14">`
+				+ `<rect x="0.5" y="0.5" width="13" height="13" rx="3.5" fill="${iconColor}"/>`
+				+ `<path d="M7 2.6 L8.15 5.85 L11.4 7 L8.15 8.15 L7 11.4 L5.85 8.15 L2.6 7 L5.85 5.85 Z" fill="#FFFFFF"/>`
+				+ `<circle cx="10.6" cy="3.9" r="1" fill="#FFFFFF" fill-opacity="0.85"/></svg>`;
 			const iconUrl = `data:image/svg+xml;utf8,${encodeURIComponent(iconSvg)}`;
 			/* ⑦（第三次修正，最终形态）：**三个元素全部渲染**——点（宽态）、压缩图标（窄态）、
 			 * 文字（宽态）——由注入的 `@container (width<=560px)` CSS 决定显隐。
