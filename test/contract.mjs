@@ -37,6 +37,9 @@ const read = (f) => readFileSync(join(PLUGIN, f), 'utf8');
 console.log('\n== 1. FACE_NAME 一致性（wire ↔ client）==');
 const wire = read('wire.host.mjs');
 const client = read('client.js');
+/* R11：M5 HUD 域（含 getHud 聚合响应主体）已抽 plugin/m5.hud.mjs ⇒ 相关断言改指模块。
+ * ⚠️ 必须在此处（文件顶部）声明：getHud 相关断言在文件前部，晚声明会 TDZ。 */
+const m5src = read('m5.hud.mjs');
 
 const wireFace = /export const FACE_NAME = ['"]([^'"]+)['"]/.exec(wire)?.[1];
 const clientFace = /const HUD_FACE = ["']([^"']+)["']/.exec(client)?.[1];
@@ -256,8 +259,8 @@ ok('chip 仅在 effortEnabled 开启时显示',
 ok('chip 读 host 的 effortEnabled 布尔（开关状态与数据分离，S9）',
   /env\.effortEnabled === true/.test(client),
   'chip 仍用 effort.ok 推断开关 ⇒ 无法区分「开关关闭」与「读档失败」');
-ok('host getHud 独立返回 effortEnabled（与 effort 数据分离）',
-  /effortEnabled: effOn,/.test(host),
+ok('getHud 独立返回 effortEnabled（与 effort 数据分离，查 m5.hud.mjs）',
+  /effortEnabled: effOn,/.test(m5src),
   'getHud 未独立返回开关状态 ⇒ S9 未落地');
 ok('wire 的方法签名声明了 effortEnabled（三端一致）',
   /effortEnabled:boolean/.test(wire),
@@ -347,16 +350,16 @@ const hostNoComment = host.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$
 /* client 也常需要在「不得出现某字符串」类断言里剥注释——本轮已两次栽在这一点上：
  * 解释性注释里引用了被禁的 token/文案，导致断言被自己的说明判失败。 */
 const clientNoComment = client.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
-ok('getHud 按 sid 精确过滤（不再走血统链）',
-  /const filtered = sid \? list\.filter\(\(a\) => a\.sid === sid\) : list;/.test(host),
+ok('getHud 按 sid 精确过滤（不再走血统链，查 m5.hud.mjs）',
+  /const filtered = sid \? list\.filter\(\(a\) => a\.sid === sid\) : list;/.test(m5src),
   '过滤仍走 lineage 链 ⇒ 会命中别的会话的记录');
 ok('血统链机制已整体退役（noteSessionId / state.m5.lineage / lastSid）',
   !/noteSessionId/.test(hostNoComment) && !/state\.m5\.lineage/.test(hostNoComment) && !/state\.m5\.lastSid/.test(hostNoComment),
   '血统链残留 ⇒ 跨会话误连可复活');
 ok('hud-acts.json 不再持久化 lineage 键', !/lineage: state\.m5\.lineage/.test(host),
   '仍写 lineage ⇒ 假边继续累积');
-ok('getHud 返回结构化明细 actsDetail（带 at 供完整时间渲染）',
-  /actsDetail: filtered\.slice\(0, 8\)\.map\(\(a\) => \(\{ at: a\.at, text: a\.text \}\)\)/.test(host),
+ok('getHud 返回结构化明细 actsDetail（带 at 供完整时间渲染，查 m5.hud.mjs）',
+  /actsDetail: filtered\.slice\(0, 8\)\.map\(\(a\) => \(\{ at: a\.at, text: a\.text \}\)\)/.test(m5src),
   '缺 actsDetail ⇒ client 无法渲染完整日期时间');
 ok('全局兜底字段已退役（actsGlobal / hudLastActGlobal 三端清零）',
   !/actsGlobal/.test(hostNoComment) && !/hudLastActGlobal/.test(hostNoComment) &&
@@ -761,7 +764,7 @@ ok('生效上限抽成单一来源 criticalCapOf（= 引擎阈值 − 余量，�
 for (const [label, re, src] of [
   ['pre-step 门控（m3.compact.mjs）', /const effCritical = Math\.min\(M3\.criticalRatio, criticalCapOf\(agent\)\);/, m3src],
   ['idle safety-net 门控（m3.compact.mjs）', /if \(mr\.ratio < Math\.min\(M3\.criticalRatio, criticalCapOf\(agent\)\)\) return;/, m3src],
-  ['getHud 下发（host）', /criticalCap: criticalCapOf\(targetAgent\),/, host],
+  ['getHud 下发（m5.hud.mjs）', /criticalCap: criticalCapOf\(targetAgent\),/, m5src],
 ]) {
   ok(`强制线三处同源：${label}`, re.test(src), '该处未用 criticalCapOf ⇒ 与其余两处不一致');
 }
@@ -1351,6 +1354,30 @@ ok('checkEffort 把**空数组**当「取不到」而非「可选集为空」（
 ok('checkEffort 与 renderBrief 用同一判据（length 而非 isArray）',
   /Array\.isArray\(eff\.efforts\) && eff\.efforts\.length \? eff\.efforts\.join\('\/'\) : null/.test(effort),
   '两处判据不一致 ⇒ 教学说有可选档、校验却全否决');
+
+/* ═══ R11 解耦第三刀：M5 HUD 域 ═══ */
+ok('R11 M5 HUD 域已抽为叶子模块，且宿主不再重复实现',
+  /import\(`\.\/m5\.hud\.mjs\?ts=\$\{IMPL_TS\}`\)/.test(host)
+  && /const buildHudResponse = async \(sid\) => \(m5Ctl \?/.test(host)
+  && /onGetHud: async \(sid\) => buildHudResponse\(sid\),/.test(host)
+  /* 查「M5 独有产物是否回流宿主」（函数名改名即可躲过，故查实现特征）。 */
+  && !/state\.m5\.hudPollReq = \{/.test(hostNoComment)
+  && !/hudActsPath/.test(hostNoComment)
+  && !/const formatAct = \(reason, tokens, at\) => \{/.test(hostNoComment)
+  && !/bfTries/.test(hostNoComment),
+  '宿主仍带 M5 实现 ⇒ 两套真相（本次解耦要消除的）');
+ok('M5 模块只允许 node: 内置 import（相对 import 会成环/破坏叶子约束）',
+  !/^\s*import .*\bfrom ['"]\.\//m.test(m5src) && !/require\(/.test(m5src) && /from 'node:fs'/.test(m5src),
+  'M5 模块 import 了相对路径 ⇒ 依赖图约束被打破（static.mjs 的叶子清单会失效）');
+ok('M5 模块未就绪时不中断：三个发布口 no-op、getHud 返回明确错误',
+  /const publishHud = \(patch\) => \{ if \(m5Ctl\) m5Ctl\.publishHud\(patch\); \};/.test(host)
+  && /const formatAct = \(reason, tokens, at\) => \(m5Ctl \? m5Ctl\.formatAct\(reason, tokens, at\) : ''\);/.test(host)
+  && /m5-module-pending/.test(host)
+  && /M5 HUD 模块加载失败（吞/.test(host),
+  '未做空值降级 ⇒ 激活期会 TypeError（apply 不是 async，不能 await）');
+ok('M5 模块构造即装载历史（跨重启显示不因搬模块而丢）',
+  /loadStoredActs\(\);\n\n  return \{ hudReasonLabel/.test(m5src) && /state\.m5\.acts = loaded\?\.acts \?\? \[\];/.test(m5src),
+  '模块不再构造即装载 ⇒ 重启后弹窗空态（原「激活即恢复」承诺丢失）');
 
 /* ═══════════ 6f. 压缩两条路径的**顺序**契约（F1/F5 真缺陷） ═══════════ */
 console.log('\n== 6f. pre-step / idle 顺序契约 ==');

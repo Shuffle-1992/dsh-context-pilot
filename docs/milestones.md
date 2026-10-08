@@ -1338,3 +1338,33 @@ deps 对象是**立即构造**的，而 `schedule` 在文件更后面才定义�
 **验证**：contract **308** + static 48 + report 59 = **415 断言**全绿；**变异 6/6 被捕获**。
 新绊线刻意**不查函数名**（改名即可躲过），改查「编排层独有产物是否回流宿主」：
 `state.m3.lastPreStep = {` / `sweepInFlight` / `M3.sweepMinIntervalMs` / `state.m3.actErrors[code]`。
+
+### R11 解耦第三刀（M5 HUD 域）+ **新增宿主启动冒烟测试**（本项目最大验证盲区）—— ✅ 已实施（2026-10-08）
+
+**抽出 `plugin/m5.hud.mjs`**：存储（`hud-acts.json` 读写 + 去重记录）、发布（`publishHud`）、
+文案（`hudReasonLabel`/`formatAct`）、聚合响应（`buildHudResponse`，原 `onGetHud` 主体）、
+启动回填（`republishFromReport`，原 `bfOnce` 主体）。宿主只留接线 + 重试节奏 + face 注册。
+`host.impl.mjs` **1550 → 1387 行**。
+
+**顺序依据（R10 的发现）**：R10 之后 M3 的 deps 里出现 `publishHud`/`recordHudAct`/`formatAct`
+⇒ **被依赖者必须先独立** ⇒ M5 → M2 → M1 → core。M5 是「跨域聚合视图」（getHud 要同时回答
+压缩历史/占用/生效上限/思考档位），故四条跨域依赖**全部注入**；它是依赖图叶子，只是依赖面宽。
+
+#### ⚠️ 本次踩到一个**结构性真 bug**，并因此补上了缺失的验证层
+
+抽取时接线块的插入点算错一位，把 `let m5Ctl … const m5Ready = import(...)` 一整块
+**插进了 `schedule()` 的函数体内部**（残留的 `};` 落到接线块之后——语法完全合法）。
+后果是**连锁静默失效**：M5 模块从未加载；`publishHud`/`recordHudAct`/`formatAct`
+对 M3 接线**不在作用域** ⇒ M3 模块加载失败 ⇒ **压缩全链路静默失效**。
+而 `node --check` 通过、**423 条源断言全部通过**——因为它们只查文本模式、不执行代码。
+真机证据：激活后 `m5.lastPublish` 恒 `null`、`hudLastAct` 恒空串（对照切换前正常）。
+
+⇒ **新增 `test/boot.mjs`：宿主启动冒烟测试**（第四套）。用桩 ctx 真跑
+`apply(ctx, {}, {pluginDir, reportPath})`，然后：真注册 HUD 面 → **真调 `getHud(null)` 必须
+`ok:true`** → 校验 `criticalCap`/occupancy/effortEnabled 三线 → **真调 pre-step handler 不抛** →
+有历史时**启动回填必须真的发布过**（`m5.lastPublish.step === 'ok'`）。
+**变异验证：把 `};` 移回去复现原缺陷 ⇒ boot.mjs 报 6 条失败，而 `node --check` 依然通过**
+——两层验证的差距被当场量化。报告写临时目录、`hud-acts.json` 只读不写（无副作用）。
+
+**验证**：contract **313** + static 51 + report 59 + boot **14** = **437 断言**全绿；
+M5 域变异 **6/6 被捕获**；真机复核：`m5.lastPublish ok` + 主行由 `hud-acts.json` 回填成功。

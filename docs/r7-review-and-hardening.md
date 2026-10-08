@@ -132,7 +132,7 @@ R4 只删掉了「**伪造用户消息自动拉起**」这条投递链，但 **m
 | --- | --- | --- |
 | ~~抽「阈值核心」为只读服务~~ **✅ 已实施（R8）** | —— | ~~第 1 步~~ **已完成** |
 | ~~拆 M3 压缩域~~ **✅ 已完成（R9 + R10）** | R9 抽执行核心、R10 搬编排层并把五个跨域回调显式注入（见 §10/§11） | ~~第 2 步~~ **已完成** |
-| **拆 M1 快照 / M5 HUD** | `buildSnapshot` 直接读 m2/m3/m5 三域 state；`onGetHud` 是**跨域聚合视图**（需 `criticalCapOf`(M3) + `measureRatio`(M3) + `effortApi.hudPayload`(effort)）⇒ 不是独立域 | 第 3 步 |
+| **拆 M1 快照 / M5 HUD** | `buildSnapshot` 直接读 m2/m3/m5 三域 state；`onGetHud` 是**跨域聚合视图**（需 `criticalCapOf`(M3) + `measureRatio`(M3) + `effortApi.hudPayload`(effort)）⇒ 不是独立域。**M5 已于 R11 抽出**（跨域依赖全部注入）；**M1 待做** | 第 3 步（一半完成） |
 | **`host.impl.mjs` 拆分到 ≤250 行** | 上述三步做完才可能；本批已顺手把 1 个域内死函数与 1 个跨域审计块清掉（净减约 40 行，同时新增了 6 处缺陷修复的注释） | D1 任务书 |
 | **报告尾部对账的全量读放大** | 检测到「他方写入」后每次写都全量读写 MB 级报告；仅在**僵尸实例共存**时触发。修它需要改多写入者协议（写入者标识 + 分段追加），风险高于收益 | 观察 |
 | **DOM 注入的三处脆弱性**（中文 aria-label / CSS-module 哈希类名 / 5s 轮询兜底） | 宿主无官方插槽，这是**结构性代价**，不是本插件的 bug；改宿主文案或升级即失效，只能靠多重回退兜底（已有多重） | 接受 |
@@ -291,3 +291,67 @@ R9 时接线块在文件前部（`IMPL_TS` 之后）；R10 起必须**下移到 
   模块里退掉 `sweepInFlight` 释放 / 冷却退回发车前记录 / 模块丢 `?ts=`。
 - 新绊线刻意**不查函数名**（改名就能躲过），而是查「编排层的独有产物是否回流宿主」：
   `state.m3.lastPreStep = {`、`sweepInFlight`、`M3.sweepMinIntervalMs`、`state.m3.actErrors[code]`。
+
+---
+
+## 12. R11 解耦第三刀：M5 HUD 域 + **补上缺失的验证层（宿主启动冒烟）**（2026-10-08）
+
+### 12.1 抽出 `plugin/m5.hud.mjs`
+
+搬走五块：存储（`hud-acts.json` 读写 cap 50 + 运行期去重 `recordHudAct`）、发布（`publishHud`）、
+文案（`hudReasonLabel` / `formatAct`）、**聚合响应**（`buildHudResponse` ← 原 `onGetHud` 主体）、
+**启动回填**（`republishFromReport` ← 原 `bfOnce` 主体）。宿主只剩接线 + 重试节奏 + face 注册。
+`host.impl.mjs` **1550 → 1387 行**。
+
+**顺序依据**（R10 搬完才发现的）：M3 的 deps 里出现了 M5 的三个回调 ⇒ **被依赖者必须先独立**。
+M5 是「跨域聚合视图」——`getHud` 要同时回答压缩历史（本域）/ 占用（M3 的 `measureRatio`）/
+生效上限（R8 的 `criticalCapOf`，client 据此**钳制并落盘**用户配置）/ 思考档位（effort 的 `hudPayload`）
+⇒ 四条跨域依赖**全部注入**。它仍是依赖图叶子（只 `node:` 内置 import），只是依赖面宽。
+
+**打破声明顺序环**：M3 需要 M5 的三个回调、M5 需要 M3 的 `measureRatio`，两个接线块谁在前都会 TDZ
+⇒ 用**箭头包装**（运行时才取，两个 const 届时都已初始化）。这类环在「谁被依赖谁先独立」的顺序里
+是必然会遇到的，记下来备用。
+
+### 12.2 ⚠️ 搬模块时踩到结构性真 bug，并因此补上了本项目最大的验证盲区
+
+接线块的插入点算错一位，把 `let m5Ctl … const m5Ready = import(…)` 一整块**插进了 `schedule()`
+的函数体内部**（残留的 `};` 落到接线块之后——**语法完全合法**）。后果是**连锁静默失效**：
+
+- M5 模块从未加载（弹窗无数据、启动回填不跑）；
+- `publishHud` / `recordHudAct` / `formatAct` 对 M3 接线**不在作用域** ⇒ M3 模块加载失败
+  ⇒ **压缩全链路静默失效**；
+- `node --check` 通过、**423 条源断言全部通过**——它们只查文本模式，不执行代码。
+
+真机证据：切换后 `m5.lastPublish` 恒 `null`、`hudLastAct` 恒空串（对照切换前是 `ok` + 有主行）。
+定位手段是**读报告时间线**（不是猜）：04:26 正常 / 04:28 激活后全空。
+
+⇒ **新增第四套测试 `test/boot.mjs`：宿主启动冒烟**。用桩 ctx 真跑
+`apply(ctx, {}, {pluginDir, reportPath})`，然后：
+
+| 断言 | 它证明什么 |
+| --- | --- |
+| HUD 面经 `ctx.provide` 注册成功 | 接线块在顶层、face 注册可达 |
+| **真调 `getHud(null)` 必须 `ok:true`** | M5 模块构造完成；接线没被嵌进别的函数 |
+| `criticalCap` 是 (0,1] 的数 | 阈值核心（R8）接线可达 |
+| `occupancyRatio`/`occupancyWindow` 字段在 | 占用读数（M3 的 measureRatio）接线可达 |
+| `effortEnabled` 是布尔 | effort HUD 载荷接线可达 |
+| 四个监听器注册 + **真调 pre-step handler 不抛且放行** | M3/effort/compact-tool 三条接线可达 |
+| 有历史时 `m5.lastPublish.step === 'ok'` | 启动回填**真的跑过**（原缺陷的精确现场） |
+| 报告落盘且 history 非空 | 报告管线在本进程内可达 |
+
+**变异验证（这一层的价值证明）**：把 `};` 移回去复现原缺陷 ⇒ **boot.mjs 报 6 条失败，
+而 `node --check` 依然通过**——两层验证的差距被当场量化。
+副作用边界：报告写**临时目录**，`hud-acts.json` **只读不写**（临时报告无 `m3-act` ⇒ 合并分支不触发）。
+
+### 12.3 教训（与 R7 的 `d.ratio` 同类，但更深一层）
+
+- R7 的教训是「`node --check` 看不见未定义标识符」；
+- R11 的教训是「**源断言看不见「代码在不在正确的函数里」**」——一个插入点算错一位，
+  就能让整条链路静默失效而所有静态检查全绿。
+- ⇒ 从现在起，**任何「搬出去」的改动，都必须由 boot.mjs 这类真执行测试兜底**；
+  源断言只负责钉「实现长什么样」，不负责「它到底跑不跑得到」。
+
+### 12.4 验证
+
+contract **313** + static 51 + report 59 + boot **14** = **437 断言**全绿；
+M5 域变异 **6/6 被捕获**；真机复核：`m5.lastPublish ok` + 主行由 `hud-acts.json` 回填成功。

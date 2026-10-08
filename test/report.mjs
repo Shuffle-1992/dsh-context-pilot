@@ -37,6 +37,8 @@ const ok = (name, cond, detail) => {
 const host = readFileSync(join(PLUGIN, 'host.impl.mjs'), 'utf8');
 /* R3（2026-10-08）：智能思考功能域已抽独立模块，相关断言随之改指向模块。 */
 const effort = readFileSync(join(PLUGIN, 'effort.mjs'), 'utf8');
+/* R11：M5 HUD 域（含 getHud 聚合响应主体 + 启动回填主体）已抽 plugin/m5.hud.mjs ⇒ 断言改指模块。 */
+const m5 = readFileSync(join(PLUGIN, 'm5.hud.mjs'), 'utf8');
 
 /* ═══════════ ① 产出侧形状契约（源码断言）═══════════ */
 console.log('\n== 1. 产出侧形状契约（host.impl.mjs 必须写入的关键字段）==');
@@ -65,8 +67,10 @@ ok('报告不再含 m55 块（M5.5 恢复通道已整体退役）',
 
 /* ═══════════ ② bfOnce 依赖项（回填链不能断）═══════════ */
 console.log('\n== 2. 回填链依赖（bfOnce 读取的字段必须存在）==');
-const bfOnce = /const bfOnce = \(\) => \{[\s\S]*?\n    \};/.exec(host)?.[0] ?? '';
-ok('解析出 bfOnce 函数', bfOnce.length > 0, '未找到 bfOnce（重命名了？回填链检查失效）');
+/* R11：`bfOnce` 主体（报告→hud-acts 迁移/去重/重发布）已搬进 m5.hud.mjs 的 `republishFromReport`；
+ * 宿主只留重试节奏。断言改从模块取切片。 */
+const bfOnce = /const republishFromReport = \(\) => \{([\s\S]*?)\n  \};/.exec(m5)?.[0] ?? '';
+ok('解析出 republishFromReport（原 bfOnce 主体，已在 m5.hud.mjs）', bfOnce.length > 0, '未找到回填主体（重命名了？回填链检查失效）');
 ok('bfOnce 按 reason==="m3-act" 筛选', /reason === 'm3-act'/.test(bfOnce),
   'bfOnce 的筛选条件变了——回填会读错条目');
 ok('bfOnce 读 e.m3.lastAct（条目路径，非顶层）', /e\?\.m3\?\.lastAct|e\.m3\.lastAct/.test(bfOnce),
@@ -100,15 +104,15 @@ console.log('\n== 3.5 getHud 作用域契约（2026-10-07 真根因）==');
 // 实测事故：agents 声明在 occ IIFE 内部，criticalCap 却在 IIFE 外引用它 ⇒ 每次 getHud 抛
 // ReferenceError("agents is not defined") ⇒ client 永远拿不到数据、弹窗恒「暂无压缩记录」。
 const getHudBody = (() => {
-  // R1（2026-10-07）：签名由 `onGetHud: (sid) =>` 变为 `onGetHud: async (sid) =>`
-  // （effort 需要 await resolveModelInfo）——两种形态都接受，避免为签名变更误报。
-  const m = /onGetHud:\s*(?:async\s*)?\(sid\)\s*=>/.exec(host);
+  /* R11：主体已搬进 plugin/m5.hud.mjs 的 `buildHudResponse` ⇒ 从模块取切片。
+   * R1（2026-10-07）历史：签名由 `onGetHud: (sid) =>` 变为 `onGetHud: async (sid) =>`。 */
+  const m = /const buildHudResponse = async \(sid\) => \{/.exec(m5);
   if (!m) return '';
   const s = m.index;
-  const e = host.indexOf('state.m5.hudPollReq', s);
-  return e > s ? host.slice(s, e) : host.slice(s, s + 4000);
+  const e = m5.indexOf('state.m5.hudPollReq', s);
+  return e > s ? m5.slice(s, e) : m5.slice(s, s + 4000);
 })();
-ok('解析出 onGetHud 函数体', getHudBody.length > 0, '未找到 onGetHud');
+ok('解析出 onGetHud 函数体（m5.hud.mjs buildHudResponse）', getHudBody.length > 0, '未找到 onGetHud');
 ok('agents 在 onGetHud 顶层声明（不在 IIFE 内）',
   /const agents = svc\('agents'\)/.test(getHudBody),
   'agents 未在 onGetHud 顶层声明 ⇒ criticalCap 引用会抛 ReferenceError');
@@ -119,7 +123,7 @@ ok('occ IIFE 内不再重复声明 agents', !/const agents\s*=/.test(occBody),
 ok('criticalCap 的 Agent 在作用域内解析（targetAgent 由 agents 选出）',
   /const targetAgent = [\s\S]{0,200}agents\.find/.test(getHudBody) && /criticalCap:\s*criticalCapOf\(targetAgent\)/.test(getHudBody),
   'criticalCap 未用作用域内解析出的 Agent ⇒ 可能又传 Session/未定义变量');
-ok('getHud 有常驻取证字段 hudPollReq', /state\.m5\.hudPollReq = \{/.test(host),
+ok('getHud 有常驻取证字段 hudPollReq（查 m5.hud.mjs）', /state\.m5\.hudPollReq = \{/.test(m5),
   '缺 hudPollReq ⇒ 下次同类问题无法从报告判断 host 是否被调用');
 /* 实测缺陷（2026-10-07）：getHud 给 engineThreshold 传了 `?.session`（Session 本体），
  * 而 resolveCompactionFor 要的是 Agent（走 agent.ctx / agentPresets.serviceFor(agent,...)）

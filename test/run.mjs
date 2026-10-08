@@ -5,17 +5,19 @@
  * 用法：node test/run.mjs
  * 退出码：0 = 全通过；1 = 任一失败
  *
- * 三个测试的分工：
+ * 四个测试的分工：
  *   contract.mjs  三端契约对账（face 方法表 ↔ client 描述符 ↔ TYPERT；Config 字段三处对账）
  *   static.mjs    静态约束（语法 / client 自足 / entry 薄壳 / 依赖方向 / 热换纪律 / 无调试残留）
  *   report.mjs    报告形状契约（产出侧字段 + 回填链依赖 + 瘦身档位 + dump 工具自检）
+ *   boot.mjs      **宿主启动冒烟**（真跑 apply() + 真调 getHud/pre-step —— 源断言无法证明「接线可达」，
+ *                 R11 真的踩过：接线块被嵌进另一个函数、语法合法、423 条源断言全绿，运行时全链路静默失效）
  */
 import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const DIR = dirname(fileURLToPath(import.meta.url));
-const SUITES = ['contract.mjs', 'static.mjs', 'report.mjs'];
+const SUITES = ['contract.mjs', 'static.mjs', 'report.mjs', 'boot.mjs'];
 
 const results = [];
 for (const suite of SUITES) {
