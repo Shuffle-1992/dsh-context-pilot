@@ -829,7 +829,11 @@ window.__ModuleLoader__.load({
 						"aria-hidden": "true",
 						src: iconUrl,
 						alt: cooling ? "智能思考冷却" : "智能思考就绪",
-						style: { width: "14px", height: "14px", flex: "none", display: "none" },
+						style: { width: "14px", height: "14px", flex: "none" },
+						/* ⚠️ 显隐**只**由注入的样式表管（基础规则 display:none / @container 内 inline-flex）。
+						 * 不能在这里写内联 display:none —— 内联样式优先级高于样式表，
+						 * @container 里那条 display:inline-flex 会被它压掉 ⇒ 图标永远不显示
+						 * （2026-10-08 用户实测：窄态只剩一个空的蓝框）。 */
 					}),
 					el("span", { className: "dcp-chip-label", style: { opacity: ".85" } },
 						cooling ? "智能思考冷却" : "智能思考就绪"),

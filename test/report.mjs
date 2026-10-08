@@ -188,12 +188,19 @@ if (!existsSync(REPORT)) {
     const slimLast = slim[slim.length - 1];
     ok('FULL 档位条目存在（关键取证位在产出）', full.length > 0,
       '历史里 0 条 FULL ⇒ activation+2s / m3-act / m4-probe 已被高频 slim 挤出（R8 已修：满环优先淘汰 slim）');
-    ok('slim 条目存在（瘦身档位在产出）', !!slimLast, '只有 full 条目 ⇒ 瘦身未生效，报告体积会失控');
-    ok('slim 条目确实比 full 小', avg(slim) < avg(full), `slim=${avg(slim)}KB full=${avg(full)}KB`);
-    ok('slim 条目仍含 m3（决策/压缩取证）', !!slimLast?.m3, 'slim 丢了 m3 ⇒ 回填链与压缩取证同时失效');
-    ok('slim 条目仍含 m2（注入取证）', !!slimLast?.m2);
-    ok('slim 条目丢弃 eventProbe（体积来源）', slimLast?.m3?.eventProbe === undefined,
-      'slim 条目仍带 eventProbe ⇒ 瘦身不彻底');
+    /* R16.6：slim 三条从「无条件失败」改为「有 slim 才细查」。
+     * 原因：R8 之后满环**优先淘汰 slim**，长期运行的真实报告（如压缩频繁的会话）
+     * 会出现「最近 120 条全是 full、slim 被挤光」的分布——那是 R8 修的**正确行为**，
+     * 不是瘦身失效。原断言把活数据当缺陷 ⇒ 套件对运行期状态过敏（今天实测误报）。 */
+    if (slimLast) {
+      ok('slim 条目确实比 full 小', avg(slim) < avg(full), `slim=${avg(slim)}KB full=${avg(full)}KB`);
+      ok('slim 条目仍含 m3（决策/压缩取证）', !!slimLast?.m3, 'slim 丢了 m3 ⇒ 回填链与压缩取证同时失效');
+      ok('slim 条目仍含 m2（注入取证）', !!slimLast?.m2);
+      ok('slim 条目丢弃 eventProbe（体积来源）', slimLast?.m3?.eventProbe === undefined,
+        'slim 条目仍带 eventProbe ⇒ 瘦身不彻底');
+    } else {
+      console.log('     ⚠️ 环内 0 条 slim —— R8 后满环优先淘汰 slim，长期运行属预期分布（瘦身逻辑本身由 m1 单测覆盖）');
+    }
   }
 }
 
