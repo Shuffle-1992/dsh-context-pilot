@@ -446,6 +446,11 @@ ok('压缩工具结果带自检契约（下一步会有「压缩自检」回执 
 ok('压缩工具自检契约说明档位**持续生效**（含强制线）',
   /该档位此后对本会话的压缩（含强制线）持续生效/.test(ct),
   '只报本次 ⇒ 模型以为每次都要重选档位');
+/* R16.3：**介入时机**必须教给模型——想影响强制线，就要在越线之前选档。
+ * 行为级验证放 6.20a 块（ctApi 就绪后）；这里先钉源码级最小护栏。 */
+ok('压缩工具源码含「趁占用还在强制线之下时选定档位」的介入时机教学',
+  /趁占用还在强制线之下时选定档位|趁还在强制线之下时选定档位/.test(ct),
+  '只教「持续生效」不教「介入时机」 ⇒ Agent 到强制线触发时才想选档，已来不及（用户问出的场景）');
 
 const ctPreStep = /const preStepCompaction = async \(payload\) => \{([\s\S]*?)\n  \};/.exec(m3src)?.[1] ?? '';
 ok('解析出 preStepCompaction 函数体', ctPreStep.length > 0, '未找到 preStepCompaction');
@@ -1589,6 +1594,19 @@ console.log('\n== 6.20a R16 压缩档位（compact-range.mjs） ==');
     bad.tier === 'standard' && bad.budget === 160_000 && bad.fallback === true
       && none.tier === 'standard' && none.fallback === false && none.budget === 160_000,
     `实际 bad=${JSON.stringify(bad)} none=${JSON.stringify(none)}`);
+}
+/* R16.3（用户问出的场景）：「趁占用还在强制线之下时选定档位」——三处出口都要教这个时机。 */
+{
+  const brief = ctApi.renderBrief({ criticalRatio: 0.75 }) ?? '';
+  const cardBelow = ctApi.renderCard({ ratio: 0.5, minRatio: 0.2, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000 }) ?? '';
+  const cardAbove = ctApi.renderCard({ ratio: 0.8, minRatio: 0.2, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000 }) ?? '';
+  ok('一次性教学教了介入时机（趁还在强制线之下选档；越线后改档管不上当次）',
+    /趁占用还在 \d+% 强制线之下时选定档位/.test(brief) && /越线之后才改档，管不上正在发生的那次/.test(brief),
+    `实际：${brief.slice(0, 100)}…`);
+  ok('决策卡教了介入时机，且**随占用状态自适应**',
+    /尚在强制线之下/.test(cardBelow) && !/本次已越线/.test(cardBelow)
+      && /已越强制线/.test(cardAbove) && /本次已越线，改档下一轮起生效/.test(cardAbove),
+    `未越线卡：${cardBelow.slice(0, 80)}… | 已越线卡：${cardAbove.slice(0, 80)}…`);
 }
 console.log('\n== 6.20 工具后自检回执 + 思考强度可切性 ==');
 const m2Mod = await import(pathToFileURL(join(PLUGIN, 'm2.inject.mjs')).href);
