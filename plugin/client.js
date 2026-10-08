@@ -648,6 +648,10 @@ window.__ModuleLoader__.load({
 					"@container (width <= 560px){",
 					".dcp-effort-chip .dcp-chip-label{display:none}",
 					".dcp-effort-chip .dcp-chip-dot{display:none}",
+					/* 窄态 = 纯图标：去掉 chip 自身的背景/边框/扫色 overlay（否则收缩后的
+					 * chip 底+边框就是用户看到的「外层的框」），padding 也收掉。 */
+					".dcp-effort-chip{background:transparent!important;box-shadow:none!important;padding:0 2px!important}",
+					".dcp-effort-chip>[data-bg],.dcp-effort-chip>[data-progress]{display:none!important}",
 					".dcp-effort-chip .dcp-chip-icon{display:inline-flex}",
 					"}",
 				].join("\n");
@@ -774,7 +778,9 @@ window.__ModuleLoader__.load({
 			 *   - 冷却完成：整颗彩色点亮（ready=info 蓝，与发送按钮同源）。
 			 * 无外框（上一版实底方块被指「外层的框」多余）；18px 比文字更高，图标感更强。
 			 * 显色窗与灰底是**两张同形 SVG** 对齐叠放。 */
-			const SPARK = "M10 2.2 L11.5 6.5 L15.8 8 L11.5 9.5 L10 13.8 L8.5 9.5 L4.2 8 L8.5 6.5 Z";
+			/* ✦ 四角星（凹边星芒，经典 sparkle 形）：M 顶点 → 用二次曲线内凹到各尖点。
+			 * 上一版用直线连点 ⇒ 形状像「+」。曲线内凹才是火花/闪耀的通用形态。 */
+			const SPARK = "M10 1.6 Q10.9 6.6 15.6 8 Q10.9 9.4 10 14.4 Q9.1 9.4 4.4 8 Q9.1 6.6 10 1.6 Z";
 			const sparkSvg = (fill) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" width="18" height="18">`
 				+ `<path d="${SPARK}" fill="${fill}"/>`
 				+ `<path d="M15.2 3.4 L15.85 5.15 L17.6 5.8 L15.85 6.45 L15.2 8.2 L14.55 6.45 L12.8 5.8 L14.55 5.15 Z" fill="${fill}" fill-opacity="0.8"/></svg>`;
@@ -804,6 +810,7 @@ window.__ModuleLoader__.load({
 				},
 			},
 				el("span", {
+					"data-bg": "true",
 					"aria-hidden": "true",
 					style: {
 						position: "absolute", left: 0, top: 0, right: 0, bottom: 0,
@@ -812,6 +819,7 @@ window.__ModuleLoader__.load({
 					},
 				}),
 				el("span", {
+					"data-progress": "true",
 					"aria-hidden": "true",
 					style: {
 						position: "absolute", left: 0, top: 0, bottom: 0,
