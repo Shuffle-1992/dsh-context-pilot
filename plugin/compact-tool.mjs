@@ -282,6 +282,13 @@ export function createCompactTool(deps) {
           properties: {
             ok: { type: 'boolean', required: true, description: '是否已登记压缩。' },
             scheduled: { type: 'string', description: '执行时机，固定为 next-step（下一步开始前）。' },
+            /* R15.3（2026-10-08 真机事故）：宿主**按 output.schema 校验工具返回值**
+             * （additionalProperties:false ⇒ 多一个字段就整条工具调用失败：
+             * `"value.verify" is not a declared property`）⇒ 加返回字段必须同时在这里声明。 */
+            verify: {
+              type: 'string',
+              description: '自检契约：下一步开头会有「压缩自检」回执；显示未执行就再调用一次或告知用户。',
+            },
             error: { type: 'string', description: '未登记时的原因。' },
           },
         },

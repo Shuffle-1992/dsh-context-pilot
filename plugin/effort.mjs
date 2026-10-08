@@ -115,6 +115,9 @@ export function createEffort(deps) {
   const checkEffort = (eff, want) => {
     const options = Array.isArray(eff?.efforts) && eff.efforts.length > 0 ? eff.efforts : null;
     if (options && !options.includes(want)) {
+      /* ⚠️ 这里的 `reason` 是**内部**字段名，由工具层映射成已声明的 `error`（见 runTool：`error: chk.reason`）。
+       * R15.3 记一笔：把它「顺手统一」成 `error` 会让工具返回 `error: undefined` —— 错误信息静默丢失，
+       * 而 output.schema 校验照样通过（我的变异脚本正是这样逃逸的）⇒ 内部字段名 ≠ 声明字段名。 */
       return { ok: false, options, reason: `档位不在当前模型的可选集内（可选 ${options.join('/')}）` };
     }
     return { ok: true, options };
@@ -376,6 +379,17 @@ export function createEffort(deps) {
           properties: {
             ok: { type: 'boolean', required: true, description: '是否已接受换档。' },
             effort: { type: 'string', description: '已接受的档位（下一步请求即生效）。' },
+            /* R15.3（2026-10-08 真机事故）：宿主**按 output.schema 校验工具返回值**
+             * （additionalProperties:false ⇒ 多一个字段就整条工具调用失败：
+             * `"value.applied" is not a declared property`）⇒ 加返回字段必须同时在这里声明。 */
+            applied: {
+              type: 'string',
+              description: '生效时机：next-request（下一次请求起生效）或 already（该会话已是此档）。',
+            },
+            verify: {
+              type: 'string',
+              description: '自检契约：下一步的用量行后缀会显示当前实际档位，可据此确认是否生效。',
+            },
             error: { type: 'string', description: '未接受时的原因（含冷却剩余秒数）。' },
             options: { type: 'array', items: { type: 'string' }, description: '该模型的可选档位。' },
           },

@@ -1234,7 +1234,9 @@ ok('工具有参数 schema（effort 必填）',
   /effort: \{[\s\S]{0,160}?required: true/.test(effort),
   '缺参数 schema ⇒ defineTool 校验失败/模型不知道传什么');
 ok('工具有 output schema + render',
-  /output: \{[\s\S]{0,80}?schema: \{[\s\S]{0,700}?render: \(_args, value\) => \[\{ type: 'text', text: JSON\.stringify\(value\) \}\]/.test(effort),
+  /* ⚠️ 窗口从 700 放宽到 1600：R15.3 加 `applied`/`verify` 声明后，schema→render 的距离撑爆了窗口，
+   * 断言就以「缺 render」的形式假失败（R7 记过同一类坑：**正则窗口宽度是断言的一部分**）。 */
+  /output: \{[\s\S]{0,80}?schema: \{[\s\S]{0,1600}?render: \(_args, value\) => \[\{ type: 'text', text: JSON\.stringify\(value\) \}\]/.test(effort),
   '缺 output.render ⇒ 工具结果无法渲染给模型');
 ok('工具执行异常被吞并返回错误（不影响会话）',
   /智能思考 工具执行异常（吞）/.test(effort),
@@ -1614,6 +1616,63 @@ ok('思考强度工具结果带回读与自检指引（applied + verify）',
     `实际 res=${JSON.stringify(res)} cooldownUntil=${JSON.stringify(after?.cooldownUntil)}（before=${JSON.stringify(before?.cooldownUntil)}）`
     + ' —— 锚点若在 apply 时刻，客户端那一次 getHud 就永远赶在起算之前（真机 chip 一直显示「就绪」）');
   ok('未换档时 hudPayload 不报冷却（不能常亮）', (before?.cooldownUntil ?? 0) === 0, `实际 ${JSON.stringify(before?.cooldownUntil)}`);
+}
+
+/* ═══════════ 6.21 R15.3：工具返回字段必须已在 output.schema 里声明 ═══════════
+ * 真机事故（2026-10-08）：宿主**按 `output.schema` 校验工具返回值**，而两个工具都声明了
+ * `additionalProperties: false` ⇒ R15 给返回值加的 `applied` / `verify` 没同步声明，
+ * 于是**整条工具调用失败**：
+ *   Error: tool "set_reasoning_effort" returned invalid output: "value.applied" is not a declared property
+ *   Error: tool "compact_context" returned invalid output: "value.verify" is not a declared property
+ * ⇒ 这里做**行为级**对账：真的跑工具各条分支，把返回的 key 与该 spec 声明的 properties 求差集。 */
+console.log('\n== 6.21 工具返回值 ⊆ output.schema 声明 ==');
+const declaredKeys = (spec) => new Set(Object.keys(spec?.output?.schema?.properties ?? {}));
+const undeclared = (spec, value) => [...Object.keys(value ?? {})].filter((k) => !declaredKeys(spec).has(k));
+
+/* 压缩工具：登记成功 + 失败两条分支 */
+console.log('  压缩工具 declared =', [...declaredKeys(ctSpec)].join(','));
+const ctOkRes = await ctRun('sid-SCHEMA', 'schema 对账');
+const ctBad = await ctSpec.execute({}, { agent: { id: 'no-sid', sessionId: '', session: {} } });
+ok('compact_context 返回值 ⊆ output.schema（成功分支）', undeclared(ctSpec, ctOkRes).length === 0,
+  `未声明字段：${undeclared(ctSpec, ctOkRes).join(', ')} ⇒ 宿主的返回值校验会拒掉整条调用（真机事故）`);
+ok('compact_context 返回值 ⊆ output.schema（失败分支）',
+  undeclared(ctSpec, ctBad).length === 0 || ctBad?.ok !== false,
+  `未声明字段：${undeclared(ctSpec, ctBad).join(', ')}（返回值 ${JSON.stringify(ctBad)}）`);
+
+/* 换档工具：接受 / 幂等 / 非法档位 / 冷却 四条分支 */
+{
+  let eSpec = null;
+  const eMod = await import(pathToFileURL(join(PLUGIN, 'effort.mjs')).href);
+  const eApi = eMod.createEffort({
+    svc: (k) => (k === 'tools' ? { register: (t) => { eSpec = t; } } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e?.message ?? e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { effortSkips: {}, effortDiag: {}, effortSwitches: 0, effortReasserts: 0, effortHooks: 0, effortToolCalls: 0 } },
+    readCfg: () => ({ enabled: true, effortEnabled: true, effortCooldownMs: 30000 }),
+    getDefineTool: () => (spec) => spec,
+  });
+  await eApi.ensure();
+  const ag2 = { id: 'sch-1', sessionId: 'sch-1', session: { id: 'sch-1', requestHeader: () => ({ config: { provider: 'deepseek-account', model: 'deepseek-flash', reasoningEffort: 'high' } }) } };
+  console.log('  换档工具 declared =', [...declaredKeys(eSpec)].join(','));
+  const rAccept = await eSpec.execute({ effort: 'max' }, { agent: ag2 });
+  ok('set_reasoning_effort 返回值 ⊆ output.schema（接受分支：applied/verify 必须已声明）',
+    undeclared(eSpec, rAccept).length === 0,
+    `未声明字段：${undeclared(eSpec, rAccept).join(', ')} ⇒ 真机上整条换档调用失败（2026-10-08 实测）`);
+  const rSame = await eSpec.execute({ effort: 'max' }, { agent: ag2 });
+  ok('set_reasoning_effort 返回值 ⊆ output.schema（幂等分支）', undeclared(eSpec, rSame).length === 0,
+    `未声明字段：${undeclared(eSpec, rSame).join(', ')}`);
+  const rBad = await eSpec.execute({ effort: '不存在的档位' }, { agent: ag2 });
+  ok('set_reasoning_effort 返回值 ⊆ output.schema（非法档位分支）',
+    undeclared(eSpec, rBad).length === 0 && rBad?.ok === false,
+    `未声明字段：${undeclared(eSpec, rBad).join(', ')}（返回值 ${JSON.stringify(rBad)}）`);
+  /* ⚠️ 单独钉「错误信息非空」：内部字段名与声明字段名不一致时，工具会返回 `error: undefined`——
+   * 上面那条断言照样通过（键存在且已声明），错误信息却静默丢了（R15.3 变异脚本抓到的逃逸）。 */
+  ok('非法档位的错误信息**非空**（内部 reason→声明 error 的映射没断）',
+    typeof rBad?.error === 'string' && rBad.error.length > 0,
+    `实际 error=${JSON.stringify(rBad?.error)} —— 内部字段改名会让这里变成 undefined`);
+  const rCd = await eSpec.execute({ effort: 'low' }, { agent: ag2 });
+  ok('set_reasoning_effort 返回值 ⊆ output.schema（冷却分支）', undeclared(eSpec, rCd).length === 0,
+    `未声明字段：${undeclared(eSpec, rCd).join(', ')}（返回值 ${JSON.stringify(rCd)}）`);
 }
 
 /* ═══════════ 汇总 ═══════════ */

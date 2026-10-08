@@ -1576,5 +1576,38 @@ call_cd9b9731859a4daa87916b1e … (INVALID_REQUEST, status 400)
 （避免在没有证据的情况下编故事）。
 
 **验证**：contract 345 + static 61 + report 59 + boot 21 = **486 断言**全绿；entry 级变异 2/2 被捕获。
-**部署**：entry.mjs 改动**需再重启一次 DSH**（当前实例的插件处于「零监听器」状态）。
-**部署**：`effort.mjs` 随 toggle/重启生效；`client.js` 需**刷新页面**。
+**部署**：entry.mjs 改动**需再重启一次 DSH**（当时实例的插件处于「零监听器」状态）。
+
+### R15.3 🔴 工具返回字段未在 output.schema 声明 ⇒ 两个工具在真机上全失败（我 R15 引入）—— ✅ 已修
+
+**用户实测反馈**（重启后插件已活，但两个工具都报）：
+
+```
+Error: tool "set_reasoning_effort" returned invalid output:
+       "value.applied" is not a declared property (additionalProperties: false); "value.verify" i…
+Error: tool "compact_context" returned invalid output:
+       "value.verify" is not a declared property (additionalProperties: false)
+```
+
+**根因**：宿主会**按 `output.schema` 校验工具返回值**，而两个工具都声明了 `additionalProperties: false`；
+R15 给返回值加了 `applied` / `verify` 却**没同步改 schema** ⇒ 整条工具调用被判为无效输出。
+（顺带证明 R15 的自检回执管线是通的：那一轮注入里真的出现了
+`【压缩自检】你上次请求的压缩**未执行**（ABORTED）`。）
+
+**修**：`compact-tool` 声明 `verify`；`effort` 声明 `applied` + `verify`。
+
+**新绊线（行为级，6 条）**：真跑两个工具的各条分支（压缩成功/失败；换档接受/幂等/非法档位/冷却），
+把返回值的 key 与该 spec 声明的 properties 求差集 ⇒ 必须为空。
+变异：撤掉 `verify` 声明 / 撤掉 `applied` 声明 / 工具层返回未声明的 `reason` ⇒ **3/3 被捕获**。
+
+> ⚠️ **一次由变异抓出的我自己的错**：我一度把 `checkEffort` 的内部字段 `reason` 也「顺手统一」成 `error`，
+> 而工具层是 `error: chk.reason` 映射的 ⇒ 工具会返回 **`error: undefined`**（错误信息静默丢失），
+> 而 schema 校验**照样通过**（键存在且已声明）⇒ 绊线当时抓不到它（变异逃逸）。
+> 已回退，并补一条「非法档位的错误信息**非空**」断言专门钉这个映射。
+> 教训：**内部字段名 ≠ 声明字段名**，别顺手统一。
+>
+> 另修一处**假失败**：`工具有 output schema + render` 的正则窗口是 `{0,700}`，被我新加的声明撑爆
+> ⇒ 以「缺 render」的形式误报。窗口放宽到 1600 并注明——**正则窗口宽度是断言的一部分**（R7 已记过同类坑）。
+
+**验证**：contract 352 + static 61 + report 59 + boot 21 = **493 断言**全绿。
+**部署**：两个文件都是 toggle 热换（entry 已修好，本次 toggle 安全，无需重启）。
