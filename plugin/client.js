@@ -633,25 +633,33 @@ window.__ModuleLoader__.load({
 		 */
 		function EffortChip(props) {
 			const ref = react.useRef(null);
-			/* ⑦ 小尺寸自适应（2026-10-08 用户要求）：容器窄时收成**纯图标态**（只留状态点）。
-			 * 观察手段：ResizeObserver（宽度变化实时回调）+ 1s 兜底 tick（冷却进度本来就在用，
-			 * 复用同一 tick 意味着冷却期间每秒都会重评一次宽度，覆盖 RO 不触发的极端布局）。
-			 * 阈值 96px：容得下「智能思考就绪」6 字 + 点 + padding；再窄就藏文字。 */
+			/* ⑦ 小尺寸自适应（第二次修正）：观察**父容器**（composer 底行）宽度——
+			 * chip 自身是 flex:none 永不收缩，第一版量自己是死路（用户实测：窗口缩小后
+			 * 「智能思考就绪」仍显示文字，而模型选择器收成了图标）。断点与 DSH 同源：
+			 * composer 底行 `.RlGAzG_row{container-type:inline-size}` + `@container (width<=560px)`
+			 * （asar 取证）⇒ 用 560px，与模型选择器**同刻度**地收成纯图标态。 */
 			const [narrow, setNarrow] = react.useState(false);
 			react.useEffect(() => {
 				const node = ref.current;
 				if (!node) return undefined;
 				let alive = true;
+				/* 父链上找第一个宽度 ≥200px 的祖先（composer 行/toolbar）作为观察目标。 */
+				let target = node.parentElement;
+				for (let i = 0; target && i < 6; i += 1) {
+					if (target.getBoundingClientRect().width >= 200) break;
+					target = target.parentElement;
+				}
+				if (!target) return undefined;
 				const evalW = () => {
 					if (!alive) return;
-					const w = node.getBoundingClientRect().width;
-					if (w > 0) setNarrow(w < 96);
+					const w = target.getBoundingClientRect().width;
+					if (w > 0) setNarrow(w < 560);
 				};
 				evalW();
 				let ro = null;
 				try {
 					ro = typeof ResizeObserver === "function" ? new ResizeObserver(evalW) : null;
-					if (ro) ro.observe(node);
+					if (ro) ro.observe(target);
 				} catch { ro = null; }
 				const t = setInterval(evalW, 1000); // 兜底：RO 不可用/不触发的布局
 				return () => { alive = false; clearInterval(t); if (ro) { try { ro.disconnect(); } catch { /* 忽略 */ } } };
@@ -763,6 +771,16 @@ window.__ModuleLoader__.load({
 					: "换档冷却：已就绪",
 				"Agent 可调用 set_reasoning_effort 工具自主换档（本次任务内立即生效）",
 			].join("\n");
+			/* 小尺寸态图标（zcode-dispatch 风格的极简火花）：14×14 内联 SVG——
+			 * 圆底 + 三层压缩线（与 plugin/icon.svg 同构：压缩层叠语义），
+			 * 颜色随状态（cooling=warn 橙 / ready=info 蓝）。宽态仍是 6px 状态点。 */
+			const iconColor = cooling ? "#ff9f0a" : "#4176e6";
+			const iconSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" width="14" height="14">`
+				+ `<circle cx="10" cy="10" r="9" fill="${iconColor}" fill-opacity="0.16"/>`
+				+ `<rect x="5" y="6.2" width="10" height="1.8" rx="0.9" fill="${iconColor}"/>`
+				+ `<rect x="6.8" y="9.1" width="6.4" height="1.8" rx="0.9" fill="${iconColor}" fill-opacity="0.7"/>`
+				+ `<rect x="8.4" y="12" width="3.2" height="1.8" rx="0.9" fill="${iconColor}" fill-opacity="0.42"/></svg>`;
+			const iconUrl = `data:image/svg+xml;utf8,${encodeURIComponent(iconSvg)}`;
 			return el("div", {
 				ref,
 				className: "dcp-effort-chip",
@@ -800,16 +818,19 @@ window.__ModuleLoader__.load({
 				el("span", {
 					style: { position: "relative", zIndex: 1, display: "inline-flex", alignItems: "center", gap: "6px" },
 				},
-					el("span", {
-						"aria-hidden": "true",
-						style: {
-							width: narrow ? "10px" : "6px", height: narrow ? "10px" : "6px",
-							borderRadius: "50%", flex: "none",
-							background: accent, transition: "background .3s linear, width .2s linear, height .2s linear",
-							/* 小尺寸态：点就是图标（略加外环增强辨识），title 仍承载全部信息 */
-							boxShadow: narrow ? `0 0 0 2px ${accent}33` : "none",
-						},
-					}),
+					narrow
+						? el("img", {
+							"aria-hidden": "true",
+							src: iconUrl,
+							style: { width: "14px", height: "14px", flex: "none", display: "block" },
+						})
+						: el("span", {
+							"aria-hidden": "true",
+							style: {
+								width: "6px", height: "6px", borderRadius: "50%", flex: "none",
+								background: accent, transition: "background .3s linear",
+							},
+						}),
 					!narrow && el("span", { style: { opacity: ".85" } }, cooling ? "智能思考冷却" : "智能思考就绪"),
 				),
 			);

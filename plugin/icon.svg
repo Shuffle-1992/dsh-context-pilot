@@ -1,15 +1,19 @@
-<svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <g transform="translate(1.5 1.5) scale(0.9166666667)">
-    <path d="M18 6L28.5 9.5V17.2C28.5 23.1 24.08 28.4 18 30C11.92 28.4 7.5 23.1 7.5 17.2V9.5L18 6Z" fill="url(#dcp-g)" fill-opacity="0.85"/>
-    <path d="M12.6 15.6H23.4C24.1 15.6 24.6 16.1 24.6 16.8C24.6 17.5 24.1 18 23.4 18H12.6C11.9 18 11.4 17.5 11.4 16.8C11.4 16.1 11.9 15.6 12.6 15.6Z" fill="#FFFFFF" fill-opacity="0.95"/>
-    <path d="M14.6 20.4H21.4C22.1 20.4 22.6 20.9 22.6 21.6C22.6 22.3 22.1 22.8 21.4 22.8H14.6C13.9 22.8 13.4 22.3 13.4 21.6C13.4 20.9 13.9 20.4 14.6 20.4Z" fill="#FFFFFF" fill-opacity="0.75"/>
-    <path d="M12.6 11C11.9 11 11.4 10.5 11.4 9.8C11.4 9.1 11.9 8.6 12.6 8.6H23.4C24.1 8.6 24.6 9.1 24.6 9.8C24.6 10.5 24.1 11 23.4 11H12.6Z" fill="#FFFFFF" fill-opacity="0.95"/>
-    <path d="M14.6 11L21.4 11L19.9 13.4H16.1L14.6 11Z" fill="#FFFFFF" fill-opacity="0.55"/>
-  </g>
-  <defs>
-    <linearGradient id="dcp-g" x1="18" y1="6" x2="18" y2="30" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#7AC2FF"/>
-      <stop offset="1" stop-color="#4A65E8"/>
-    </linearGradient>
-  </defs>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- @local/dsh-context-pilot 插件图标（家族风格：与 dsh-connect-zcode 同规范）
+       语义：三条内容行 + 收拢箭头 = 上下文压缩（把长的上下文收进一点）；
+             绿色收拢箭头 = 压缩动作（占用降档）；底部三点 = 生态家族视觉记忆。
+       约定：64x64 / rx14 / 深底 #1e293b / 扁平无渐变，16px 下主形状仍可辨认。
+       （旧版为 36 viewBox 渐变盾牌，与本家族规范不一致，2026-10-08 重绘。） -->
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="#1e293b"/>
+  <!-- 内容行：由长到短（被压缩的上下文） -->
+  <path d="M14 14 H44" stroke="#7cc4ff" stroke-width="5" stroke-linecap="round" opacity="0.45"/>
+  <path d="M14 24 H36" stroke="#7cc4ff" stroke-width="5" stroke-linecap="round" opacity="0.7"/>
+  <path d="M14 34 H28" stroke="#7cc4ff" stroke-width="5" stroke-linecap="round"/>
+  <!-- 绿色收拢箭头（右下指向，把行收进一点 = 压缩） -->
+  <path d="M38 28 L48 38" stroke="#58c98f" stroke-width="5" stroke-linecap="round"/>
+  <path d="M48 30 V38 H40" stroke="#58c98f" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- 底部家族三点 -->
+  <circle cx="20" cy="50" r="3" fill="#7cc4ff"/>
+  <circle cx="31" cy="50" r="3" fill="#58c98f"/>
+  <circle cx="42" cy="50" r="3" fill="#e8b64c"/>
 </svg>
