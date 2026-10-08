@@ -42,6 +42,8 @@ const client = read('client.js');
 const m5src = read('m5.hud.mjs');
 /* R12：M2 注入域（用量行 / 决策卡 / 一次性说明 / 注入主体）已抽 plugin/m2.inject.mjs。 */
 const m2src = read('m2.inject.mjs');
+/* R13：M1 快照域（快照 / 瘦身 / 事件探针）已抽 plugin/m1.snapshot.mjs。 */
+const m1src = read('m1.snapshot.mjs');
 
 const wireFace = /export const FACE_NAME = ['"]([^'"]+)['"]/.exec(wire)?.[1];
 const clientFace = /const HUD_FACE = ["']([^"']+)["']/.exec(client)?.[1];
@@ -384,8 +386,8 @@ ok('wire 签名与 host 返回一致（actsDetail / 无全局兜底声明）',
   /actsDetail:\{at:string,text:string\}\[\]/.test(wire) &&
   !/actsGlobal:string\[\]/.test(wire) && !/hudLastActGlobal:string/.test(wire),
   'wire 签名仍声明全局兜底字段 ⇒ 三端漂移');
-ok('m5.hudPoll 取证口径与 getHud 一致（按 sid 精确匹配）',
-  /matched: state\.m5\.acts\.filter\(\(x\) => x\.sid === asid\)\.length,/.test(host),
+ok('m5.hudPoll 取证口径与 getHud 一致（按 sid 精确匹配，查 m1.snapshot.mjs）',
+  /matched: state\.m5\.acts\.filter\(\(x\) => x\.sid === asid\)\.length,/.test(m1src),
   '取证口径仍走链 ⇒ 排查时看到的命中数与真实显示不一致');
 
 /* ═══════════ 6.15 压缩改「工具触发」（R4：不再伪造用户消息）═══════════ */
@@ -1406,6 +1408,30 @@ ok('M2 模块未就绪时不注入（放行原决策 + 留痕）',
 ok('clearBriefed 是薄转发到 M2 域（不再由宿主持有「已讲」表）',
   /const clearBriefed = \(sid\) => \{ if \(m2Ctl\) m2Ctl\.clearBriefed\(sid\); \};/.test(host),
   '宿主自己实现 clearBriefed ⇒ 「已讲」表分裂成两份，压缩后可能只清一半');
+
+/* ═══ R13 解耦第五刀：M1 快照域 ═══ */
+ok('R13 M1 快照域已抽为叶子模块，且宿主不再重复实现',
+  /import\(`\.\/m1\.snapshot\.mjs\?ts=\$\{IMPL_TS\}`\)/.test(host)
+  && /const buildSnapshot = \(reason\) => \(m1Ctl \?/.test(host)
+  && /writeReport\(isSlimReason\(reason\) \? slimSnapshot\(snap\)/.test(host)
+  && /recordSessionEvent\(event, session\);/.test(host)
+  /* 查「M1 独有产物是否回流宿主」。 */
+  && !/const eventProbe = \{/.test(hostNoComment)
+  && !/const SLIM_REASONS = new Set/.test(hostNoComment)
+  && !/const canMeasure = /.test(hostNoComment)
+  && !/const topSessions = /.test(hostNoComment),
+  '宿主仍带快照产出实现 ⇒ 两套真相（本次解耦要消除的）');
+ok('M1 模块未就绪时报告不断档（最小快照 + 留痕）',
+  /M1 快照模块加载失败（吞，报告降级为最小快照）/.test(host)
+  && /: \{ at: new Date\(\)\.toISOString\(\), reason, profile: 'full'/.test(host),
+  '未做降级 ⇒ refresh 抛错被吞 ⇒ **报告永不落盘**（R13 真事故的形态：搬走 SLIM_REASONS 却漏改 refresh 的引用）');
+ok('精简档判定口径只有一处（isSlimReason 转发 M1 域，宿主不再自查）',
+  /const isSlimReason = \(reason\) => \(m1Ctl \? m1Ctl\.isSlim\(reason\) : false\);/.test(host)
+  && !/SLIM_REASONS/.test(hostNoComment),
+  '宿主自己判精简档 ⇒ 与模块的口径分裂（漏改一处即静默断报告）');
+ok('M1 模块只读（不写盘：落盘管线仍在宿主）',
+  !/writeFileSync|mkdirSync|readFileSync/.test(m1src) && !/^\s*import .*\bfrom ['"]\.\//m.test(m1src),
+  'M1 域自己写盘 ⇒ 与宿主的尾部对账/缓存基线冲突（多写入者互相覆盖）');
 
 /* ═══════════ 6f. 压缩两条路径的**顺序**契约（F1/F5 真缺陷） ═══════════ */
 console.log('\n== 6f. pre-step / idle 顺序契约 ==');

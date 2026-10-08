@@ -41,8 +41,12 @@ const effort = readFileSync(join(PLUGIN, 'effort.mjs'), 'utf8');
 const m5 = readFileSync(join(PLUGIN, 'm5.hud.mjs'), 'utf8');
 
 /* ═══════════ ① 产出侧形状契约（源码断言）═══════════ */
-console.log('\n== 1. 产出侧形状契约（host.impl.mjs 必须写入的关键字段）==');
-const requiredBlocks = [
+console.log('\n== 1. 产出侧形状契约（快照构建者必须写入的关键字段）==');
+/* R13：快照产出侧已搬进 plugin/m1.snapshot.mjs ⇒ 形状断言改查模块。
+ * `writeReport`（落盘 / HISTORY_CAP 淘汰）仍在宿主，故分两张表按来源判定——
+ * 不合并成「任一处命中即可」：那会让「字段到底由谁产出」这件事失去约束。 */
+const m1src = readFileSync(join(PLUGIN, 'm1.snapshot.mjs'), 'utf8');
+const m1Blocks = [
   ['m3 块含 eff（生效参数快照）', /eff:\s*\{\s*\.\.\.M3\s*\}/],
   ['m3 块含 liveEnabled（开关现值）', /liveEnabled:\s*effEnabled\(\)/],
   ['m3 块含 heartbeat（心跳取证）', /heartbeat:\s*state\.heartbeat/],
@@ -60,9 +64,9 @@ const requiredBlocks = [
   /* R7：`m55` 块（armed/attempts/channelProbe）随 M5.5 收官残留整体删除 —— 旧断言在此退役。
    * 反向断言：报告里不得再出现 m55（防复活）。 */
 ];
-for (const [name, re] of requiredBlocks) ok(name, re.test(host));
+for (const [name, re] of m1Blocks) ok(`${name}｜m1.snapshot.mjs`, re.test(m1src));
 ok('报告不再含 m55 块（M5.5 恢复通道已整体退役）',
-  !/state\.m55/.test(host.replace(/\/\*[\s\S]*?\*\//g, '')),
+  !/state\.m55/.test(m1src) && !/state\.m55/.test(host.replace(/\/\*[\s\S]*?\*\//g, '')),
   'm55 残留 ⇒ 旧恢复通道有复活路径');
 
 /* ═══════════ ② bfOnce 依赖项（回填链不能断）═══════════ */
@@ -79,7 +83,7 @@ ok('bfOnce 回填 sid（会话过滤依赖）', /sessionId/.test(bfOnce), 'bfOnc
 
 /* ═══════════ ③ 瘦身档位与关键事件保护 ═══════════ */
 console.log('\n== 3. C3② 瘦身档位（关键事件必须走 full）==');
-const slimMatch = /const SLIM_REASONS = new Set\(\[([\s\S]*?)\]\);/.exec(host)?.[1] ?? '';
+const slimMatch = /const SLIM_REASONS = new Set\(\[([\s\S]*?)\]\);/.exec(m1src)?.[1] ?? '';
 const slimSet = new Set([...slimMatch.matchAll(/'([^']+)'/g)].map((m) => m[1]));
 ok('解析出 SLIM_REASONS', slimSet.size > 0, '未找到 SLIM_REASONS（瘦身逻辑改了？）');
 const MUST_FULL = ['m3-act', 'm4-probe', 'activation+2s', 'boot+10s'];
@@ -87,8 +91,11 @@ for (const mustFull of MUST_FULL) {
   ok(`关键事件 ${mustFull} 不在精简档`, !slimSet.has(mustFull),
     `${mustFull} 被列入 slim ⇒ 取证信息丢失（m3-act 还会破坏回填）`);
 }
-ok('slimSnapshot 函数存在且被 refresh 调用', /const slimSnapshot = /.test(host) && /SLIM_REASONS\.has\(reason\)/.test(host),
-  'slimSnapshot 未被 refresh 使用（瘦身未生效）');
+ok('slimSnapshot 由 refresh 按 isSlimReason 调用（判定口径在 M1 域）',
+  /const slimSnapshot = \(snap\) => \(m1Ctl/.test(host)
+  && /writeReport\(isSlimReason\(reason\) \? slimSnapshot\(snap\)/.test(host)
+  && /const isSlim = \(reason\) => SLIM_REASONS\.has\(reason\);/.test(m1src),
+  't 瘦身未生效，或判定口径散在两处（R13 踩过：漏改 refresh 的引用 ⇒ ReferenceError ⇒ 报告永不落盘）');
 /* ═══ R8 修（审查发现的取证静默丢失）═══
  * 现场：报告 120 条**全是 slim、full 0 条** —— 高频 slim 事件（heartbeat 120s / agent/status /
  * m5-publish 400ms 防抖 / m2-inject）把 FULL 条目挤出环形缓冲，而 FULL 恰是「压缩成没成」的唯一留档位。
