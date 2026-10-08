@@ -631,39 +631,33 @@ window.__ModuleLoader__.load({
 		 * 样式：读邻居（模型选择器按钮）computedStyle 复制圆角/字号——router-laya 同款做法。
 		 * 全函数吞异常：任何失败都不渲染（绝不因 chip 打崩输入框）。
 		 */
+		/** chip 窄屏收起样式（注入一次）：≤560px（与 DSH 模型选择器同断点）时隐藏文字与点、
+		 * 显示压缩图标。容器查询在无容器祖先时按规范回退到视口宽 ⇒ 两态始终有定义。
+		 * 用 CSS 而非 JS 观察的原因（两次实测失败的教训）：
+		 *   ① v1 量 chip 自己——chip 是 flex:none 永不收缩 ⇒ 永远量到宽；
+		 *   ② v2 观察父容器——但 effect 依赖 [] 只在挂载跑一次，而 chip 首帧常因
+		 *      hostInfo 未就绪 return null ⇒ ref 为空、观察器根本没装上。
+		 *   CSS 容器查询不依赖任何挂载时序，与 DSH 模型选择器完全同机制。 */
+		const ensureChipStyle = () => {
+			try {
+				if (typeof document === "undefined" || document.getElementById("dcp-effort-chip-style")) return;
+				const st = document.createElement("style");
+				st.id = "dcp-effort-chip-style";
+				st.textContent = [
+					".dcp-effort-chip .dcp-chip-icon{display:none}",
+					"@container (width <= 560px){",
+					".dcp-effort-chip .dcp-chip-label{display:none}",
+					".dcp-effort-chip .dcp-chip-dot{display:none}",
+					".dcp-effort-chip .dcp-chip-icon{display:inline-flex}",
+					"}",
+				].join("\n");
+				document.head.appendChild(st);
+			} catch { /* 注入失败 ⇒ 退化为始终显示文字（不崩） */ }
+		};
+
 		function EffortChip(props) {
 			const ref = react.useRef(null);
-			/* ⑦ 小尺寸自适应（第二次修正）：观察**父容器**（composer 底行）宽度——
-			 * chip 自身是 flex:none 永不收缩，第一版量自己是死路（用户实测：窗口缩小后
-			 * 「智能思考就绪」仍显示文字，而模型选择器收成了图标）。断点与 DSH 同源：
-			 * composer 底行 `.RlGAzG_row{container-type:inline-size}` + `@container (width<=560px)`
-			 * （asar 取证）⇒ 用 560px，与模型选择器**同刻度**地收成纯图标态。 */
-			const [narrow, setNarrow] = react.useState(false);
-			react.useEffect(() => {
-				const node = ref.current;
-				if (!node) return undefined;
-				let alive = true;
-				/* 父链上找第一个宽度 ≥200px 的祖先（composer 行/toolbar）作为观察目标。 */
-				let target = node.parentElement;
-				for (let i = 0; target && i < 6; i += 1) {
-					if (target.getBoundingClientRect().width >= 200) break;
-					target = target.parentElement;
-				}
-				if (!target) return undefined;
-				const evalW = () => {
-					if (!alive) return;
-					const w = target.getBoundingClientRect().width;
-					if (w > 0) setNarrow(w < 560);
-				};
-				evalW();
-				let ro = null;
-				try {
-					ro = typeof ResizeObserver === "function" ? new ResizeObserver(evalW) : null;
-					if (ro) ro.observe(target);
-				} catch { ro = null; }
-				const t = setInterval(evalW, 1000); // 兜底：RO 不可用/不触发的布局
-				return () => { alive = false; clearInterval(t); if (ro) { try { ro.disconnect(); } catch { /* 忽略 */ } } };
-			}, []);
+			ensureChipStyle();
 			/* ② 档位：响应式投影（事件驱动，零轮询）。useProjection 由 slot 标准 props 提供。 */
 			let sel = null;
 			try {
@@ -781,6 +775,10 @@ window.__ModuleLoader__.load({
 				+ `<rect x="6.8" y="9.1" width="6.4" height="1.8" rx="0.9" fill="${iconColor}" fill-opacity="0.7"/>`
 				+ `<rect x="8.4" y="12" width="3.2" height="1.8" rx="0.9" fill="${iconColor}" fill-opacity="0.42"/></svg>`;
 			const iconUrl = `data:image/svg+xml;utf8,${encodeURIComponent(iconSvg)}`;
+			/* ⑦（第三次修正，最终形态）：**三个元素全部渲染**——点（宽态）、压缩图标（窄态）、
+			 * 文字（宽态）——由注入的 `@container (width<=560px)` CSS 决定显隐。
+			 * 显隐与挂载时序/JS 观察彻底解耦：模型选择器收图标的那一刻，本 chip 必然同步收
+			 * （同一 composer 容器、同一断点）。iconUrl 随冷却态换色。 */
 			return el("div", {
 				ref,
 				className: "dcp-effort-chip",
@@ -818,20 +816,23 @@ window.__ModuleLoader__.load({
 				el("span", {
 					style: { position: "relative", zIndex: 1, display: "inline-flex", alignItems: "center", gap: "6px" },
 				},
-					narrow
-						? el("img", {
-							"aria-hidden": "true",
-							src: iconUrl,
-							style: { width: "14px", height: "14px", flex: "none", display: "block" },
-						})
-						: el("span", {
-							"aria-hidden": "true",
-							style: {
-								width: "6px", height: "6px", borderRadius: "50%", flex: "none",
-								background: accent, transition: "background .3s linear",
-							},
-						}),
-					!narrow && el("span", { style: { opacity: ".85" } }, cooling ? "智能思考冷却" : "智能思考就绪"),
+					el("span", {
+						className: "dcp-chip-dot",
+						"aria-hidden": "true",
+						style: {
+							width: "6px", height: "6px", borderRadius: "50%", flex: "none",
+							background: accent, transition: "background .3s linear",
+						},
+					}),
+					el("img", {
+						className: "dcp-chip-icon",
+						"aria-hidden": "true",
+						src: iconUrl,
+						alt: cooling ? "智能思考冷却" : "智能思考就绪",
+						style: { width: "14px", height: "14px", flex: "none", display: "none" },
+					}),
+					el("span", { className: "dcp-chip-label", style: { opacity: ".85" } },
+						cooling ? "智能思考冷却" : "智能思考就绪"),
 				),
 			);
 		}

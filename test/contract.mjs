@@ -296,6 +296,18 @@ ok('解析出 EffortChip 函数体', chipBody.length > 0, '未找到 EffortChip'
 ok('chip 标签不再用「智能思考档位」',
   !/el\("span", \{ style: \{ opacity: "\.75" \} \}, "智能思考档位"\)/.test(client),
   '仍是旧的「智能思考档位」标签 span ⇒ 用户已要求改成「智能思考就绪」');
+/* R16.5c（2026-10-08 用户两次实测「窗口缩小时 chip 仍显示文字」）：
+ * 窄屏收起必须走 **CSS 容器查询**（与 DSH 模型选择器同机制、同断点 560px），
+ * 不得退回 JS 观察chip 自身宽度（chip 是 flex:none 永不收缩 ⇒ 死路）。 */
+ok('chip 窄屏收起走 @container 容器查询（断点 560px，与模型选择器同刻度）',
+  /@container \(width <= 560px\)/.test(client)
+    && /\.dcp-effort-chip \.dcp-chip-label\{display:none\}/.test(client)
+    && /\.dcp-effort-chip \.dcp-chip-icon\{display:inline-flex\}/.test(client),
+  '容器查询缺失 ⇒ 窄屏下仍显示文字（两版 JS 观察已实测失败：量自己/观察器未装上）');
+ok('chip 三元素齐备（dot 宽态 / icon 窄态 / label 宽态），显隐交给 CSS',
+  chipBody.includes('dcp-chip-dot') && chipBody.includes('dcp-chip-icon') && chipBody.includes('dcp-chip-label')
+    && !/getBoundingClientRect\(\)\.width/.test(chipBody),
+  'chip 内仍量自身宽度 ⇒ 回到死路（flex:none 永不收缩）');
 /* 判据必须与样式**同源**（都用 cooling）。缺少 `!` 锚定会让 `!cooling ? …` 这类
  * 「文案与颜色相反」的回归从子串匹配漏过去（变异实测：加锚定前该变异未被抓住）。 */
 ok('chip 文案两态（冷却=「智能思考冷却」/ 就绪=「智能思考就绪」）',
