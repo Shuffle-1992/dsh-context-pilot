@@ -228,6 +228,39 @@ ok('报告已落盘且 history 非空（激活快照管线可达）',
     bad.length ? bad.map(([, m]) => m).slice(0, 4).join('\n       ') : '');
 }
 
+/* ⑦ R15.2：**entry 级冒烟**。此前 boot 绕过了 entry（直接 createCore + host）⇒
+ * 「entry 把 core 的**模块命名空间**当控制器传给 apply」这类接线错误完全测不到 ——
+ * 2026-10-08 真机事故：重启后插件**整天没激活**（无监听器 / 无面 / 无报告），
+ * 而 boot 19/19 全绿。这一节走**真实 `entry.apply`**。 */
+{
+  const tmpE = mkdtempSync(join(tmpdir(), 'dcp-entry-'));
+  const eHandlers = new Map();
+  const eProvided = new Map();
+  const eWarns = [];
+  const entryCtx = {
+    logger: { info() {}, debug() {}, error: (...a) => eWarns.push(['error', a.join(' ')]), warn: (...a) => eWarns.push(['warn', a.join(' ')]) },
+    get: () => null,
+    on: (n, h) => eHandlers.set(n, h),
+    provide: (n, f) => eProvided.set(n, f),
+    effect: (s) => { try { return s?.(); } catch { return undefined; } },
+  };
+  let entryErr = null;
+  try {
+    const entryMod = await import(pathToFileURL(join(PLUGIN, 'entry.mjs')).href);
+    entryMod.apply(entryCtx, {}, { reportPath: join(tmpE, 'entry-report.json') });
+    await sleep(1600);
+  } catch (e) { entryErr = e; }
+  const eRep = join(tmpE, 'entry-report.json');
+  ok('entry 级冒烟：真实 entry.apply 能激活（监听器 + HUD 面 + 报告落盘）',
+    !entryErr && eHandlers.size >= 4 && eProvided.size >= 1 && existsSync(eRep),
+    (entryErr ? String(entryErr?.message ?? entryErr) + ' ' : '')
+      + `handlers=${[...eHandlers.keys()].join(',') || '（无）'} faces=${[...eProvided.keys()].join(',') || '（无）'} report=${existsSync(eRep)}`);
+  const badEntry = eWarns.filter(([, m]) => /impl 加载失败|is not a function/.test(m));
+  ok('entry 级冒烟：无「impl 加载失败 / is not a function」（core 控制器必须由 createCore 产出）',
+    badEntry.length === 0, badEntry.map(([, m]) => m).slice(0, 3).join('\n       '));
+  try { rmSync(tmpE, { recursive: true, force: true }); } catch { /* 吞 */ }
+}
+
 try { rmSync(tmp, { recursive: true, force: true }); } catch { /* 吞 */ }
 
 console.log(`\n${'='.repeat(52)}`);

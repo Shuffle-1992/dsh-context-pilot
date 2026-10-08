@@ -1529,4 +1529,52 @@ M2 域变异 **6/6 被捕获**（宿主抄回实现 / 去掉空值降级 / 模�
 （回到 apply 锚点 / apply 处无条件重锚 / 去掉客户端补拉）。其中第一条由**行为级**测试抓住：
 真跑 effort 模块 → 调工具接受 → **在 apply 之前** `hudPayload` 就必须返回冷却窗口；
 另有反向断言「未换档时不得报冷却（不能常亮）」。
+
+### R15.2 🔴 entry 传错 core（重启后插件整天不激活）+ 旧会话 INVALID_REQUEST 归因 —— ✅ 已修（2026-10-08）
+
+**用户报告**：「重启过了…其他旧会话可能报错，是否是这个插件引起的？有的会话又正常。」
+
+#### 一、先查出：重启后插件**根本没激活**（我 R14 引入的接线错误）
+
+报告里 05:12:30Z 之后**一条记录都没有**（无 `activation+2s`、无 `m2-factory`、无心跳）⇒ 插件没跑起来。
+在进程内直接跑真实 `entry.mjs` 复现出根因：
+
+```
+[dsh-context-pilot] impl 加载失败：loadDefineTool is not a function
+```
+
+**R14 我在 entry 里传了 core 的模块命名空间（`{createCore}`），而不是 `createCore(...)` 的返回值** ⇒
+宿主解构出的 `state` / `log` / `loadDefineTool` … 全是 `undefined` ⇒ `apply` 当场抛 TypeError ⇒
+**监听器、HUD 面、报告全部没有**（所以报告停更、界面只显示一句「处理失败」）。
+
+**为什么 486 条断言没抓到**：`test/boot.mjs` 当时**绕过了 entry**（自己 `createCore` 再调 `apply`）⇒
+entry→apply 这段接线是测试盲区。**已补 ⑦ entry 级冒烟**：走真实 `entry.apply`，断言
+「激活出监听器 + HUD 面 + 报告」以及「无 `impl 加载失败 / is not a function`」；
+变异验证把 `core: coreMod.createCore(...)` 换回 `core: coreMod` ⇒ **2 条断言失败**（真机事故原形）。
+entry 另加 `overrides.reportPath`（**仅供测试**，把报告写临时目录；DSH 仍按 `apply(ctx, config)` 调用）。
+
+#### 二、旧会话 `INVALID_REQUEST` 的归因：**与插件无关**（有决定性证据）
+
+报错会话 = `session-cb8d115e`（zcode-dispatch 工作区），错误在 turn 25/26/28/29 **反复出现**：
+
+```
+messages.251.1: 'tool_use' ids were found without 'tool_result' blocks immediately after:
+call_cd9b9731859a4daa87916b1e … (INVALID_REQUEST, status 400)
+```
+
+| 事实 | 证据 |
+| --- | --- |
+| **最后一次失败（turn 29，13:13:34）发生在插件「零监听器」状态下** | 该实例入场即抛错（见上），而 turn 29 的请求**照旧失败** ⇒ 插件不可能参与 |
+| 该会话里插件只在 **12:23–12:25** 注入过（对应 turn 25/26/28 那三次） | 4 条 `user/message kind=context-pilot`（seq 4051/4065/4077/4091） |
+| 但注入位置在**尾部**：`system → user → 我们 → time-context → model-selection` | 注入紧跟**用户消息**之后；而报错的 tool_use 在历史深处、**索引固定不变**（四次都是 `messages.251.1`、同一个 call id）⇒ 不是注入点造成 |
+| 该会话唯一一次插件压缩（10-07 12:40，`兜底`，省 494.4K）**边界平衡** | `shadowedRange={9,2495}`，其中 2495 = `tool/result` ⇒ 该 tool 对完整落在影子里 |
+| 那个 tool 对在**会话存储里完整**（3203 assistant → 3204 tool/call → 3205 tool/result，相邻） | 逐条转写核对；且全库 27 个会话**没有任何孤儿 tool/call**（唯一一个是我自己会话里正在执行的那次调用） |
+
+⇒ 丢失发生在 **DSH 组装请求**（surface / 窗口）这一侧，而不是存储的转写、也不是本插件。
+插件在窗口内**既没压缩**（M3 域自 R11 起加载失败）**也没能力删 tool_result**。
+**结论：不是这个插件引起的**；具体机制要看 DSH 侧请求组装代码，本次未继续深挖
+（避免在没有证据的情况下编故事）。
+
+**验证**：contract 345 + static 61 + report 59 + boot 21 = **486 断言**全绿；entry 级变异 2/2 被捕获。
+**部署**：entry.mjs 改动**需再重启一次 DSH**（当前实例的插件处于「零监听器」状态）。
 **部署**：`effort.mjs` 随 toggle/重启生效；`client.js` 需**刷新页面**。

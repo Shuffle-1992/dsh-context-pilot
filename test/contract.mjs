@@ -1465,8 +1465,15 @@ ok('R14 core.mjs 存在且导出 createCore（D1 目标模块清单最后一块�
 ok('R14 entry **预加载** core 并传给 apply（同步可用 + 与 impl 同批热换）',
   /const coreUrl = `\.\/core\.mjs\?ts=\$\{mtime\}-\$\{seq\}`;/.test(entry)
   && /Promise\.all\(\[import\(coreUrl\), import\(url\)\]\)/.test(entry)
-  && /impl\.apply\(ctx, config, \{ pluginDir: PLUGIN_DIR, reportPath: REPORT_PATH, core \}\)/.test(entry),
+  && /core: coreMod\.createCore\(\{ ctx, config, pluginDir: PLUGIN_DIR, reportPath \}\)/.test(entry),
   'entry 未预加载 core ⇒ 宿主拿不到它；改回动态 import 又无法满足「apply 期同步可用」');
+/* R15.2（2026-10-08 真机事故）：entry 必须传 `createCore(...)` 的**返回值**，不能传模块命名空间。
+ * 传命名空间时宿主解构出的 loadDefineTool/state/log … 全是 undefined ⇒ apply 当场抛 TypeError ⇒
+ * **插件整天不激活**（无监听器/无面/无报告），而 UI 只显示一句「处理失败」。
+ * 当时 boot 19/19 全绿，因为它**绕过了 entry**（现已补 entry 级冒烟，见 test/boot.mjs ⑦）。 */
+ok('R15.2 entry 传的是 **createCore 的返回值**（不是 core 的模块命名空间）',
+  /core: coreMod\.createCore\(/.test(entry) && !/core: coreMod\s*[,}]/.test(entry),
+  '传命名空间 ⇒ 宿主解构全 undefined ⇒ 激活当场失败（真机事故原形）');
 ok('R14 host.apply 接受 core；未注入时**降级不崩**（entry 未重启的形态）',
   /export function apply\(ctx, config, \{ pluginDir, reportPath, core \} = \{\}\) \{/.test(host)
   && /if \(!core\) \{/.test(host)

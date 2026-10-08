@@ -37,9 +37,12 @@ let activationSeq = 0;
  * Host 入口。同步返回 { reportPath }；实际接线在 impl 里异步完成（不阻塞激活）。
  * @param {object} ctx cordis Context
  * @param {object} config 插件 config（M4 前无字段）
+ * @param {{reportPath?: string}} [overrides] **仅供测试**（boot 的 entry 级冒烟用它把报告写到临时目录，
+ *   避免污染运行期报告）。DSH 只按 `apply(ctx, config)` 调用 ⇒ 不传即默认路径。
  */
-export function apply(ctx, config = {}) {
+export function apply(ctx, config = {}, overrides = {}) {
   const seq = ++activationSeq;
+  const reportPath = overrides.reportPath ?? REPORT_PATH;
   let mtime = 0;
   try {
     mtime = statSync(IMPL_PATH).mtimeMs;
@@ -52,7 +55,17 @@ export function apply(ctx, config = {}) {
    * ⚠️ 本文件属「改它必须重启 DSH」的薄壳：未重启时旧 entry 不会传 core，宿主已做**降级不崩**。 */
   const coreUrl = `./core.mjs?ts=${mtime}-${seq}`;
   Promise.all([import(coreUrl), import(url)])
-    .then(([core, impl]) => impl.apply(ctx, config, { pluginDir: PLUGIN_DIR, reportPath: REPORT_PATH, core }))
+    /* ⚠️⚠️ 2026-10-08 真机事故（R14 引入、R15.2 修）：这里原先直接把 core 的**模块命名空间**
+     * (`{createCore}`) 传给了 apply，而不是 `createCore(...)` 的**返回值** ⇒ 宿主解构出的
+     * `loadDefineTool` / `state` / `log` … 全是 `undefined` ⇒ apply 当场抛 TypeError ⇒
+     * **插件完全没激活**（无监听器、无面、无报告），而 UI 只显示「处理失败」。
+     * 教训：boot 冒烟当时**绕过了 entry**（直接传 createCore 的结果）⇒ 19/19 全绿也抓不到。
+     * 现已补 `test/boot.mjs` 的 **entry 级**冒烟（走真实 entry.apply）。 */
+    .then(([coreMod, impl]) => impl.apply(ctx, config, {
+      pluginDir: PLUGIN_DIR,
+      reportPath,
+      core: coreMod.createCore({ ctx, config, pluginDir: PLUGIN_DIR, reportPath }),
+    }))
     .catch((e) => {
       try {
         const m = e && e.message ? e.message : String(e);
@@ -60,5 +73,5 @@ export function apply(ctx, config = {}) {
         else console.error('[dsh-context-pilot] impl 加载失败：', m);
       } catch { /* 静默 */ }
     });
-  return { reportPath: REPORT_PATH };
+  return { reportPath };
 }
