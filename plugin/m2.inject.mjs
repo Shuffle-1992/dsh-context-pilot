@@ -160,22 +160,27 @@ export function createM2Injection(deps) {
     } catch { return null; }
   };
 
-  /** 把回执渲染成一行给模型看的话（含「要不要重试」的明确指引）。 */
+  /** 把回执渲染成一行给模型看的话（含「要不要重试」的明确指引）。
+   * R16：带档位与保留预算 ⇒ 模型能确认「自己选的档位真的生效了」。 */
   const renderCompactReceipt = (v) => {
     try {
       if (!v) return null;
+      const parts = [];
+      if (v.tier) parts.push(`${v.tier} 档`);
+      if (Number.isFinite(v.retainBudget) && v.retainBudget > 0) parts.push(`保留 ~${Math.round(v.retainBudget / 1000)}k`);
+      const head = parts.length ? `（${parts.join('，')}）` : '';
       if (v.state === 'executed') {
         const k = Number.isFinite(v.shadowedTokens) ? `省 ~${(v.shadowedTokens / 1000).toFixed(1)}K token` : '已执行';
-        return `【压缩自检】你上次请求的压缩**已执行**：${k}（保留策略 ${v.rangeSource ?? '?'}，${v.ms ?? '?'}ms）。`;
+        return `【压缩自检】你上次请求的压缩**已执行**${head}：${k}（保留策略 ${v.rangeSource ?? '?'}，${v.ms ?? '?'}ms）。`;
       }
       if (v.state === 'no-need') {
-        return `【压缩自检】你上次请求的压缩**已执行但判定无需压缩**（${v.skipWhy ?? 'nothing-to-compact'}）`
+        return `【压缩自检】你上次请求的压缩**已执行但判定无需压缩**${head}（${v.skipWhy ?? 'nothing-to-compact'}）`
           + '——当前保留预算内没有可压区间，直接继续即可。';
       }
       const why = v.why === 'm3-module-missing' || v.why === 'm3-module-pending'
         ? '压缩域模块未加载（插件内部问题，与用户无关）'
         : String(v.why ?? '未知原因');
-      return `【压缩自检】你上次请求的压缩**未执行**（${why}）。`
+      return `【压缩自检】你上次请求的压缩**未执行**${head}（${why}）。`
         + '如果上下文压力仍需要压缩，请**再调用一次** compact_context；否则忽略本行继续即可——'
         + '并请在回复正文里说明这次压缩没有生效。';
     } catch { return null; }

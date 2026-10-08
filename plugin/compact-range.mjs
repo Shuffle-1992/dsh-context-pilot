@@ -33,6 +33,57 @@
 /** 引擎默认保留比例（lib/index.js:17 `const DEFAULT_RETAIN_RATIO = .16`）。 */
 export const RETAIN_RATIO = 0.16;
 
+/**
+ * R16 压缩档位（用户要求 2026-10-08）：Agent 可在**3 个语义档位**里选一个，
+ * 范围计算仍是本模块的确定性代码（档位只改「喂给 selectRange 的预算」）——
+ * 把「不可靠的自由度」换成「有界的选择」，边界合法性仍由引擎裁决。
+ *
+ * | 档位 | 保留比例 | 1M 窗口 | 语义 |
+ * | --- | --- | --- | --- |
+ * | light | 8% | ~80k | 深压：新子任务/要预留大量空间，近端细节不再需要 |
+ * | standard | 16% | ~160k | 默认（= 既有行为，已验证）；**未选档/非法值都落这里** |
+ * | heavy | 24% | ~240k | 浅压：仍要频繁引用近端一大段（多文件联调/长推理链） |
+ */
+export const TIERS = {
+  light: 0.08,
+  standard: RETAIN_RATIO,
+  heavy: 0.24,
+};
+
+/** 档位名的规范集合（工具 schema enum 与防御性校验共用）。 */
+export const TIER_NAMES = Object.keys(TIERS);
+
+/** 保留预算下限（token）：小窗口下 light 只有 ~10k，保留太少没法干活 ⇒ 抬到 40k。 */
+export const MIN_RETAIN_TOKENS = 40_000;
+
+/** 保留预算上限（比例）：保留超过窗口一半就失去压缩意义，且逼近引擎阈值。 */
+export const MAX_RETAIN_RATIO = 0.5;
+
+/**
+ * 把档位名解析成「保留比例 + 生效预算」。
+ * @param tierName - 档位名；`undefined/null/''` ⇒ standard（未选兜底）；未知名字也落 standard。
+ * @param window - 上下文窗口（token），用于夹取计算；非法窗口时 ratio 仍返回，预算为 0。
+ * @returns `{ tier, ratio, budget, clamped, fallback }`
+ *  - `fallback: true` 表示入参非法（未知档位）被兜到 standard（取证用）；
+ *  - `clamped: true` 表示预算被 MIN/MAX 夹取过（取证用）。
+ */
+export function resolveTier(tierName, window) {
+  const name = typeof tierName === 'string' && tierName.trim() ? tierName.trim() : 'standard';
+  const fallback = !Object.prototype.hasOwnProperty.call(TIERS, name);
+  const tier = fallback ? 'standard' : name;
+  let ratio = TIERS[tier];
+  let clamped = false;
+  if (Number.isFinite(window) && window > 0) {
+    let budget = Math.floor(window * ratio);
+    const min = Math.min(MIN_RETAIN_TOKENS, Math.floor(window * MAX_RETAIN_RATIO));
+    if (budget < min) { budget = min; clamped = true; }
+    const max = Math.floor(window * MAX_RETAIN_RATIO);
+    if (budget > max) { budget = max; clamped = true; }
+    return { tier, ratio, budget, clamped, fallback };
+  }
+  return { tier, ratio, budget: 0, clamped: false, fallback };
+}
+
 /** 边界回退最大次数（每次都是零成本纯读；64 远超任何真实尾部长度）。 */
 export const MAX_WALK_BACK = 64;
 

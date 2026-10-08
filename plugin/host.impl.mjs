@@ -128,6 +128,9 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
         schedule: (reason, delay) => schedule(reason, delay), // 同 effort：避免 const TDZ
         readCfg: () => ({ enabled: M3.enabled === true }),
         getDefineTool: () => defineToolFn,
+        /* R16：档位名集合与解析函数都在 compact-range.mjs（依赖图叶子不 import 内部模块）。
+         * ⚠️ 箭头包装：rangeApi 是异步就绪的 const，直接取引用会在建对象时抓到 null。 */
+        getRangeApi: () => rangeApi ?? null,
       });
       return compactToolApi;
     })

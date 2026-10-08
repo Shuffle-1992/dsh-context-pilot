@@ -62,11 +62,13 @@ export function createM3Compaction(deps) {
 
   /**
    * 执行一次压缩：**优先自选保留范围**（近端原样保留、更早转摘要），失败则按语义退回官方策略。
+   * R16：保留预算按**会话档位**（Agent 经工具选择的 tier，会话级持久）解析；未选/非法 ⇒ standard。
    * @returns {Promise<{result:any, source:'own'|'official'|'none', skipWhy?:string|null,
-   *   officialWhy?:string|null, retainBudget:number|null, walkBacks:number, range?:{start:number,end:number}}>}
+   *   officialWhy?:string|null, retainBudget:number|null, walkBacks:number, tier?:string,
+   *   range?:{start:number,end:number}}>}
    */
   const compactWithOwnRange = async (agent, compaction, ctx) => {
-    const { forced, sig, sid, window, measure } = ctx;
+    const { forced, sig, sid, window, measure, tierName } = ctx;
     const official = async (why) => ({
       result: await compaction.service.compactIfNeeded(agent, 'context-overflow', sig),
       source: 'official',
@@ -76,8 +78,13 @@ export function createM3Compaction(deps) {
     });
     const api = await awaitRange();
     if (!api) return official('no-range-module');
-    const ratioKept = api.RETAIN_RATIO;
-    const budget = api.retainBudgetTokens(window, ratioKept);
+    /* R16：档位 → 保留预算。resolveTier 内含夹取（下限 40k、上限窗口 50%）与未知档位回落；
+     * 调用方负责从会话档位偏好里解析 tierName（强制线/idle/工具触发三路同源）。 */
+    const tierInfo = typeof api.resolveTier === 'function'
+      ? api.resolveTier(tierName ?? 'standard', window)
+      : { tier: 'standard', ratio: api.RETAIN_RATIO, budget: api.retainBudgetTokens(window, api.RETAIN_RATIO), clamped: false, fallback: false };
+    const ratioKept = tierInfo.ratio;
+    const budget = tierInfo.budget > 0 ? tierInfo.budget : api.retainBudgetTokens(window, ratioKept);
     const sel = api.selectRange({ session: agent.session, measurement: measure, retainTokens: budget });
     /* 取证：无论成败都留一次范围读数（范围不对时这是唯一的现场）。
      * ⚠️ **必须同时记 surface 位置（startIdx/endIdx）**：seq 是全局事件序号，**在 surface 上并不单调**——
@@ -90,6 +97,9 @@ export function createM3Compaction(deps) {
       at: new Date().toISOString(),
       sessionId: sid,
       window,
+      tier: tierInfo.tier,
+      tierClamped: tierInfo.clamped || null,
+      tierFallback: tierInfo.fallback || null,
       retainRatio: ratioKept,
       budget,
       ok: sel.ok === true,
@@ -116,7 +126,7 @@ export function createM3Compaction(deps) {
     for (;;) {
       try {
         const result = await compaction.service.compactRegion(sel.start, end, agent, sig);
-        return { result, source: 'own', retainBudget: budget, walkBacks, range: { start: sel.start, end } };
+        return { result, source: 'own', retainBudget: budget, walkBacks, tier: tierInfo.tier, range: { start: sel.start, end } };
       } catch (e) {
         /* 末端不合法 ⇒ 回退一个 surface 节点重试（零副作用、零 LLM 成本，见文件头）。 */
         if (api.isEndBoundaryError(e)) {
@@ -190,21 +200,24 @@ export function createM3Compaction(deps) {
        *   - 越强制线（forced）  ⇒ pressure 语义（原本就是「无条件兜底压」） */
       const forced = ratio >= effCritical;
       const trigger = wanted ? 'context-overflow' : 'pressure';
+      /* R16：档位是**会话级持久偏好**——智能压缩线（工具）与强制线都读同一个偏好；
+       * 未选/未知 ⇒ standard（16%）。这满足用户要求「两线都要有 Agent 参与选档，未选 16% 兜底」。 */
+      const tierName = tool?.getTier?.(sid) ?? 'standard';
       log(
         'info',
-        `M3.5 pre-step 先压开始：${wanted ? '模型主动请求' : '越强制线'}（占用 ${(ratio * 100).toFixed(1)}%，强制线 ${(effCritical * 100).toFixed(1)}%，via ${compaction.via}）`,
+        `M3.5 pre-step 先压开始：${wanted ? '模型主动请求' : '越强制线'}（占用 ${(ratio * 100).toFixed(1)}%，强制线 ${(effCritical * 100).toFixed(1)}%，档位 ${tierName}，via ${compaction.via}）`,
       );
-      const out = await compactWithOwnRange(agent, compaction, { forced, sig, sid, window: mr.window, measure: mr.measure });
+      const out = await compactWithOwnRange(agent, compaction, { forced, sig, sid, window: mr.window, measure: mr.measure, tierName });
       let result = out.result;
       let rangeSource = out.source;
       let ratioAfter = null;
-      /* 强制线收口：自选范围若保留过多、压完仍在线之上 ⇒ 追加官方 overflow 再压一次。
-       * 保证「越强制线必定压到线下」这条旧承诺不因换了保留策略而丢失。 */
-      if (forced && rangeSource === 'own' && result != null) {
+      /* 强制线收口（R16 泛化）：**无论档位/触发**，自算压完仍在线之上 ⇒ 追加官方 overflow 再压一次。
+       * 保证「越强制线必定压到线下」这条旧承诺不因换了保留策略（哪怕 Agent 选了 heavy 浅压）而丢失。 */
+      if (rangeSource === 'own' && result != null) {
         const mr2 = measureRatio(agent.session);
         ratioAfter = mr2.ok ? mr2.ratio : null;
         if (mr2.ok && mr2.ratio != null && mr2.ratio >= effCritical) {
-          log('info', `M3.5 自选范围后占用仍 ${(mr2.ratio * 100).toFixed(1)}% ≥ 强制线 ${(effCritical * 100).toFixed(1)}% ⇒ 追加官方 overflow 收口`);
+          log('info', `M3.5 自选范围（档位 ${out.tier ?? tierName}）后占用仍 ${(mr2.ratio * 100).toFixed(1)}% ≥ 强制线 ${(effCritical * 100).toFixed(1)}% ⇒ 追加官方 overflow 收口`);
           const r2 = await compaction.service.compactIfNeeded(agent, 'context-overflow', sig);
           if (r2) {
             result = r2;
@@ -222,6 +235,8 @@ export function createM3Compaction(deps) {
         sessionId: sid,
         state: result != null ? 'executed' : 'no-need',
         trigger,
+        tier: out.tier ?? tierName,
+        retainBudget: out.retainBudget ?? null,
         rangeSource,
         shadowedTokens: result?.shadowedTokenCount ?? null,
         skipWhy: out.skipWhy ?? null,
@@ -233,6 +248,7 @@ export function createM3Compaction(deps) {
        * own+official=自选后仍越线再收口 / none=判定无需压）。retainBudget 是自选预算（token）。 */
       const rangeInfo = {
         rangeSource,
+        tier: out.tier ?? tierName,
         retainBudget: out.retainBudget ?? null,
         walkBacks: out.walkBacks ?? 0,
         skipWhy: out.skipWhy ?? null,

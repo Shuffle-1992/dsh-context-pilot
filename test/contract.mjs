@@ -440,8 +440,12 @@ ok('工具返回 scheduled=next-step（模型据此知道「可以继续干活�
 /* R15（用户要求「工具完成后进行检查，起码 agent 自己过一遍」）：工具只能登记，执行在下一步 ⇒
  * 结果必须带**自检契约**；否则「回 ok 但实际没执行」对模型完全不可见（2026-10-08 真机踩过）。 */
 ok('压缩工具结果带自检契约（下一步会有「压缩自检」回执 + 未执行时怎么办）',
-  /verify: '下一步开头会有一条「压缩自检」回执；若显示「未执行」，请再调用一次 compact_context，或直接告知用户。',/.test(ct),
+  /verify: `已登记，档位 \$\{tier\}/.test(ct) && /「压缩自检」回执/.test(ct) && /请再调用一次 compact_context/.test(ct),
   '缺自检契约 ⇒ 工具回 ok 但没执行时，模型无从察觉（真机踩过的盲区）');
+/* R16：档位是会话级持续选择 ⇒ 自检契约必须把「持续生效」也教给模型。 */
+ok('压缩工具自检契约说明档位**持续生效**（含强制线）',
+  /该档位此后对本会话的压缩（含强制线）持续生效/.test(ct),
+  '只报本次 ⇒ 模型以为每次都要重选档位');
 
 const ctPreStep = /const preStepCompaction = async \(payload\) => \{([\s\S]*?)\n  \};/.exec(m3src)?.[1] ?? '';
 ok('解析出 preStepCompaction 函数体', ctPreStep.length > 0, '未找到 preStepCompaction');
@@ -504,7 +508,9 @@ ok('R10 编排层已抽：宿主不再自带 preStepCompaction / idleSweep 实�
   && !/state\.m3\.actErrors\[code\]/.test(hostNoComment),
   '宿主仍带编排层实现/留痕 ⇒ 两套真相，且跨域回调会退化成闭包穿透（R7 审计的第二个解耦障碍回归）');
 ok('R5 保留策略：自选范围优先 + 官方 overflow 兜底',
-  /const out = await compactWithOwnRange\(agent, compaction, \{ forced, sig, sid, window: mr\.window, measure: mr\.measure \}\);/.test(ctPreStep)
+  /const out = await compactWithOwnRange\(agent, compaction, \{ forced, sig, sid, window: mr\.window, measure: mr\.measure, tierName \}\);/.test(ctPreStep)
+  /* R16：档位从**会话级偏好**读取（工具登记），未选 ⇒ standard 兜底（用户明确要求）。 */
+  && /const tierName = tool\?\.getTier\?\.\(sid\) \?\? 'standard';/.test(ctPreStep)
   && /const forced = ratio >= effCritical;/.test(ctPreStep)
   && /compactRegion\(sel\.start, end, agent, sig\)/.test(ctOwnRange)
   /* ⚠️ 必须连**回退次数上限**一起钉死：只断言 `return official('boundary-exhausted')` 会被
@@ -633,9 +639,13 @@ ok('host 把 measure 本体带进自选范围（不二次测量、不猜节点�
   /return \{ ok: true, used, surface, window, ratio, measure: m\.value \};/.test(m3src)
   && /api\.selectRange\(\{ session: agent\.session, measurement: measure, retainTokens: budget \}\)/.test(ctOwnRange),
   '没带 measure ⇒ 只能退化成官方路径，自选范围形同未接');
-ok('保留比例来自模块常量，不进 M3（M3 语义 = 用户可配项）',
-  /const ratioKept = api\.RETAIN_RATIO;/.test(ctOwnRange) && !/M3\.retainRatio/.test(hostNoComment),
-  '塞进 M3 会让「M3 字段必须在 schema 中」护栏失败，或在面板露出一个改不动的假开关');
+ok('保留预算按**会话档位**解析（R16：档位只改预算，不改范围算法）',
+  /resolveTier\(tierName \?\? 'standard', window\)/.test(ctOwnRange)
+  && /api\.resolveTier/.test(ctOwnRange) && /selectRange\(\{ session: agent\.session, measurement: measure, retainTokens: budget \}\)/.test(ctOwnRange),
+  '档位没接进预算 ⇒ Agent 选档无效（功能性回归）');
+ok('rangeProbe 留档位取证（请求档位/夹取/回落）',
+  /tier: tierInfo\.tier,/.test(ctOwnRange) && /tierClamped: tierInfo\.clamped/.test(ctOwnRange) && /tierFallback: tierInfo\.fallback/.test(ctOwnRange),
+  '选档无现场 ⇒「Agent 选了 heavy 却按 16% 压」这类问题无从还原');
 ok('自选范围全程留痕（rangeProbe + rangeSource）',
   /state\.m3\.rangeProbe = \{/.test(ctOwnRange) && /rangeSource,/.test(ctPreStep) && /rangeProbe: null,/.test(hostOrCore),
   '范围算错时无现场 ⇒ 只剩「压了个奇怪的东西」这一句现象');
@@ -647,11 +657,11 @@ ok('自选范围全程留痕（rangeProbe + rangeSource）',
 ok('rangeProbe 同时记 surface 位置（seq 在 surface 上不单调，只有位置能自证顺序）',
   /startIdx: sel\.startIdx \?\? null,/.test(m3src) && /endIdx: sel\.endIdx \?\? null,/.test(m3src),
   '只记 seq ⇒ 检查点插入表头后必然出现「起点 seq > 终点 seq」的记录，读者会误判为 bug');
-ok('强制线收口：自选范围后仍越线则追加官方 overflow（保住旧的强制承诺）',
-  /if \(forced && rangeSource === 'own' && result != null\) \{/.test(ctPreStep)
+ok('强制线收口：自选范围后仍越线则追加官方 overflow（R16 泛化：**无论档位**，heavy 浅压也不能停在线上）',
+  /if \(rangeSource === 'own' && result != null\) \{/.test(ctPreStep)
   && /mr2\.ratio >= effCritical/.test(ctPreStep)
   && /rangeSource = 'own\+official';/.test(ctPreStep),
-  '只自选不收口 ⇒ 保留过多时强制线可能压不下去');
+  '只自选不收口 ⇒ heavy 档保留过多时强制线可能压不下去');
 
 /* ═══════════ 6.19 「先说再调用」+「自己算范围」教学（2026-10-08 用户要求）═══════════
  * 用户要求两件事：
@@ -705,9 +715,11 @@ ok('一次性说明把「保留多少」按活值写出来，并说明「未超�
   /窗口 × 16%/.test(briefLive) && /近端约 160k token 原样保留/.test(briefLive) && /什么都不会压/.test(briefLive),
   '未教自选范围 ⇒ 模型以为压缩=砍光，于是不敢调用');
 const briefNoNum = ctApi.renderBrief({ criticalRatio: 0.75 }) ?? '';
-ok('拿不到活值时不编数字（退化为「固定比例」措辞）',
-  !/16%/.test(briefNoNum) && !/\d+k token/.test(briefNoNum) && /固定比例/.test(briefNoNum),
-  '活值缺失时仍写死数字 ⇒ 常量/窗口变化后教学自相矛盾（本项目已因此踩过坑）');
+/* R16：档位比例（8/16/24%）是 compact-range.mjs 的**模块常量**，允许写死在教学里；
+ * 本条护栏只针对「当前窗口的 token 数」——那个必须按活值现算，不得编数字。 */
+ok('拿不到活值时不编**当前窗口的 token 数**（档位比例是常量，允许出现）',
+  !/近端约 \d+k token/.test(briefNoNum) && !/现行生效：\d+k/.test(briefNoNum) && /固定比例/.test(briefNoNum),
+  '活值缺失时仍写死窗口 token 数 ⇒ 常量/窗口变化后教学自相矛盾（本项目已因此踩过坑）');
 ok('「保留多少」活值传进两个教学出口（读常量 + 按当前窗口现算，查 m2.inject.mjs）',
   /const ratio = getRangeApi\(\)\?\.RETAIN_RATIO \?\? null;/.test(m2src)
   && /Math\.floor\(w \* ratio\)/.test(m2src)
@@ -1360,14 +1372,35 @@ const ctFix = ctMod2.createCompactTool({
 const ctRun = async (sid, reason) => (await ctFix.ensure(), ctSpec.execute({ reason }, { agent: mkAgent(sid) }));
 const rA = await ctRun('sid-A', 'A 会话请求');
 ok('工具登记成功（行为）', rA && rA.ok === true && rA.scheduled === 'next-step', `实际 ${JSON.stringify(rA)}`);
+ok('R16 工具结果带 tier 且在 output.schema 里已声明（R15.3 同类护栏）',
+  rA.tier === 'standard' && Object.keys(ctSpec.output.schema.properties).includes('tier'),
+  `实际 tier=${JSON.stringify(rA?.tier)}；未声明 ⇒ 宿主按 schema 拒掉整条调用（R15.3 同款事故）`);
+ok('R16 工具入参 schema 声明 tier（可选，枚举内文案），且**不在 required**（R7 教训）',
+  Object.keys(ctSpec.parameters).includes('tier') && !String(ctSpec.parameters.tier).includes('required'),
+  `实际 parameters keys=${JSON.stringify(Object.keys(ctSpec.parameters))}`);
+/* 会话级档位偏好：登记 → 持久 → 改选；非法值落 standard；未登记默认 standard。 */
+{
+  const t1 = ctFix.getTier('sid-T');
+  ctSpec.execute({ tier: 'heavy', reason: '要多留近端' }, { agent: mkAgent('sid-T') });
+  const t2 = ctFix.getTier('sid-T');
+  ctSpec.execute({ tier: '不存在的档位' }, { agent: mkAgent('sid-T') });
+  const t3 = ctFix.getTier('sid-T');
+  const t4 = ctFix.getTier('sid-从没登记');
+  ok('R16 档位是**会话级持久选择**（未选=standard → heavy → 非法值回落 standard）',
+    t1 === 'standard' && t2 === 'heavy' && t3 === 'standard' && t4 === 'standard',
+    `实际 ${JSON.stringify([t1, t2, t3, t4])}`);
+  ok('R16 档位按会话隔离（sid-T 的选择不影响别的会话）',
+    ctFix.getTier('sid-A') === 'standard',
+    '档位串会话 ⇒ 在 A 选的 heavy 会改掉 B 的强制线行为');
+}
 ok('未消费的意图能被 pending() 列出（跨会话诊断出口存在）',
-  Array.isArray(ctFix.pending()) && ctFix.pending().length === 1 && ctFix.pending()[0].sid === 'sid-A',
+  Array.isArray(ctFix.pending()) && ctFix.pending().some((x) => x.sid === 'sid-A'),
   'pending() 缺失/为空 ⇒ 「sid 轮转导致压缩静默不发生」将无从诊断');
 ok('别的 sid 查询不会误消费（多会话并存下的隔离）',
   ctFix.peekIntent('sid-B') === null && ctFix.peekIntent('sid-A') !== null,
   '按错键查询会命中/丢失意图 ⇒ 会在错误的会话上执行压缩');
 ok('消费后即不可再见（takeIntent 语义）',
-  ctFix.takeIntent('sid-A') !== null && ctFix.peekIntent('sid-A') === null && ctFix.pending().length === 0,
+  ctFix.takeIntent('sid-A') !== null && ctFix.peekIntent('sid-A') === null && !ctFix.pending().some((x) => x.sid === 'sid-A'),
   '消费语义错 ⇒ 同一意图会被反复执行');
 ok('意图表有全表 TTL 清扫（不再是「只查自己才清」）',
   /function sweepExpired\(/.test(ctNoComment) && /sweepExpired\(\);\n\s+const it = bySid\.get\(key\);/.test(ct),
@@ -1527,6 +1560,36 @@ ok('F2 可能在 add 与 .finally 之间抛错的语句已前移',
  *      —— 起因：真机上一次 compact_context 回了 ok/scheduled，但压缩一次都没发生（消费者模块缺失），
  *         而模型毫无察觉，连「当前档位/用量行」也一起消失了。
  *   ② 「每次发起任务…都时刻可以进行思考强度切换；长任务有必要可以增加次数，以实际需求为准」。 */
+console.log('\n== 6.20 工具后自检回执 + 思考强度可切性 ==');
+/* R16 前置：compact-range 的档位常量与解析（纯函数，直接行为级验证）。 */
+console.log('\n== 6.20a R16 压缩档位（compact-range.mjs） ==');
+{
+  const crMod = await import(pathToFileURL(join(PLUGIN, 'compact-range.mjs')).href);
+  ok('档位常量：light=8% / standard=16%（=RETAIN_RATIO）/ heavy=24%',
+    crMod.TIERS.light === 0.08 && crMod.TIERS.standard === crMod.RETAIN_RATIO && crMod.TIERS.heavy === 0.24,
+    `实际 ${JSON.stringify(crMod.TIERS)}`);
+  const W = 1_000_000;
+  const tL = crMod.resolveTier('light', W);
+  const tS = crMod.resolveTier('standard', W);
+  const tH = crMod.resolveTier('heavy', W);
+  ok('三档预算按窗口折算（1M：80k / 160k / 240k，不夹取）',
+    tL.budget === 80_000 && tS.budget === 160_000 && tH.budget === 240_000
+      && !tL.clamped && !tS.clamped && !tH.clamped && !tL.fallback && !tS.fallback && !tH.fallback,
+    `实际 ${JSON.stringify([tL, tS, tH].map((x) => x.budget))}`);
+  /* 小窗口夹取：128k 窗口的 light 只有 10k ⇒ 抬到下限 40k；standard 20k 也抬到 40k。 */
+  const small = 128_000;
+  const cL = crMod.resolveTier('light', small);
+  const cS = crMod.resolveTier('standard', small);
+  ok('小窗口下夹取到下限 40k（light/standard 都抬）',
+    cL.budget === 40_000 && cL.clamped === true && cS.budget === 40_000 && cS.clamped === true,
+    `实际 light=${cL.budget} standard=${cS.budget}`);
+  const bad = crMod.resolveTier('不存在的档位', W);
+  const none = crMod.resolveTier(undefined, W);
+  ok('未知档位/未选都落 standard（用户要求「未选 16% 兜底」）',
+    bad.tier === 'standard' && bad.budget === 160_000 && bad.fallback === true
+      && none.tier === 'standard' && none.fallback === false && none.budget === 160_000,
+    `实际 bad=${JSON.stringify(bad)} none=${JSON.stringify(none)}`);
+}
 console.log('\n== 6.20 工具后自检回执 + 思考强度可切性 ==');
 const m2Mod = await import(pathToFileURL(join(PLUGIN, 'm2.inject.mjs')).href);
 const mkM2 = (state, measure) => m2Mod.createM2Injection({

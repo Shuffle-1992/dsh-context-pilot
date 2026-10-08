@@ -42,10 +42,12 @@ export const TOOL_NAME = 'compact_context';
 export const INTENT_TTL_MS = 120_000;
 
 export function createCompactTool(deps) {
-  const { svc, tryOf, pick, msg, log, schedule, state, readCfg, getDefineTool } = deps;
+  const { svc, tryOf, pick, msg, log, schedule, state, readCfg, getDefineTool, getRangeApi } = deps;
 
   /** sid -> { at, reason }。单一状态表：登记点与消费点同键，只有一个删除点（消费/过期）。 */
   const bySid = new Map();
+  /** R16：sid -> { tier, at }。**会话级档位偏好**（无 TTL——它是长期选择，不是一次性意图）。 */
+  const tierBySid = new Map();
   let toolRegistered = false;
 
   const cfgNow = () => {
@@ -105,6 +107,26 @@ export function createCompactTool(deps) {
     return it;
   }
 
+  /* ═══════════ R16 档位选择（会话级持久偏好，无 TTL） ═══════════
+   * 用户要求（2026-10-08）：智能压缩线与强制压缩线都要有 Agent 参与选档；
+   * 未选 ⇒ standard（16%）兜底。⇒ 档位是**会话级持久选择**：登记后一直生效，
+   * 直到 Agent 再次改选。与「意图」（一次性、有 TTL）分开存。 */
+
+  /** 登记/更新会话档位（入参已由 normTier 规范化）。 */
+  function setTier(sid, tier) {
+    const key = String(sid ?? '');
+    if (!key) return;
+    tierBySid.set(key, { tier, at: Date.now() });
+  }
+
+  /** 读会话档位（未登记 ⇒ standard）。宿主的强制线/idle/工具触发统一走这里。 */
+  function getTier(sid) {
+    try {
+      const it = tierBySid.get(String(sid ?? ''));
+      return it?.tier ?? 'standard';
+    } catch { return 'standard'; }
+  }
+
   /**
    * 未过期的意图清单（**诊断出口**）。
    * 用途：宿主在本 sid 查不到意图、但表里还有**别的 sid** 的意图时落痕——
@@ -122,6 +144,19 @@ export function createCompactTool(deps) {
   /* ═══════════ 工具 ═══════════ */
 
   /**
+   * R16：规范档位名（未知/缺省 ⇒ standard 并标 fallback）。
+   * 名字集合来自 compact-range.mjs 的 TIER_NAMES（经宿主注入，避免叶子模块 import 内部模块）。
+   */
+  const tierNames = () => {
+    try { const n = getRangeApi?.()?.TIER_NAMES; return Array.isArray(n) && n.length ? n : ['light', 'standard', 'heavy']; }
+    catch { return ['light', 'standard', 'heavy']; }
+  };
+  const normTier = (tierName) => {
+    const t = typeof tierName === 'string' && tierName.trim() ? tierName.trim() : 'standard';
+    return tierNames().includes(t) ? { tier: t, fallback: false } : { tier: 'standard', fallback: true };
+  };
+
+  /**
    * 工具执行体。
    * ⚠️ 结论⑤（沿用智能思考）：**绝不抛错**——抛错对模型是可见失败且会中断本轮，
    * 而这里只想要「登记成功/失败」。任何异常都吞成结构化结果。
@@ -136,6 +171,9 @@ export function createCompactTool(deps) {
       const sid = sidOf(agent);
       if (!sid) return { ok: false, error: '无法解析会话 id。' };
       const reason = String(args?.reason ?? '').trim().slice(0, 200);
+      /* R16：档位是**会话级持久偏好**（智能压缩线与强制线都读它）；未选/非法 ⇒ standard 兜底。 */
+      const { tier, fallback } = normTier(args?.tier);
+      setTier(sid, tier);
       const at = Date.now();
       const prev = bySid.get(sid);
       bySid.set(sid, { at, reason });
@@ -144,11 +182,13 @@ export function createCompactTool(deps) {
         at: new Date().toISOString(),
         sessionId: sid,
         reason: reason || null,
+        tier,
+        tierFallback: fallback || null,
         /* 连续调用（<5s）多半是模型重复触发；记下来供报告核查，但**不拒绝**——
          * 拒绝会让模型以为自己没调成功而反复重试；意图是幂等的（覆盖写）。 */
         repeated: !!prev && at - prev.at < 5000,
       };
-      log('info', `智能压缩 工具已登记：下一步开始前执行（sid ${sid.slice(0, 8)}…${reason ? '，理由：' + reason : ''}）`);
+      log('info', `智能压缩 工具已登记：下一步开始前执行（sid ${sid.slice(0, 8)}…，档位 ${tier}${fallback ? '（非法值兜底）' : ''}${reason ? '，理由：' + reason : ''}）`);
       schedule('compact-tool', 400);
       /* R15（用户要求「工具完成后进行检查，起码 agent 自己过一遍」）：
        * 工具只能**登记**，真正的执行在下一步的 pre-step ⇒ 必须给出**自检契约**，否则
@@ -157,7 +197,8 @@ export function createCompactTool(deps) {
       return {
         ok: true,
         scheduled: 'next-step',
-        verify: '下一步开头会有一条「压缩自检」回执；若显示「未执行」，请再调用一次 compact_context，或直接告知用户。',
+        tier,
+        verify: `已登记，档位 ${tier}（保留窗口 × ${tier === 'light' ? 8 : tier === 'heavy' ? 24 : 16}%）——该档位此后对本会话的压缩（含强制线）持续生效，直到再次改选。下一步开头会有一条「压缩自检」回执；若显示「未执行」，请再调用一次 compact_context，或直接告知用户。`,
       };
     } catch (e) {
       log('warn', `智能压缩 工具执行异常（吞）：${msg(e)}`);
@@ -205,6 +246,15 @@ export function createCompactTool(deps) {
         `压缩在**你的下一个步骤开始前**执行，本轮不中断：调用后请**直接继续当前任务**——不要为了压缩而停下、不要结束回合；`
           + '之后的步骤都在压缩后的上下文上继续。**不需要**任何「待执行」占位，也**没有**任何自动拉起动作。',
         retentionClause(retainRatio, retainTokens),
+        /* R16：压缩档位教学（用户要求「明确教学，确保 Agent 能明白 3 档可选与各自压缩情况」）。
+         * 三档只是**保留预算**不同，范围计算/边界保护完全一致；档位是会话级持续选择。 */
+        `**压缩档位（tier，调用 ${TOOL_NAME} 时可选，3 选 1；不选 = standard）**：`
+          + '`light` 深压=保留窗口 × 8%（1M 窗口 ≈ 80k）——接下来是全新子任务、近端细节不再需要，或要预留大量空间；'
+          + '`standard` 标准=× 16%（≈160k）——默认，拿不准就用它；'
+          + '`heavy` 浅压=× 24%（≈240k）——接下来仍要频繁引用近端一大段（多文件联调/长推理链）。'
+          + '**选档理由和压缩理由写在同一句正文里即可**（例：「占用 52%，接下来是全新子任务，我用 light 深压腾空间」）。',
+        `**档位是会话级持续选择**：登记后对本会话之后的所有压缩（含 ${crit} 强制线）持续生效，直到再次改选；`
+          + '范围计算、边界保护（不会切坏 tool 对）、摘要策略在三个档位下**完全一致**，差别只有保留多少近端内容。',
         /* R15：教会模型**看回执**。工具只登记、执行在下一步 ⇒ 「回了 ok 但没执行」必须有可见通道
          * （2026-10-08 真机踩过：M3 域两版缺失，压缩一次没发生而模型毫无察觉）。 */
         `**调用后请看回执**：下一步开头会有一条「压缩自检」——显示「已执行」即完成；`
@@ -231,6 +281,12 @@ export function createCompactTool(deps) {
       const crit = `${Math.round((Number(criticalRatio) || 0.8) * 100)}%`;
       const r = Number(retainRatio);
       const t = Number(retainTokens);
+      /* R16：档位行按**当前窗口**折算三档的近似保留量；拿不到时给比例不给 token 数。 */
+      const tierLine = Number.isFinite(t) && t > 0
+        ? `**light** 深压=保留窗口 × 8%（当前 ≈${kfmt(t * 0.5)} token）——近端细节不再需要/要预留大量空间时用；`
+          + `**standard** 标准=× 16%（≈${kfmt(t)}）——默认，拿不准就用它；`
+          + `**heavy** 浅压=× 24%（≈${kfmt(t * 1.5)}）——接下来仍要频繁引用近端一大段（多文件联调/长推理链）时用。`
+        : `**light** 深压=窗口 × 8%；**standard** 标准=× 16%（默认）；**heavy** 浅压=× 24%。`;
       const keep = Number.isFinite(r) && r > 0 && Number.isFinite(t) && t > 0
         ? `近端约 ${kfmt(t)} token 原样保留（窗口 × ${Math.round(r * 100)}%），更早的转摘要；未超预算则什么都不压`
         : '近端内容原样保留，更早的转摘要；未超预算则什么都不压';
@@ -240,8 +296,11 @@ export function createCompactTool(deps) {
           + `（例：「占用 ${pct}，接下来是新子任务，我先压缩再继续」），**再**调用工具 ${TOOL_NAME}（可选 reason 说明理由）。`
           + `它会让压缩在**你的下一个步骤开始前**执行，**本轮不中断**。`
           + `调用后请**直接继续当前任务**——不要为了压缩而停下、不要结束回合；之后的所有步骤都在压缩后的上下文上继续。`,
-        `• 保留多少：自选保留范围——${keep}。`,
-        `• 依赖（要引用之前给出的文件路径/结论/报错现场/长推理链中间量）：不要调用。占用达 ${crit} 时系统会强制压缩（同样保留摘要+近期消息），无需任何操作。`,
+        `• 压缩档位（tier，3 选 1，可选；范围由插件按档位自算，不会切坏 tool 对）：${tierLine}`
+          + `档位对本会话后续所有压缩（含 ${crit} 强制线）持续生效，直到再次改选；不传参 = 维持现状（初始 standard）。`
+          + `（现行生效：${keep}。）`,
+        `• 依赖（要引用之前给出的文件路径/结论/报错现场/长推理链中间量）：不要调用（或改用 heavy 浅压）。`
+          + `占用达 ${crit} 时系统会强制压缩（同样先自算保留范围，摘要+近期消息），无需任何操作。`,
         `• 调用前自检：本轮关键产物（文件路径、决策、未落盘的结论）先写入文件或本回复正文，再调用压缩。`,
       ].join('\n');
     } catch {
@@ -260,11 +319,16 @@ export function createCompactTool(deps) {
         /* 2026-10-08 用户要求：「先说，再调用」。
          * 工具**描述本身就是每轮都随请求下发的文本**——把这条要求放这里，等于零额外 token 的每轮提醒。 */
         + '**调用本工具前，先在回复正文里用一句话说明你要压缩的理由**（用户看不到工具调用的理由，只说一句用户才知道你为什么压），然后再调用。'
-        + '压缩会在**你的下一个步骤开始前**执行，本轮不中断；它按「上下文窗口的固定比例」自选保留范围——近端内容原样保留，更早的转摘要。'
+        + '压缩会在**你的下一个步骤开始前**执行，本轮不中断；保留范围由插件按**你选的档位**自算（近端原样保留，更早的转摘要）。'
+        + '**压缩档位（tier，3 选 1，可选参数；不选 = standard）**：'
+        + '`light` 深压——保留窗口 × 8%（1M 窗口 ≈ 80k），适合接下来是全新子任务、近端细节不再需要，或要预留大量空间；'
+        + '`standard` 标准——窗口 × 16%（≈160k），默认；拿不准就用它；'
+        + '`heavy` 浅压——窗口 × 24%（≈240k），适合接下来仍要频繁引用近端一大段（多文件联调/长推理链）。'
+        + '档位是**会话级持续选择**：登记后对本会话之后的所有压缩（含 75% 强制线）持续生效，直到再次改选。'
         + '调用后请直接继续当前任务——不要为了压缩而停下、不要结束回合：'
         + '之后的步骤都在压缩后的上下文上继续，无需任何恢复动作。'
         + '占用偏高、或接下来的任务繁重需要预留空间、且不再依赖更早的对话细节时使用；'
-        + '若仍需引用之前的文件路径/结论/报错现场/长推理链中间量，先不要调用。',
+        + '若仍需引用之前的文件路径/结论/报错现场/长推理链中间量，先不要调用（或用 heavy 浅压）。',
       parameters: {
         /* ⚠️ 可选参数必须**省略** `required`——写成 `required: false` 会被 defineTool 拒绝：
          * 实测 `unsupported JSON schema: parameters.reason.required must be true when present`
@@ -273,6 +337,13 @@ export function createCompactTool(deps) {
         reason: {
           type: 'string',
           description: '（可选）为什么现在压缩——**同一句话也要写在你的回复正文里**，便于用户当场看到决策依据。',
+        },
+        /* R16：压缩档位（3 选 1，可选）。范围计算仍在插件（确定性代码）⇒ 模型只选语义档位，
+         * 不接触会「切坏 tool 对」的底层参数。 */
+        tier: {
+          type: 'string',
+          description: '（可选）压缩档位：light=深压（保留 8%）/ standard=标准（16%，默认）/ heavy=浅压（24%）。'
+            + '选档理由写在回复正文里；档位对本会话后续所有压缩持续生效。',
         },
       },
       output: {
@@ -285,6 +356,7 @@ export function createCompactTool(deps) {
             /* R15.3（2026-10-08 真机事故）：宿主**按 output.schema 校验工具返回值**
              * （additionalProperties:false ⇒ 多一个字段就整条工具调用失败：
              * `"value.verify" is not a declared property`）⇒ 加返回字段必须同时在这里声明。 */
+            tier: { type: 'string', description: '本次登记并持续生效的压缩档位（light/standard/heavy）。' },
             verify: {
               type: 'string',
               description: '自检契约：下一步开头会有「压缩自检」回执；显示未执行就再调用一次或告知用户。',
@@ -354,5 +426,5 @@ export function createCompactTool(deps) {
     };
   }
 
-  return { TOOL_NAME, ensure, peekIntent, takeIntent, pending, renderBrief, renderCard, diag };
+  return { TOOL_NAME, ensure, peekIntent, takeIntent, pending, getTier, setTier, renderBrief, renderCard, diag };
 }
