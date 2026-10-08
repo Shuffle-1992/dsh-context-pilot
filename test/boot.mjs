@@ -129,6 +129,42 @@ ok('pre-step handler 真调用不抛（证 M3/effort/compact-tool 接线可达�
 ok('pre-step handler 放行原决策（signal 已 abort ⇒ 原样返回）',
   decision?.kind === 'allow', `实际 ${JSON.stringify(decision)}`);
 
+/* ③b R12：**真跑 M2 注入路径**（非 abort + step=1）。
+ * 判据用「记账痕迹」而不是返回值：模块未加载时宿主在 `if (!m2Ctl) return decision;` 直接放行、
+ * **不会留下任何 m2.skips 记录**；模块加载了则 `buildInjection` 必然走到某个分支并记账
+ * （本桩环境里 `svc` 全为 null、`createUserMessage` 大概率解析不出 ⇒ 落在 noFactory / measureFail）。
+ * ⇒ 这一条正是「M2 接线是否可达」的运行时证据。 */
+let injectionProbe = null;
+try {
+  injectionProbe = await preStep(
+    {
+      agent: { id: 'boot-probe', session: { id: 'boot-probe', surface: { nodes: [] }, requestHeader: () => null, eventAt: () => null }, ctx: { get: () => null } },
+      signal: undefined,
+      step: 1,
+      turn: 2,
+    },
+    async () => ({ kind: 'allow', messages: [] }),
+  );
+} catch (e) {
+  ok('pre-step 注入路径真调用不抛（证 M2 接线可达）', false, String(e?.message ?? e));
+}
+ok('pre-step 注入路径不抛且放行原决策（step=1、未 abort）',
+  injectionProbe?.kind === 'allow', `实际 ${JSON.stringify(injectionProbe)}`);
+/* 等 `activation+2s` 那次刷新把计数器落进报告（激活后 2s；此处已在 1.5s + 探针之后）。 */
+await sleep(1000);
+{
+  const rep = existsSync(reportPath) ? JSON.parse(readFileSync(reportPath, 'utf8')) : null;
+  const last = rep?.history?.[rep.history.length - 1];
+  const skips = last?.m2?.skips ?? {};
+  const injected = Number(last?.m2?.injections ?? 0);
+  ok('M2 注入路径真跑过并留下记账（m2.skips 有键 或 injections>0）',
+    Object.keys(skips).length > 0 || injected > 0,
+    `实际 skips=${JSON.stringify(skips)} injections=${injected} —— 两者皆空说明接线不可达（M2 模块未加载）`);
+  ok('m2 取证字段齐全（via / registered / lastText 键存在）',
+    last?.m2 != null && 'via' in last.m2 && 'registered' in last.m2 && 'lastText' in last.m2,
+    `实际键 ${Object.keys(last?.m2 ?? {}).join(',')}`);
+}
+
 /* ④ 启动回填真跑过（有历史时才可判定；无历史则跳过，不算失败——避免污染别人的 checkout） */
 const actsPath = join(PLUGIN, '.data', 'hud-acts.json');
 let storedActs = 0;

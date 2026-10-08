@@ -355,3 +355,67 @@ M5 是「跨域聚合视图」——`getHud` 要同时回答压缩历史（本�
 
 contract **313** + static 51 + report 59 + boot **14** = **437 断言**全绿；
 M5 域变异 **6/6 被捕获**；真机复核：`m5.lastPublish ok` + 主行由 `hud-acts.json` 回填成功。
+
+---
+
+## 13. R12 解耦第四刀：M2 注入域（2026-10-08）
+
+### 13.1 抽出 `plugin/m2.inject.mjs`
+
+| 搬走的 | 说明 |
+| --- | --- |
+| `renderUsageText` | 用量三元组文本（纯信息，无行为指令） |
+| `retentionTeach` / `renderPolicyCard` / `renderBrief` | 三个教学出口；**教学文本本体仍在** compact-tool / effort（这里只做出口 + 活值） |
+| `briefedBySid` / `effBriefedBySid` / `measuredFailedOnce` | 三张随会话增长的集合（均已**有界化**） |
+| `clearBriefed` | **被 M3 调用**的跨域回调（压缩成功后让一次性说明重讲） |
+| `buildInjection(payload)` | 原 pre-step 回调里的 M2 半段 |
+
+宿主只剩三行语义：`if (!m2Ctl) return decision;` → `await m2Ctl.buildInjection(payload)` →
+把消息并进决策。`host.impl.mjs` **1387 → 1262 行**。
+
+### 13.2 「为何不注入」用返回值表达，而不是用早退散落各处
+
+`buildInjection` 返回 `{skip:'aborted'|'not-step-1'|'noFactory'|'noSession'|'measureFail'|'error'}`
+或 `{message,text,card}`。宿主只判「有没有 message」。好处：
+
+- 注入路径的**每一种失败都不会影响原决策**（宿主 `return decision` 放行）；
+- 每种 skip 原因都能被**计数/断言**（`state.m2.skips`），而不是散落在一堆 `return decision` 里；
+- 测试可以在**不启动真实 DSH** 的情况下把注入路径跑到某个确定分支（见 §13.3）。
+
+`createUserMessage` 仍由宿主异步解析（官方包候选链）⇒ 经 getter 现取；未解析时按 `noFactory`
+记账并**不注入**——**绝不伪造消息结构**（本项目已因伪造用户消息返工过一次）。
+
+### 13.3 把「接线可达」变成可观测的运行时事实（boot 扩展）
+
+R11 的教训是「源断言看不见代码在不在正确的函数里」。R12 把这层验证**推进了一步**：
+boot.mjs 里加一次**非 abort、step=1** 的 pre-step 真调用，判据用**记账痕迹**——
+
+- 模块未加载：宿主在 `if (!m2Ctl) return decision;` 直接放行，**不会留下任何 `m2.skips`**；
+- 模块已加载：`buildInjection` 必然走到某个分支并记账（本桩环境落在 `noFactory`/`measureFail`）。
+
+⇒ 「M2 接线是否可达」从「读源码猜」变成了「跑起来看有没有记账」。这类判据可以复用到
+其余域（M3 的 `rangeProbe`、M5 的 `lastPublish` 都是同款思路）。
+
+### 13.4 验证
+
+contract **317** + static 54 + report 59 + boot 17 = **447 断言**全绿；**变异 6/6 被捕获**。
+真机：`m2.registered=true`、`via=resourcesPath/app.asar|import`、`injections=6`、`briefings=2`、
+`skips={}`、`lastText` 为真实用量行。
+
+**一处自纠（值得记）**：新绊线首版把 `const clearBriefed = (sid) => {` 一律判为「宿主重复实现」，
+而宿主**合法**保留一个薄转发（M3 依赖它）⇒ 断言在未变异的代码上就失败。
+⇒ 教训：**「宿主不得实现 X」的判据必须写在「X 的实现特征」上，而不是「X 的函数名」上**；
+否则连合法的转发都会被误判。
+
+### 13.5 进度
+
+| 步骤 | 状态 | 产出 |
+| --- | --- | --- |
+| ①阈值核心 | ✅ R8 | `threshold.mjs` |
+| ②M3 压缩域 | ✅ R9+R10 | `m3.compact.mjs`（执行核心 + 编排层） |
+| ③M5 HUD 域 | ✅ R11 | `m5.hud.mjs` |
+| ③M2 注入域 | ✅ R12 | `m2.inject.mjs` |
+| ③M1 快照域 | ⏳ 待做 | `m1.snapshot.mjs` |
+| ④core 收尾 | ⏳ 待做 | `core.mjs` ⇒ 宿主 ≤250 行 |
+
+`host.impl.mjs`：**1836 → 1262 行**（−31%）。

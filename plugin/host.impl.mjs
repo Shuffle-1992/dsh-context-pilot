@@ -368,23 +368,6 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
    *  ⇒ R7 把最后三块残留一并删除：`lastUserTextBySid`（挂起任务的兜底文本来源）、
    *     `pendingBySid`（挂起任务表，R4 后**读点为零**）、`m55Attempt` / `state.m55`（只为旧
    *     恢复相位留痕）。保留 `clearBriefed` 与 `briefedBySid`（与压缩重讲逻辑有关，与 M5.5 无关）。 */
-  const briefedBySid = new Set(); // M2.5：新会话一次性插件说明（每激活一份，重活后重讲一次无妨）
-  /* R1：智能思考教学的一次性标记（与压缩说明分开——两者开关独立，可能只开一个）。
-   * ⚠️ 与 briefedBySid 一样，**压缩成功后必须清除**（见 clearBriefed 的注释）。 */
-  const effBriefedBySid = new Set();
-  /* 一次性说明的「已讲」标记必须在**压缩成功后清除**（真 bug 修复，2026-10-07）。
-   * 原实现 briefedBySid 只有 add、全文无 delete/clear ⇒ 压缩后那条说明被收进摘要，
-   * 而插件认为「讲过了」永不再讲；摘要由模型生成、**不保证保留该段** ⇒ 模型可能永久
-   * 失去用法说明（压缩标记怎么写、智能思考怎么换档都不知道）。
-   * 实测佐证：m2.briefings=2 而 m2.injections=5（本会话跨热换只讲过 2 次）。
-   * 压缩 = 新开始 ⇒ 正好重讲一次；成本仍是一次性量级（压缩是低频事件）。 */
-  const clearBriefed = (sid) => {
-    try {
-      briefedBySid.delete(sid);
-      effBriefedBySid.delete(sid);
-      state.m2.briefReissues = (state.m2.briefReissues ?? 0) + 1;
-    } catch { /* 吞 */ }
-  };
   /* `resumeCountBySid` / `M5_RESUME_MAX` / `resumeTimers` 已随伪造恢复投递链一并删除（R4）；
    * `m55Attempt` / `state.m55` 已随 M5.5 收官残留删除（R7，见上方说明）。 */
   /* R7：`probeService`（服务可达性 + 原型方法名探针）已删除——**全仓库零调用点**。
@@ -978,84 +961,40 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
   const buildHudResponse = async (sid) => (m5Ctl ? m5Ctl.buildHudResponse(sid) : { ok: false, error: 'm5-module-pending' });
   const republishFromReport = () => (m5Ctl ? m5Ctl.republishFromReport() : undefined);
 
+  /* ═══ R12 解耦第四刀：M2 注入域（用量行 / 决策卡 / 一次性说明 / 思考后缀 / 注入主体）
+   * 已搬进 plugin/m2.inject.mjs ═══
+   * 接线顺序 M5 → M2 → M3：M2 提供 `clearBriefed` 给 M3（压缩后重讲），M3 提供 `measureRatio` 给
+   * M2/M5 ⇒ 两侧跨域依赖一律注入；**同一个声明顺序环**用箭头包装打破（谁在前都 TDZ）。
+   * 懒加载 + 空值降级：未就绪时宿主直接放行（不注入、不阻塞），`clearBriefed` no-op。
+   * ⚠️ `createUserMessage` 由宿主异步解析（官方包候选链）⇒ 经 getter 现取；未解析时模块按
+   *    `noFactory` 记账并**不注入**（绝不伪造消息结构）。实测窗口只在激活后头几个微任务内。 */
+  let m2Ctl = null;
+  const m2Ready = import(`./m2.inject.mjs?ts=${IMPL_TS}`)
+    .then((m) => {
+      m2Ctl = m.createM2Injection({
+        state, log, msg, pick, schedule, svc, tryOf, nfmt, summarizeBreakdown, remember,
+        M3, effEnabled, criticalCapOf,
+        /* measureRatio 的宿主委托在下方 M3 接线处才声明 ⇒ 箭头包装（同上打破 TDZ）。 */
+        measureRatio: (session) => (m3Ctl ? m3Ctl.measureRatio(session) : { ok: false, error: 'm3-module-pending' }),
+        getRangeApi: () => rangeApi,
+        getCompactToolApi: () => compactToolApi,
+        getEffortApi: () => effortApi,
+        getCreateUserMessage: () => createUserMessage,
+        SOURCE_KIND,
+      });
+      return m2Ctl;
+    })
+    .catch((e) => {
+      log('warn', `M2 注入模块加载失败（吞，本轮起不注入用量行）：${msg(e)}`);
+      return null;
+    });
+  /** 一次性说明的「已讲」标记清除由 M2 域持有；M3 压缩成功后经此调用（跨域回调，显式注入）。 */
+  const clearBriefed = (sid) => { if (m2Ctl) m2Ctl.clearBriefed(sid); };
   log('info', `impl 激活（M1+M2+M3.5 三通道）seq=${++state.seq} @ ${state.implLoadedAt}；报告 → ${reportPath}`);
 
   /* ═══════════ M2：agent/pre-step 每轮注入用量三元组（镜像 dsh-time-context 惯用法） ═══════════ */
 
   /** 单会话 measure 失败只告警一次（防日志刷屏）。 */
-  const measuredFailedOnce = new Set();
-
-  /** 组装注入文本（纯信息，无行为指令）。 */
-  const renderUsageText = (session) => {
-    const mr = measureRatio(session); // B2：读取收敛
-    if (!mr.ok) return { error: mr.error };
-    const { used, surface, window } = mr;
-
-    const breakdown = tryOf(() => svc('sessionProjections')?.stateOf?.(session, 'contextBreakdown'));
-
-    const pct = window && used != null ? `${((used / window) * 100).toFixed(1)}%` : null;
-
-    const seg = [];
-    seg.push(`window ${window != null ? nfmt(window) : '?'}`);
-    seg.push(`used ${used != null ? nfmt(used) : '?'}${pct ? ` (${pct})` : ''}`);
-    seg.push(`surface ${surface != null ? nfmt(surface) : '?'}`);
-    const bsum = summarizeBreakdown(breakdown.error ? null : breakdown.value ?? null);
-    if (bsum) {
-      seg.push(`system ≈${nfmt(bsum.system)} ｜ messages+tools ≈${nfmt(bsum.rest)} (heuristic)`);
-    }
-    return {
-      text: `Context usage before this turn (by context-pilot, estimate): ${seg.join(' ｜ ')}.`,
-      used,
-      window,
-      ratio: window && used != null ? used / window : null,
-    };
-  };
-
-  /** M3.5 通道2：政策卡——教会模型「何时值得压缩、如何触发」。
-   *  ⚠️ 2026-10-07 用户决定：**决策卡门槛 = 标记最低占用**（不再独立配置）。
-   *  原设计缺陷（用户发现）：`policyCardMinRatio` 独立时，markerMinRatio < 卡门槛 的区间是死区——
-   *  模型收不到卡 ⇒ 不知道标记 ⇒ 永远不写标记 ⇒ 该区间内标记通道完全不可达；
-   *  且若 markerMinRatio > 卡门槛则反向错配（教了却不执行）。现统一为同一门槛，
-   *  语义：「能收到卡 = 标记有效」，无论用户怎么填都不会出现死区或错配。 */
-  /* F7（审查）：教学出口的异常**必须有痕**——`renderCard`/`renderBrief` 静默返回 null 等价于
-   * 「模型永远不知道有 compact_context 这个工具」，是本机制最怕的静默降级。只报一次防刷屏。 */
-  let teachWarned = false;
-  const warnTeachOnce = (what) => {
-    if (teachWarned) return;
-    teachWarned = true;
-    log('warn', `${what}（同类问题仅报一次）`);
-  };
-
-  /* R5+（2026-10-08 用户要求）：「自己算范围」必须教给 Agent——否则它不知道压缩后还剩什么。
-   * ⚠️ 两个数都是**活值**：比例读 compact-range.mjs 的常量，token 数按**当前窗口**现算。
-   *    写死「16% / 160k」会在常量或窗口变化后与真实行为自相矛盾（本项目已因此踩过坑）。
-   * 模块未加载完时返回 null ⇒ 教学退化为「按窗口固定比例」的说法，**绝不编造数字**。 */
-  const retentionTeach = (win) => {
-    const ratio = rangeApi?.RETAIN_RATIO ?? null;
-    if (!Number.isFinite(ratio) || ratio <= 0) return { retainRatio: null, retainTokens: null };
-    const w = Number(win);
-    return { retainRatio: ratio, retainTokens: Number.isFinite(w) && w > 0 ? Math.floor(w * ratio) : null };
-  };
-
-  const renderPolicyCard = (ratio, effCrit, win) => {
-    /* 教学文本本体在 compact-tool.mjs（压缩域自持，与 effort 同构）——此处只做出口。
-     * 门槛仍是 markerMinRatio（2026-10-07 用户决定：决策卡门槛 = 该值，消除「教了却不执行」的死区）。
-     * ⚠️ 文本已随 R4 改写为**工具版**：旧卡教的是「本轮先不执行任务 + 写标记」，
-     *    那正是会被伪造恢复消息拉起的那套；新卡要求「调用后直接继续，不要停下」。
-     * ⚠️ 2026-10-08 真 bug：这里原先传 `M3.criticalRatio`（**配置值**），于是卡面写「占用达 80%」
-     *    而实际生效线是 75%（= min(配置, 引擎阈值 − 5pp)）⇒ 教了个不会触发的数。
-     *    现由调用方传入**生效值** effCrit。
-     * ⚠️ R5+：同时传入「保留多少」的活值（见 retentionTeach）。 */
-    try {
-      const api = compactToolApi;
-      /* F7（审查）：教学/卡片静默为 null = 模型**永远不知道有工具**——这正是 R4 机制最怕的
-       * 静默降级。模块未就绪时留一条痕（只报一次，防刷屏）。 */
-      if (!api) { warnTeachOnce('压缩教学模块未就绪：决策卡与一次性说明本次为空（模型将看不到压缩工具的用法）'); return null; }
-      const crit = Number.isFinite(effCrit) ? effCrit : M3.criticalRatio;
-      return api.renderCard({ ratio, minRatio: M3.markerMinRatio, criticalRatio: crit, ...retentionTeach(win) });
-    } catch (e) { warnTeachOnce(`决策卡渲染异常：${msg(e)}`); return null; }
-  };
-
   /* 官方工厂异步解析；就绪前监听器直接放行（不注入、不阻塞）。 */
   const factoryPromise = loadCreateUserMessage();
   let createUserMessage = null;
@@ -1149,22 +1088,6 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
    * ⚠️ R4（2026-10-08）：文本已改为**工具版**，且本体搬进 plugin/compact-tool.mjs（压缩域自持，
    *    与 effort.mjs 同构）。旧文本教的是「本轮挂起 + 写标记 + 压缩后自动拉起」——那条链路已被
    *    用户否决（伪造用户消息）；此处只做出口，漏改会导致模型**等一个永远不来的恢复**。 */
-  const renderBrief = (effCrit, win) => {
-    try {
-      const api = compactToolApi;
-      if (!api) { warnTeachOnce('压缩教学模块未就绪：一次性说明本次为空'); return null; }
-      /* 同 renderPolicyCard：必须传**生效值**，否则一次性说明会教一个不会触发的数字；
-       * 另传「保留多少」活值（R5+）。 */
-      const crit = Number.isFinite(effCrit) ? effCrit : M3.criticalRatio;
-      return api.renderBrief({ criticalRatio: crit, ...retentionTeach(win) });
-    } catch (e) { warnTeachOnce(`一次性说明渲染异常：${msg(e)}`); return null; }
-  };
-
-  /* 智能思考的**注入文本**（一次性教学 / 每轮后缀）已随功能域搬入 plugin/effort.mjs：
-   *   renderBrief(eff)  —— 一次性教学，覆盖度 6/6（当前值/可选档/工具名+用法/何时该用/生效时机/代价）
-   *   renderSuffix(eff) —— 每轮用量行后缀「思考强度 <当前实际档>」（≈7 token/轮）
-   * 两者都是纯函数，缺信息时返回 null ⇒ 不注入、不打扰。此处只做出口引用（见下方注入主体）。 */
-
   state.listeners['agent/pre-step'] = addListener(
     'agent/pre-step',
     async (payload, next) => {
@@ -1179,62 +1102,13 @@ export function apply(ctx, config, { pluginDir, reportPath }) {
       if (!decision || decision.kind === 'reject') return decision;
       if (!effEnabled()) return decision; // 总开关关闭：完全恢复原生 DSH（不注入）
       try {
-        const { agent, turn, step, signal } = payload ?? {};
-        if (signal?.aborted) return decision;
-        if (step !== 1) return decision; // 每轮只注一次（轮首快照）
-        if (!createUserMessage || !agent?.session) {
-          const key = !createUserMessage ? 'noFactory' : 'noSession';
-          state.m2.skips[key] = (state.m2.skips[key] ?? 0) + 1;
-          return decision;
-        }
-        const r = renderUsageText(agent.session);
-        if (r.error || !r.text) {
-          const key = 'measure:' + String(pick(agent.session.id, agent.sessionId, 'unknown'));
-          if (!measuredFailedOnce.has(key)) {
-            remember(measuredFailedOnce, key);
-            log('warn', `M2 measure 失败跳过注入（${key}）：${r.error}`);
-          }
-          state.m2.skips.measureFail = (state.m2.skips.measureFail ?? 0) + 1;
-          return decision;
-        }
-        /* 强制压缩线的**生效值**（= min(配置, 引擎阈值 − 5pp)）——教学与决策卡都必须教这个数，
-         * 教配置值会让模型以为 80% 才触发（实际 75%）。与 pre-step/idle 门控同源。 */
-        const effCrit = Math.min(M3.criticalRatio, criticalCapOf(agent));
-        const card = renderPolicyCard(r.ratio, effCrit, r.window); // M3.5 通道2：政策卡（相关占用以上才出现）
-        const sid = String(pick(agent.session.id, agent.sessionId, 'unknown'));
-        /* 智能思考：**独立门控**（effortEnabled），与压缩的 markerMinRatio 完全解耦——
-         * 用户明确要求「全程允许」：低占用也必须能注入/换档（压缩的卡在低占用时是不注入的）。 */
-        let eff = null;
-        try {
-          if (M3.effortEnabled === true && effortApi) eff = await effortApi.read(agent);
-        } catch { /* 读档失败 ⇒ 不注入（绝不因新功能影响主流程） */ }
-        const effSuffix = effortApi?.renderSuffix(eff) ?? null;
-        const baseText = effSuffix ? `${r.text} ｜ ${effSuffix}` : r.text;
-        if (effSuffix) state.m2.effortSuffixes = (state.m2.effortSuffixes ?? 0) + 1;
-        const brief = briefedBySid.has(sid) ? null : renderBrief(effCrit, r.window); // M2.5+A3：现拼活值（含生效强制线 + 保留范围）
-        /* 思考强度教学与「插件说明」同一时机（会话首次）——合并进同一条消息，
-         * 不额外增加消息结构开销（role 框架/JSON 包装各一次）。 */
-        const effBrief = eff && !effBriefedBySid.has(sid) ? (effortApi?.renderBrief(eff) ?? null) : null;
-        if (effBrief) {
-          remember(effBriefedBySid, sid); // C 类审查：有界化（原先无上限）
-          state.m2.effortBriefings = (state.m2.effortBriefings ?? 0) + 1;
-        }
-        if (brief) {
-          remember(briefedBySid, sid); // C 类审查：有界化（原先无上限）
-          state.m2.briefings = (state.m2.briefings ?? 0) + 1;
-        }
-        const fullText = [baseText, card, brief, effBrief].filter(Boolean).join('\n\n');
-        const message = createUserMessage({
-          content: [{ type: 'text', text: fullText }],
-          source: { kind: SOURCE_KIND, form: 'snapshot', sections: [{ name: SOURCE_KIND, text: fullText }] },
-        });
-        state.m2.injections += 1;
-        if (card) state.m3.policyCards += 1;
-        state.m2.lastText = fullText;
-        state.m2.lastAt = new Date().toISOString();
-        log('info', `M2 注入 turn=${turn} step=${step}${card ? ' ＋政策卡' : ''}：${r.text}`);
-        schedule('m2-inject', 500);
-        return { ...decision, messages: [...(decision.messages ?? []), message] };
+        /* R12：注入主体已搬进 plugin/m2.inject.mjs（buildInjection）。
+         * 宿主只做两件事：**决定放行** + 把模块给的消息并进决策。
+         * 模块未就绪时直接放行（不注入、不阻塞）——与其它域同款懒加载降级。 */
+        if (!m2Ctl) return decision;
+        const injected = await m2Ctl.buildInjection(payload);
+        if (!injected || injected.skip) return decision;
+        return { ...decision, messages: [...(decision.messages ?? []), injected.message] };
       } catch (e) {
         log('warn', `M2 注入异常（放行原决策）：${msg(e)}`);
         return decision;

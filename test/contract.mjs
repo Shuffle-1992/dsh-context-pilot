@@ -40,6 +40,8 @@ const client = read('client.js');
 /* R11：M5 HUD 域（含 getHud 聚合响应主体）已抽 plugin/m5.hud.mjs ⇒ 相关断言改指模块。
  * ⚠️ 必须在此处（文件顶部）声明：getHud 相关断言在文件前部，晚声明会 TDZ。 */
 const m5src = read('m5.hud.mjs');
+/* R12：M2 注入域（用量行 / 决策卡 / 一次性说明 / 注入主体）已抽 plugin/m2.inject.mjs。 */
+const m2src = read('m2.inject.mjs');
 
 const wireFace = /export const FACE_NAME = ['"]([^'"]+)['"]/.exec(wire)?.[1];
 const clientFace = /const HUD_FACE = ["']([^"']+)["']/.exec(client)?.[1];
@@ -695,11 +697,11 @@ const briefNoNum = ctApi.renderBrief({ criticalRatio: 0.75 }) ?? '';
 ok('拿不到活值时不编数字（退化为「固定比例」措辞）',
   !/16%/.test(briefNoNum) && !/\d+k token/.test(briefNoNum) && /固定比例/.test(briefNoNum),
   '活值缺失时仍写死数字 ⇒ 常量/窗口变化后教学自相矛盾（本项目已因此踩过坑）');
-ok('host 把「保留多少」活值传进两个教学出口（读常量 + 按当前窗口现算）',
-  /const ratio = rangeApi\?\.RETAIN_RATIO \?\? null;/.test(host)
-  && /Math\.floor\(w \* ratio\)/.test(host)
-  && /renderCard\(\{ ratio, minRatio: M3\.markerMinRatio, criticalRatio: crit, \.\.\.retentionTeach\(win\) \}\)/.test(host)
-  && /renderBrief\(\{ criticalRatio: crit, \.\.\.retentionTeach\(win\) \}\)/.test(host),
+ok('「保留多少」活值传进两个教学出口（读常量 + 按当前窗口现算，查 m2.inject.mjs）',
+  /const ratio = getRangeApi\(\)\?\.RETAIN_RATIO \?\? null;/.test(m2src)
+  && /Math\.floor\(w \* ratio\)/.test(m2src)
+  && /renderCard\(\{ ratio, minRatio: M3\.markerMinRatio, criticalRatio: crit, \.\.\.retentionTeach\(win\) \}\)/.test(m2src)
+  && /renderBrief\(\{ criticalRatio: crit, \.\.\.retentionTeach\(win\) \}\)/.test(m2src),
   '活值没接上 ⇒ 教学与实际保留范围脱节（写死 16%/160k 会随常量与窗口漂移）');
 
 /* 伪造恢复必须**彻底消失**（不是「不调用」而是「不存在」——留着重接上的地雷更危险） */
@@ -721,7 +723,7 @@ ok('教学不再教「本轮先不执行任务 + 写标记」（旧机制已废�
  * 漏改的后果不是报错，而是模型**写标记后等一个永远不来的自动恢复**（静默失效）。 */
 ok('新会话一次性说明本体已搬进模块（host 只做出口）',
   /function renderBrief\(\{ criticalRatio, retainRatio, retainTokens \} = \{\}\) \{/.test(ct)
-  && /return api\.renderBrief\(\{ criticalRatio: crit, \.\.\.retentionTeach\(win\) \}\);/.test(host),
+  && /return api\.renderBrief\(\{ criticalRatio: crit, \.\.\.retentionTeach\(win\) \}\);/.test(m2src),
   '说明文本仍散在 host ⇒ 与工具名/文案两处漂移');
 ok('一次性说明不再承诺「自动拉起」（已无该机制）',
   !/自动拉起|自动恢复/.test(ct) || /没有\*\*任何自动拉起动作|不需要\*\*任何「待执行」占位/.test(ct),
@@ -865,13 +867,13 @@ ok('autoClamped 异步分支有 alive 守卫（写入后 + 错误分支两处）
   '守卫缺失/只补一处 ⇒ 组件已卸载仍继续写配置或 setState（越权副作用）');
 /* ═══ 教学必须教**生效值**（2026-10-08 实测：卡片写「占用达 80%」而实际 75%） ═══ */
 ok('决策卡/一次性说明拿到的是**生效**强制线（不是配置值）',
-  /const effCrit = Math\.min\(M3\.criticalRatio, criticalCapOf\(agent\)\);/.test(host)
-  && /renderPolicyCard\(r\.ratio, effCrit, r\.window\)/.test(host) && /renderBrief\(effCrit, r\.window\)/.test(host),
+  /const effCrit = Math\.min\(M3\.criticalRatio, criticalCapOf\(agent\)\);/.test(m2src)
+  && /renderPolicyCard\(r\.ratio, effCrit, r\.window\)/.test(m2src) && /renderBrief\(effCrit, r\.window\)/.test(m2src),
   '教学仍用配置值 ⇒ 教一个不会触发的数字（与门控不同源）');
 ok('两个出口都把 effCrit 落进模块参数（不是各自再读 M3.criticalRatio）',
   /* 必须数**两处**（renderPolicyCard 与 renderBrief 各一）——只匹配到一处时，
    * 另一个出口仍读配置值也照样通过（变异实测：弱版断言未抓住）。 */
-  (host.match(/const crit = Number\.isFinite\(effCrit\) \? effCrit : M3\.criticalRatio;/g) ?? []).length === 2,
+  (m2src.match(/const crit = Number\.isFinite\(effCrit\) \? effCrit : M3\.criticalRatio;/g) ?? []).length === 2,
   '出口内部仍读配置值，或只改了两个出口中的一个 ⇒ 传参被忽略');
 /* 用户要求（2026-10-08）：删掉「（已按上限 75% 收敛）」——显示生效值本身已经说清事实。 */
 ok('弹窗阈值行不再追加「（已按上限 … 收敛）」（用户要求删除）',
@@ -934,18 +936,19 @@ console.log('\n== 6.10 智能思考注入（门控必须与压缩解耦）==');
 // 思考强度必须是**第四条独立通道**：门控 = effortEnabled，与占用无关。
 const injectBody = (() => {
   /* ⚠️ 2026-10-08：调用点由 `renderPolicyCard(r.ratio)` 变为 `renderPolicyCard(r.ratio, effCrit)`
-   * （决策卡/说明必须教**生效强制线**而非配置值）⇒ 正则放宽到参数列表任意内容。 */
-  const m = /const card = renderPolicyCard\(r\.ratio[^;]*\);([\s\S]*?)return \{ \.\.\.decision, messages:/.exec(host);
+   * （决策卡/说明必须教**生效强制线**而非配置值）⇒ 正则放宽到参数列表任意内容。
+   * R12：注入主体已搬进 plugin/m2.inject.mjs 的 `buildInjection` ⇒ 从模块取切片。 */
+  const m = /const card = renderPolicyCard\(r\.ratio[^;]*\);([\s\S]*?)return \{ message, text: fullText/.exec(m2src);
   return m ? m[1] : '';
 })();
-ok('解析出 M2 注入主体', injectBody.length > 0, '未匹配到注入主体（改名了？）');
+ok('解析出 M2 注入主体（m2.inject.mjs buildInjection）', injectBody.length > 0, '未匹配到注入主体（改名了？）');
 /* 只截取 **effort 相关**的那几行（从注释「智能思考：**独立门控**」到 fullText 拼装）——
  * 不能截整个注入主体：它包含 renderPolicyCard 行，而卡本身合法引用 markerMinRatio。 */
 const effInject = (() => {
-  const s = host.indexOf('/* 智能思考：**独立门控**');
+  const s = m2src.indexOf('/* 智能思考：**独立门控**');
   if (s < 0) return '';
-  const e = host.indexOf('const fullText =', s);
-  return e > s ? host.slice(s, e) : '';
+  const e = m2src.indexOf('const fullText =', s);
+  return e > s ? m2src.slice(s, e) : '';
 })();
 ok('解析出 effort 注入段', effInject.length > 0, '未找到 effort 注入段');
 ok('智能思考注入用独立门控 effortEnabled（不共用 markerMinRatio）',
@@ -964,11 +967,13 @@ ok('懒安装先于 pre-step 的一切其它动作（R3-S4 结构性解耦）',
     return s > 0 && p > 0 && s < p;
   })(),
   'ensureEffort 未放在 pre-step 最前面 ⇒ 仍可能被某条早退绕过');
-ok('懒安装不受 step 门控约束（先于 step!==1 早退）',
+ok('懒安装不受 step 门控约束（先于注入调用）',
   (() => {
     const s = host.indexOf('await ensureEffort();');
-    const g = host.indexOf('if (step !== 1) return decision;');
-    return s > 0 && g > 0 && s < g;
+    const g = host.indexOf('await m2Ctl.buildInjection(payload);');
+    /* R12：`step !== 1` 早退已随注入主体搬进 m2.inject.mjs ⇒ 宿主判据改为
+     * 「懒安装必须早于注入调用」，模块侧另行钉住「非 step1 不注入」。 */
+    return s > 0 && g > 0 && s < g && /if \(step !== 1\) return \{ skip: 'not-step-1' \};/.test(m2src);
   })(),
   '懒安装仍在 step!==1 早退之后 ⇒ 首步即调工具时钩子永不安装');
 ok('注入分支内不再有任何 effort 安装/注册调用（耦合已断）',
@@ -979,7 +984,7 @@ const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\
 ok('effort 注入段不引用 markerMinRatio（剥注释后）', !/markerMinRatio/.test(stripComments(effInject)),
   'effort 注入段**代码**引用了 markerMinRatio ⇒ 与压缩门控耦合');
 ok('读档失败不阻断注入（try/catch 吞）',
-  /catch \{ \/\* 读档失败 ⇒ 不注入/.test(host),
+  /catch \{ \/\* 读档失败 ⇒ 不注入/.test(m2src),
   '读档异常未吞 ⇒ 新功能可打崩主注入流程');
 ok('思考强度教学与插件说明同时机（会话首次）',
   /!effBriefedBySid\.has\(sid\)/.test(injectBody),
@@ -1017,7 +1022,7 @@ console.log('\n== 6.11 压缩后一次性说明重讲（briefedBySid 永不失�
 ok('存在 clearBriefed 清除函数', /const clearBriefed = \(sid\) => \{/.test(host),
   '无清除函数 ⇒ 压缩后不再重讲（原 bug）');
 ok('clearBriefed 同时清两个集合（压缩说明 + 智能思考教学）',
-  /briefedBySid\.delete\(sid\)[\s\S]{0,120}?effBriefedBySid\.delete\(sid\)/.test(host),
+  /briefedBySid\.delete\(sid\)[\s\S]{0,120}?effBriefedBySid\.delete\(sid\)/.test(m2src),
   '只清一个 ⇒ 另一个仍永不重讲');
 /* R10：两条压缩路径（pre-step / idle）已随编排层搬进 m3.compact.mjs ⇒ 调用点查模块。
  * `clearBriefed` 本体仍在宿主（属 M2 教学域），因此还要钉「模块经**显式注入**拿到它」—— */
@@ -1105,7 +1110,7 @@ ok('readEffort 全程 async（S5：消除同步/异步混用）',
   readBody.length > 0 && !/return\s+Promise/.test(readBody),
   '仍从非同期路径 return Promise ⇒ 漏 await 会静默拿到 Promise 当对象用');
 ok('read 的全部调用点都 await（S5 的另一半）',
-  (effort.match(/read\(agent\)/g) || []).length >= 3 && /await effortApi\.read\(agent\)/.test(host),
+  (effort.match(/read\(agent\)/g) || []).length >= 3 && /await effortApi\.read\(agent\)/.test(m2src),
   'read 有调用点未 await ⇒ 拿到 Promise 当对象用（静默失效）');
 ok('session/event 监听器只有一处（合并而非重复注册）',
   (host.match(/state\.listeners\['session\/event'\]/g) || []).length === 1,
@@ -1303,14 +1308,14 @@ ok('退役的配置字段未复活（marker / armedTtlMs / hudArmed / hudPending
   '退役字段仍在面板/schema/M3 —— 「能改能存但无效果」的假开关');
 ok('保留项未被误删：markerMinRatio（决策卡门槛）仍在三处且有消费者',
   fieldsKeys.includes('markerMinRatio') && schemaKeys.includes('markerMinRatio') && hostDefaults.includes('markerMinRatio')
-  && /minRatio: M3\.markerMinRatio/.test(host),
+  && /minRatio: M3\.markerMinRatio/.test(m2src),
   'markerMinRatio 是决策卡注入门槛，与已退役的 marker 无关，不得一起删');
 /* C 类审查：无界 Set → 有界化（键是 session id，随会话数无界增长）。 */
 ok('随会话增长的 Set 已做有界化（不再无上限）',
   /const remember = \(set, key\) => \{/.test(host) && /const SET_CAP = \d+;/.test(host)
-  && /remember\(briefedBySid, sid\)/.test(host) && /remember\(effBriefedBySid, sid\)/.test(host)
-  && /remember\(measuredFailedOnce, key\)/.test(host)
-  && !/(briefedBySid|effBriefedBySid|measuredFailedOnce)\.add\(/.test(host),
+  && /remember\(briefedBySid, sid\)/.test(m2src) && /remember\(effBriefedBySid, sid\)/.test(m2src)
+  && /remember\(measuredFailedOnce, key\)/.test(m2src)
+  && !/(briefedBySid|effBriefedBySid|measuredFailedOnce)\.add\(/.test(m2src),
   '仍有裸 .add() ⇒ 该集合无上限（长时间运行后随会话数增长）');
 
 /* ═══════════ 6d. 意图表行为（compact-tool 真跑） ═══════════ */
@@ -1378,6 +1383,29 @@ ok('M5 模块未就绪时不中断：三个发布口 no-op、getHud 返回明确
 ok('M5 模块构造即装载历史（跨重启显示不因搬模块而丢）',
   /loadStoredActs\(\);\n\n  return \{ hudReasonLabel/.test(m5src) && /state\.m5\.acts = loaded\?\.acts \?\? \[\];/.test(m5src),
   '模块不再构造即装载 ⇒ 重启后弹窗空态（原「激活即恢复」承诺丢失）');
+
+/* ═══ R12 解耦第四刀：M2 注入域 ═══ */
+ok('R12 M2 注入域已抽为叶子模块，且宿主不再重复实现',
+  /import\(`\.\/m2\.inject\.mjs\?ts=\$\{IMPL_TS\}`\)/.test(host)
+  && /const injected = await m2Ctl\.buildInjection\(payload\);/.test(host)
+  /* 查「M2 独有产物是否回流宿主」（改名躲不过）。 */
+  && !/const renderUsageText = \(session\) =>/.test(hostNoComment)
+  && !/Context usage before this turn/.test(hostNoComment)
+  /* ⚠️ 不能查 `const clearBriefed = (sid) => {` —— 宿主**合法**保留一个薄转发
+   * （`{ if (m2Ctl) m2Ctl.clearBriefed(sid); }`，M3 需要它）。真正的判据是
+   * 「宿主持有的那两张『已讲』表没了」（下一行的 briefedBySid）。 */
+  && !/const briefedBySid/.test(hostNoComment)
+  && !/const measuredFailedOnce/.test(hostNoComment),
+  '宿主仍带 M2 实现 ⇒ 两套真相（本次解耦要消除的）');
+ok('M2 模块对宿主内部件零 import（本模块连 node: 都不需要）',
+  !/^\s*import .*\bfrom ['"]\.\//m.test(m2src) && !/require\(/.test(m2src),
+  'M2 模块 import 了相对路径 ⇒ 依赖图约束被打破');
+ok('M2 模块未就绪时不注入（放行原决策 + 留痕）',
+  /if \(!m2Ctl\) return decision;/.test(host) && /M2 注入模块加载失败（吞/.test(host),
+  '未做空值降级 ⇒ 激活期会 TypeError（apply 不是 async，不能 await）');
+ok('clearBriefed 是薄转发到 M2 域（不再由宿主持有「已讲」表）',
+  /const clearBriefed = \(sid\) => \{ if \(m2Ctl\) m2Ctl\.clearBriefed\(sid\); \};/.test(host),
+  '宿主自己实现 clearBriefed ⇒ 「已讲」表分裂成两份，压缩后可能只清一半');
 
 /* ═══════════ 6f. 压缩两条路径的**顺序**契约（F1/F5 真缺陷） ═══════════ */
 console.log('\n== 6f. pre-step / idle 顺序契约 ==');

@@ -1368,3 +1368,34 @@ deps 对象是**立即构造**的，而 `schedule` 在文件更后面才定义�
 
 **验证**：contract **313** + static 51 + report 59 + boot **14** = **437 断言**全绿；
 M5 域变异 **6/6 被捕获**；真机复核：`m5.lastPublish ok` + 主行由 `hud-acts.json` 回填成功。
+
+### R12 解耦第四刀（M2 注入域）—— ✅ 已实施（2026-10-08）
+
+**抽出 `plugin/m2.inject.mjs`**：`renderUsageText`（用量三元组）、`retentionTeach` /
+`renderPolicyCard` / `renderBrief`（三个教学出口，教学文本本体仍在 compact-tool/effort）、
+`briefedBySid` / `effBriefedBySid` / `measuredFailedOnce`（三张集合，已**有界化**）、
+`clearBriefed`（**被 M3 调用**的跨域回调）、以及 `buildInjection(payload)`（原 pre-step 回调里的
+M2 半段）。宿主只剩：决定放行 → `await m2Ctl.buildInjection(payload)` → 把消息并进决策。
+`host.impl.mjs` **1387 → 1262 行**。
+
+**接线顺序 M5 → M2 → M3**：M2 提供 `clearBriefed` 给 M3（压缩后重讲），M3 提供 `measureRatio`
+给 M2/M5 ⇒ 两侧跨域依赖一律注入，**同一个声明顺序环**继续用箭头包装打破（谁在前都 TDZ）。
+
+**关键设计**：`buildInjection` 用 `{skip:'aborted'|'not-step-1'|'noFactory'|'noSession'|'measureFail'|'error'}`
+表达「为何不注入」，宿主只做「有消息就并进决策、否则放行」——**注入失败绝不影响原决策**。
+`createUserMessage` 由宿主异步解析（官方包候选链）⇒ 经 getter 现取，未解析时按 `noFactory` 记账
+且**不注入**（绝不伪造消息结构）。
+
+**新增运行时判据（boot.mjs 扩展）**：boot 里加了一次**非 abort、step=1** 的 pre-step 真调用，
+并用「记账痕迹」判定接线可达——模块未加载时宿主在 `if (!m2Ctl) return decision;` 直接放行、
+**不会留下任何 `m2.skips`**；模块加载了则 `buildInjection` 必然走到某个分支并记账。
+⇒ 这条断言把「接线可达」变成了**可直接观测的运行时事实**（17 条 boot 断言）。
+
+**验证**：contract **317** + static 54 + report 59 + boot 17 = **447 断言**全绿；
+M2 域变异 **6/6 被捕获**（宿主抄回实现 / 去掉空值降级 / 模块丢 `?ts=` /
+`clearBriefed` 转发改 no-op / 模块不再记账 / step 门控写反）。
+真机复核：`m2.registered=true`、`via=resourcesPath/app.asar|import`、`injections=6`、
+`briefings=2`、`skips={}`、`lastText` 为真实用量行。
+
+**一处自纠**：新绊线首版把 `const clearBriefed = (sid) => {` 一律判为「重复实现」，
+而宿主**合法**保留一个薄转发（M3 需要它）⇒ 断言自失败。改为查「宿主持有的『已讲』表是否还在」。**当前进度**：`host.impl.mjs` **1262 行**（起点 1836 ⇒ 已减 31%）；剩余 **M1 快照域** 与 **core 收尾**。
