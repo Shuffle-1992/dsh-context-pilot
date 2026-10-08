@@ -196,74 +196,12 @@ Agent 自改档不应改掉新会话的默认档。
 
 ## 3. 当前状态
 
-**已完成**（M1 → 现在，全部经实机验收）：
-
-- **M1** 用量读取：`tokenMeter.measure` + `sessionProjections.stateOf` 双路径，报告落盘取证
-- **M2** 每轮注入：`agent/pre-step` 追加 usage 行（step 1 门控，异常放行不注入）
-- **M2.5** 新会话自说明：首次注入追加插件说明（约 200 字），让 Agent 不靠外部文档就懂流程
-- **M3.6** 标记闭环：尾行标记 → 武装 → idle 压缩 → **实弹 E2E 通过**（省 181K token / 节点 471）
-- **M5** 弹窗 HUD：最近压缩记录、武装/待执行徽章、**按会话严格过滤（sid 精确匹配）**、悬停多条（含完整日期时间）
-- **M5.5** 任务挂起-自动恢复：多通道投递（A sessionController → B remote → C direct-followup），
-  **三测复现通过**，实际走通道 C
-- **M5.7** 压缩历史持久化（`hud-acts.json`，cap 50）：跨重启/跨 toggle 存续
-- **R1 智能思考**（2026-10-07，**已由 R2 取代触发方式**）：读档/枚举/写档三腿运行时实证；
-  注入教学 + 每轮档位后缀；弹窗开关 + 输入框档位 chip（**响应式投影，零轮询**）；
-  `agent/request` + **prepend 最外层应用**（R2 沿用）+ 合法性校验 + 30s 冷却 + 让位他人选择
-- **R2 换档改工具**（2026-10-08，**已注册生效**）：`set_reasoning_effort` 工具取代文本标记。
-  工具调用让本轮**继续到下一步**（源码实证）⇒ **本次任务内立即生效、零用户输入、零伪造消息**；
-  顺带消除文本标记的「散文提及误触发」面。实测 `effortTool.ok=true, via=tools.register`
-- **R3 智能思考解耦**（2026-10-08）：功能域抽成 `plugin/effort.mjs`（415 行，依赖图叶子节点），
-  `host.impl.mjs` **2348 → 1563 行**；S1–S10 十项缺陷全消（命名统一 / 拆两个巨型函数 /
-  `sidOf`·`checkEffort`·`bumpSkip` 单点 / `readEffort` 纯 async / 三 Map 合一 /
-  **懒安装彻底移出 M2 注入分支** / 冷却可配 / 工具 output 收敛 / getHud 开关字段分离）；
-  调查脚手架（`r1ProbeOnce` + 三个 `snap.*Probe`）清理，结论改为「留档断言」防丢
-- **压缩失效定位**（2026-10-08）：压缩两条路径全 400 ⇒ 补错误正文取证后定位为 **workbuddy
-  provider 对摘要请求的思考档位报 400**（非本插件）；切 `trae` 后同一路径一次成功
-  （733.9K token / 95% → 1.9%）。**结论已锐化到 provider×model**：坏的是
-  `workbuddy × deepseek-v4.1-flash` 组合（`workbuddy/glm-5.3-flash` 曾成功），
-  且 `deepseek-account/deepseek-flash` 实测可用（省 217.8K）。全文见
-  [`docs/compaction-failure-diagnosis.md`](docs/compaction-failure-diagnosis.md)
-- **配置面板首帧就绪门**（2026-10-08）：快照未解析前不再渲染 `field.def`
-  （默认值与已存值不同：`criticalRatio` 0.85 vs 0.8、`markerMinRatio` 0.2 vs 0.3）
-  ⇒ 消除「刚出现显示一个值、随后跳变」的那一帧
-- **两处 UI 修正**（2026-10-08，用户实测反馈）：
-  ① 输入框 chip 由「智能思考档位 low · 冷却 23s」改为**两态文案**
-  （冷却中「智能思考冷却」/ 冷却完成「智能思考就绪」），**状态由样式承担**——
-  底层 warn 色=冷却态、上层 success 色按冷却进度扫满=就绪态
-  （两个主题状态 token + `width` transition，像进度条一样过渡）；档位值与剩余秒数移入 title。
-  ② 压缩记录弹窗：时间由 `hh:mm` 改为完整 `YYYY-MM-DD HH:MM:SS`，并**按会话严格过滤**——
-  原 C-lineage 血统链把**别的会话**的记录混了进来（详见下条）
-- **R4 压缩改工具触发**（2026-10-08，用户要求「不用伪造一条我的信息重新拉起会话」）：
-  新模块 `plugin/compact-tool.mjs` 暴露工具 **`compact_context`** ⇒ 登记意图 ⇒ 宿主 pre-step
-  **轮内**压缩 ⇒ 本轮无缝继续。**整体删除**伪造恢复投递链（`maybeResumeAfterMarker` /
-  `resumeViaAnyChannel` 三条通道 / `resumeCountBySid` / `M5_RESUME_MAX` / `resumeTimers`），
-  代码中 `sessionController.prompt`·`agent.followup` **零出现**；三处教学同步改为工具版
-  （漏改会让模型写标记后**等一个永远不来的恢复**）。源码依据与落袋方案偏差见
-  [`docs/r4-compaction-tool-design.md`](docs/r4-compaction-tool-design.md)
-- **R5 保留范围自选**（2026-10-08，R4 真机 E2E 之后）：E2E 查明引擎 `context-overflow` 的
-  `retainTokens = 0` 在**只有 53% 占用**时就把 surface 从 **1117 节点 / 367,794 token** 砍到
-  **4 节点 / 8,603 token**（97.7% 影子化）。现改为**先自选范围**（保留预算 = 窗口 × 0.16，
-  即引擎自己的 `DEFAULT_RETAIN_RATIO`）→ 调公开方法 `compactRegion`；**边界被拒**（会切断
-  tool-call/result 配对）时逐节点回退重试，仍失败或压完还在强制线之上则**沿用官方 overflow 兜底**。
-  新模块 `plugin/compact-range.mjs`（纯函数叶子）；取舍与源码依据见
-  [`docs/r5-retention-range-design.md`](docs/r5-retention-range-design.md)
-- **配置面**：6 个字段，面板按秒/比率显示（总开关为开关滑块）；成本阈值计算器（8 个模型预设，一键算推荐值并写入）
-- **只读审查落地**：外部审查 23 条，批次 1/2/3 全部实施（含心跳泄漏、`ctx.effect` 语义误用等真 bug）
-
-**未实施（明确挂起）**：D1 模块切分**剩余部分**（`effort.mjs`/`compact-tool.mjs`/`compact-range.mjs`
-已作为三刀抽出，其余 `core/m1/m2/m3/m5/m55` 仍待切，**已有测试护栏 + 任务书**）、
-C2 无界 Map 上限（当前规模无实际风险）、A6 恢复计数清零、
-**A5 阈值触发的强制压缩真机 E2E**（*工具触发*的 pre-step 压缩已由 R4 E2E 证实跑通——
-见 r4 文档 §7.1 的逐帧时序；但**越强制线（75%）那一支**仍需占用真的冲到线上才有条件测，
-那时才验「压到线下」的承诺）、A2/A6 的真机 E2E。
-
-> ✅ **2026-10-06/07 清偿**：C3② 报告稳态瘦身（3.77MB → 预计 ~600KB）、B5 取证工具收敛
-> （18 个散落脚本 → 2 个统一工具）、**测试骨架**（3 套件 128 断言）、**通道 A 验收**、
-> **D2 两仓同步清单**（[`docs/cross-repo-sync.md`](docs/cross-repo-sync.md)，含 7 强同步点 +
-> 有意差异标注）、**弹窗阈值行加「距触发距离」**。
-> 详见 [`docs/milestones.md`](docs/milestones.md)。
-
----
+**已完成**：M1–M5（用量读取 / 每轮注入 / 会话自说明 / HUD 弹窗 / 历史持久化）、R1–R16.1
+（智能思考 + 换档工具、压缩改工具触发、保留范围自算、全面审查加固、**压缩档位三选一**、
+工具后自检回执、回执按会话隔离）。**9 个域模块 + core**，`host.impl.mjs` **1836 → 518 行**。
+**测试**：contract 369 + static 61 + report 59 + boot 21 = **510 断言**全绿；关键回归均有变异验证。
+逐里程碑台账（含踩坑与实测数值）：[`docs/milestones.md`](docs/milestones.md)；
+早期进度历史存档：[`docs/status-archive.md`](docs/status-archive.md)。
 
 ## 4. 测试与取证
 
@@ -324,29 +262,11 @@ node docs/reference/tools/session-records.cjs --find <会话 id 片段> --from 1
 
 ## 5. 成本模型与推荐配置
 
-> **完整分析见 [`docs/cost-model.md`](docs/cost-model.md)**（官方单价取证、缓存命中率影响、
-> 结构占比推导、阈值弹性表、计算器模型）。本节只留结论。
-
-- **缓存命中率：下降**（每轮注入约 300–500 token 未命中；压缩整体重置前缀）。但命中率是分母游戏，
-  **必须看绝对成本**。
-- **费用：两种计费口径都降**，机制不同：
-  | 计费方式 | 收益量级 | 机制 |
-  | --- | --- | --- |
-  | 按量付费（API） | ~10–30% | 命中近免费，上下文规模影响小；收益来自避免超大上下文的天价 miss |
-  | 订阅套餐（Coding Plan） | ~40–70% | 命中仍计费 ⇒ 上下文是持续失血，压小直接换额度 |
-- **关键解析**：压缩的摊销成本 ≈ 新增内容 × 未命中价，**与阈值几乎无关**（摘要调用 ∝ 阈值，
-  压缩间隔也 ∝ 阈值，两者相消）⇒ **「压得勤更贵」是错的**，全部收益来自上下文规模。
-- **同一组阈值的钱效**：高缓存价档（1:4）约为 DeepSeek（1:50）的 **3.8 倍**。
-
-### 变更记录（2026-10-07）
-
-配置面从 10 个字段精简到 6 个、术语改名、时长字段改秒显示、决策卡门槛并入智能压缩线。
-**决策卡门槛合并的动因**（用户发现的设计缺陷）：原 `policyCardMinRatio`（教学）与
-`markerMinRatio`（执行）是两个独立参数，`[0.30, 0.35)` 区间模型收不到卡 ⇒ 不知道标记存在
-⇒ 永远不写 ⇒ **死区**。现统一为「能收到卡 = 标记有效」，无论怎么填都不会出现死区或错配。
-详见 [`docs/cost-model.md`](docs/cost-model.md) 与 [§5 配置面](#5-配置面速查)。
-
----
+**结论**（推导与官方单价取证见 [`docs/cost-model.md`](docs/cost-model.md)）：缓存命中率会下降
+（每轮注入约 300–500 token 未命中；压缩重置前缀），但**绝对费用两种计费口径都降**——
+按量付费约 10–30%（收益来自避免超大上下文的天价 miss）、订阅套餐约 40–70%（命中仍计费，
+压小直接换额度）。**「压得勤更贵」是错的**：摊销成本 ≈ 新增内容 × 未命中价，与阈值几乎无关。
+同一组阈值在高缓存价档（1:4）的钱效约为 DeepSeek（1:50）的 **3.8 倍**。
 
 ## 6. 配置面速查
 
@@ -394,41 +314,24 @@ node docs/reference/tools/session-records.cjs --find <会话 id 片段> --from 1
 
 | 文档 | 内容 |
 | --- | --- |
-| [`docs/cost-model.md`](docs/cost-model.md) | 成本模型全文：官方单价、缓存命中率分析、阈值弹性、计算器推导 |
-| [`docs/setup.md`](docs/setup.md) | 环境事实、composition 真相（not-bundle 坑）、部署与热换矩阵 |
-| [`docs/api-notes.md`](docs/api-notes.md) | 已验证的官方 API + **修正记录**（探索期写法 → 最终实现） |
-| [`docs/milestones.md`](docs/milestones.md) | 完整里程碑档案（M1 → 现在，含踩坑与实测数值） |
-| [`docs/cross-repo-sync.md`](docs/cross-repo-sync.md) | 与 `dsh-browser-kit` 的**同构点与同步清单**（7 个强同步点 / 5 个弱同步点 / 有意差异 / 漂移检测） |
-| [`docs/d1-module-split-brief.md`](docs/d1-module-split-brief.md) | D1 模块切分任务书（目标结构 / 硬规则 / 7 步顺序 / 回滚） |
-| [`docs/r1-reasoning-effort-investigation.md`](docs/r1-reasoning-effort-investigation.md) | **智能思考调查**：读档/枚举/写档三腿实证 + `selectModel` 全局副作用 + dsh-router-laya 参考 |
-| [`docs/r1-effort-design.md`](docs/r1-effort-design.md) | **智能思考设计定稿**：三层门控解耦 / 数据与写通道 / 提示词文本 / UI（弹窗 + 输入框 chip）/ 实施顺序 |
-| [`docs/r2-tool-switch-design.md`](docs/r2-tool-switch-design.md) | **换档改工具方案**：文本标记的两个致命缺陷 / `agent/request` + prepend 应用链 / 压缩能否也做成工具的分析 |
-| [`docs/r3-effort-review.md`](docs/r3-effort-review.md) | **R3 审查与解耦方案**：S1–S10 十项缺陷 / 抽 `effort.mjs` / 8 步实施顺序 / 10 条必须保留的实证结论 |
-| [`docs/r4-compaction-tool-design.md`](docs/r4-compaction-tool-design.md) | **R4 压缩改工具触发**：inbox 队列/steer/system-message 三条路为何都不行 / `compactIfNeeded` 两个 trigger 的保留语义 / 落袋方案 A 的偏差 / 三处教学同步 / **§7.1 真机 E2E 逐帧时序与实测数字** |
-| [`docs/r7-review-and-hardening.md`](docs/r7-review-and-hardening.md) | **R7 全面审查与加固**：三路并行只读审计的完整发现（真缺陷 / 退役遗留 / 死代码 / 无界状态 / 重复漂移 / 耦合 / 正确性）/ 本批修复与证据 / **未实施项与建议顺序**（先抽阈值核心 → 再拆 M3 → 最后 M1/M5）/ 两次变异逃逸的教训 |
-| [`docs/r5-retention-range-design.md`](docs/r5-retention-range-design.md) | **R5 保留范围自选**：`retainTokens = 0` 的实测代价（1117→4 节点）/ 为何不复刻引擎配对算法 / 边界被拒为何可零成本重试 / 自选范围 + 官方兜底 + 强制线收口 / 验证矩阵 |
-| [`docs/compaction-failure-diagnosis.md`](docs/compaction-failure-diagnosis.md) | **压缩全线失效定位**：workbuddy provider 对摘要请求 400 的完整证据链与两条修复选项 |
-| [`docs/reference/README.md`](docs/reference/README.md) | 第三方（DSH 官方）抽取材料的来源与许可 + **三个统一取证工具**（`asar-query.cjs` / `dump-report.cjs` / `session-records.cjs`） |
-| [`review-brief.md`](review-brief.md) / [`review-findings.md`](review-findings.md) | 只读审查的任务书与报告 |
+| [`docs/setup.md`](docs/setup.md) | 环境事实、composition 真相（not-bundle 坑）、**部署与热换矩阵** |
+| [`docs/milestones.md`](docs/milestones.md) | **逐里程碑台账**（M1 → 现在，含踩坑与实测数值） |
+| [`docs/status-archive.md`](docs/status-archive.md) | 早期进度历史存档（原 README §3） |
+| [`docs/cost-model.md`](docs/cost-model.md) | 成本模型全文（官方单价 / 缓存命中率 / 阈值弹性 / 计算器） |
+| [`docs/api-notes.md`](docs/api-notes.md) | 已验证的官方 API + 修正记录 |
+| [`docs/cross-repo-sync.md`](docs/cross-repo-sync.md) | 与 `dsh-browser-kit` 的同步清单 |
+| [`docs/r1*`–`r7*.md`](docs/) | 各里程碑的设计/审查文档（R1 智能思考调查与设计、R2 换档改工具、R3 解耦、R4 压缩工具化、R5 保留范围、R7 审查加固） |
+| [`docs/compaction-failure-diagnosis.md`](docs/compaction-failure-diagnosis.md) | 压缩全线失效定位（provider×model 锐化） |
+| [`docs/d1-module-split-brief.md`](docs/d1-module-split-brief.md) | D1 模块切分任务书 |
+| [`docs/reference/README.md`](docs/reference/README.md) | 第三方（DSH 官方）抽取材料来源与许可 + 统一取证工具 |
+| [`review-brief.md`](review-brief.md) / [`review-findings.md`](review-findings.md) | 只读审查任务书与报告 |
 
-**运行期取证**：`plugin/.data/m1-report.json`（service/injection/compaction 全字段报告）、
-`plugin/.data/hud-acts.json`（压缩历史，cap 50）。
-
-统一取证工具（2026-10-07 收敛，取代此前散落的一次性脚本）：
+**运行期取证**：`plugin/.data/m1-report.json`（全字段报告）、`plugin/.data/hud-acts.json`（压缩历史）。
 
 ```bash
-node docs/reference/tools/dump-report.cjs                  # 报告概览 + 尾部条目
-node docs/reference/tools/dump-report.cjs --tail 20        # 尾部 N 条
-node docs/reference/tools/dump-report.cjs --kind m3-act    # 按 reason 过滤
-node docs/reference/tools/dump-report.cjs --field m3.eff   # 取最近一条的某字段
-node docs/reference/tools/dump-report.cjs --history-acts   # 压缩历史（含 hud-acts.json）
-
-node docs/reference/tools/asar-query.cjs list --filter dsh-token-meter
+node docs/reference/tools/dump-report.cjs                # 报告概览 / --tail N / --kind m3-act / --field m3.eff
 node docs/reference/tools/asar-query.cjs grep --pattern compactIfNeeded --ext js --ctx 3
-node docs/reference/tools/asar-query.cjs extract --paths "/dsh/node_modules/..."
 ```
-
----
 
 ## 9. 验收标准
 
