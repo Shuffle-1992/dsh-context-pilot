@@ -776,7 +776,7 @@ window.__ModuleLoader__.load({
 			 *   - 冷却中：**灰色**（中性灰，深浅主题下都是「未点亮」感）
 			 *     ⇒ 彩色火花放在裁剪窗里，按冷却进度**从下往上显色**（进度条式）；
 			 *   - 冷却完成：整颗彩色点亮（ready=info 蓝，与发送按钮同源）。
-			 * 无外框（上一版实底方块被指「外层的框」多余）；22px（≈文字两行高），图标感更强。
+			 * 无外框（上一版实底方块被指「外层的框」多余）；24px（与 chip 等高），图标感更强。
 			 * 显色窗与灰底是**两张同形 SVG** 对齐叠放。 */
 			/* ✦ 四角星（凹边星芒，经典 sparkle 形）：M 顶点 → 用二次曲线内凹到各尖点。
 			 * 上一版用直线连点 ⇒ 形状像「+」。曲线内凹才是火花/闪耀的通用形态。 */
@@ -846,10 +846,12 @@ window.__ModuleLoader__.load({
 					el("span", {
 						className: "dcp-chip-icon",
 						"aria-hidden": "true",
-						style: { position: "relative", width: "22px", height: "22px", flex: "none" },
+						/* 24px = 与 chip 等高；alignSelf:center + lineHeight:0 双保险
+						 * 防 inline 基线偏移（外层已是 align-items:center）。 */
+						style: { position: "relative", width: "24px", height: "24px", flex: "none", alignSelf: "center", lineHeight: 0 },
 					},
 						el("img", { src: grayUrl, alt: "", draggable: false,
-							style: { position: "absolute", inset: 0, width: "22px", height: "22px" } }),
+							style: { position: "absolute", inset: 0, width: "24px", height: "24px" } }),
 						el("span", {
 							"aria-hidden": "true",
 							style: {
@@ -859,7 +861,7 @@ window.__ModuleLoader__.load({
 							},
 						},
 							el("img", { src: colorUrl, alt: cooling ? "智能思考冷却" : "智能思考就绪", draggable: false,
-								style: { position: "absolute", left: 0, bottom: 0, width: "22px", height: "22px" } }),
+								style: { position: "absolute", left: 0, bottom: 0, width: "24px", height: "24px" } }),
 						),
 					),
 					el("span", { className: "dcp-chip-label", style: { opacity: ".85" } },
