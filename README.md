@@ -19,11 +19,14 @@ DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`（面板名�
 
 ```
 每轮任务前 → 读上下文用量（tokenMeter.measure）→ 注入「窗口 / 已用 / 占比」到 prompt
-          → 占用达「智能压缩线」时附决策卡，模型自行判断是否压缩
-          → 模型【先在正文里说一句理由，再】调用工具 compact_context
-          → 下一步的 pre-step 执行压缩（自己算保留范围）→ 之后所有步骤跑在压缩后的上下文上
-          → 占用达「强制压缩线」时插件在 pre-step 无条件发起压缩（无需模型操作）
-             ※ 执行路径与上面相同：先自算保留范围；只有自算失败/压完仍在线上，才落到 DSH 官方 overflow 收口
+           ｜ 压缩档位（R16）：light 深压 8% / standard 标准 16%（默认）/ heavy 浅压 24%
+           ｜ —— Agent 调 compact_context(tier=…) 选档，会话级持续生效；不选 = standard
+           → 占用达「智能压缩线」时附决策卡，模型自行判断是否压缩并选档
+           → 模型【先在正文里说一句理由，再】调用工具 compact_context（可选 tier）
+           → 下一步的 pre-step 执行压缩（按档位自算保留范围）→ 之后所有步骤跑在压缩后的上下文上
+           → 占用达「强制压缩线」时插件在 pre-step 无条件发起压缩
+              ｜ 档位同样由 Agent 事先选定的 tier 决定（Agent 选过 heavy 就按 24% 保留）；
+              ｜ 没选过 = standard 兜底；只有自算失败/压完仍在线上，才落到 DSH 官方 overflow 收口
 
 可选（智能思考开关）：
           读当前模型的思考强度档位 → 注入给 Agent → Agent 按难度自行换档
@@ -35,7 +38,7 @@ DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`（面板名�
 | 改进 | 内容 | 为什么重要 |
 | --- | --- | --- |
 | **压缩改「工具触发」**（R4） | 模型调用 `compact_context` ⇒ 登记意图 ⇒ **下一步 pre-step** 执行 ⇒ 本轮无缝继续 | 彻底删掉「伪造用户消息拉起会话」那套（`maybeResumeAfterMarker` / `sessionController.prompt` / `agent.followup` 在代码里**零出现**）。压缩与「叫醒」解耦：工具调用本身就保证有下一步，**不需要叫醒** |
-| **保留范围「自己算」**（R5） | 保留预算 = 上下文窗口 × 16%（1M 窗口 ⇒ **160k token**）⇒ 调公开方法 `compactRegion`；边界不合法则逐节点回退；失败或压完仍越线才**沿用官方 overflow** 兜底 | 引擎 `context-overflow` 写死 `retainTokens = 0`：真机实测在**只有 53% 占用**时把 surface 从 **1117 节点 / 367,794 token** 砍到 **4 节点 / 8,603 token**（影子化 97.7%）。现在近端细节留得住，且**整段没超预算时什么都不会压** |
+| **保留范围「自己算」**（R5+R16） | 保留预算由**会话档位**决定（R16 三档，见下一行）⇒ 调公开方法 `compactRegion`；边界不合法则逐节点回退；失败或压完仍越线才**沿用官方 overflow** 兜底 | 引擎 `context-overflow` 写死 `retainTokens = 0`：真机实测在**只有 53% 占用**时把 surface 从 **1117 节点 / 367,794 token** 砍到 **4 节点 / 8,603 token**（影子化 97.7%）。现在近端细节留得住，且**整段没超预算时什么都不会压** |
 | **压缩档位（R16）** | `compact_context` 可选参数 `tier`：**light 深压（8%）/ standard 标准（16%，默认）/ heavy 浅压（24%）**；**会话级持续生效**（含强制线，未选 = standard 兜底）；范围计算/边界保护三档完全一致，夹取 `[40k, 窗口×50%]` | 把「不可靠的自由度」换成「有界的选择」：模型只在语义档位里挑，不接触会「切坏 tool 对」的底层参数；选档理由照旧写在正文（先说再调用）；回执带档位与保留预算，Agent 能确认选档真的生效 |
 | **换档改「工具」**（R2/R3） | 模型调用 `set_reasoning_effort` ⇒ **下一步请求即用新档位** | 替代「写文本标记、等用户再发一条消息才生效」——旧方案要求用户参与才能生效 |
 | **「先说，再调用」**（R6） | 两个工具的 description + 一次性说明 + 决策卡都要求：**先在回复正文里用一句话说明理由，再调用工具** | 工具调用对用户是**静默的**（只显示「调用了某工具」）。理由写进正文，用户才看得出为什么压、为什么换档 |
@@ -63,8 +66,8 @@ DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`（面板名�
 
 | 面板名 | 配置键 | 含义 |
 | --- | --- | --- |
-| **智能压缩线** | `markerMinRatio` | 占用达此值时注入决策卡，**模型可自行决定压缩**并自动续跑 |
-| **强制压缩线** | `criticalRatio` | 占用达此值**无条件发起压缩**（pre-step / idle 兜底；执行路径同上——先自算保留范围，官方 overflow 只作兜底/收口）。**生效值 = min(配置, DSH 引擎阈值 − 5pp)**，即内置 80% ⇒ 上限 **75%** |
+| **智能压缩线** | `markerMinRatio` | 占用达此值时注入决策卡，**模型可自行决定压缩**（含选档，见 R16）并自动续跑 |
+| **强制压缩线** | `criticalRatio` | 占用达此值**无条件发起压缩**（pre-step / idle 兜底；执行路径同上——先按**会话档位**自算保留范围，官方 overflow 只作兜底/收口；档位由 Agent 事先选定，未选 = standard）。**生效值 = min(配置, DSH 引擎阈值 − 5pp)**，即内置 80% ⇒ 上限 **75%** |
 
 推荐值（按计费口径，计算器可按实价实时推导）：
 
@@ -90,15 +93,18 @@ DSH（DeepSeek Harness）宿主侧插件 `@local/dsh-context-pilot`（面板名�
 > 详见 [`docs/r4-compaction-tool-design.md`](docs/r4-compaction-tool-design.md)。
 >
 > 占用达强制压缩线（生效值 = min(配置, DSH 引擎阈值 − 5pp)；内置 80% ⇒ 75%）时，
-> 仍由既有 pre-step / idle 安全网自动发起压缩，无需模型操作
-> ——**执行路径与工具触发完全相同**（先自算保留范围），不是切到 DSH 自带压缩；详见下一条。
+> 仍由既有 pre-step / idle 安全网自动发起压缩——**执行路径与工具触发完全相同**
+> （不是切到 DSH 自带压缩）；**保留档位同样由 Agent 事先选定的 tier 决定**
+> （R16：会话级持续生效，未选 = standard 兜底）；详见下一条。
 >
-> **保留多少近端内容**（R5）：无论哪条触发，都先按「窗口 × 16%」自选范围 → 只压这一段
-> （1M 窗口 ⇒ 近端 **160k token** 原样保留）；边界不合法则逐节点回退；
-> 仍不行或压完还在强制线之上，才**沿用官方 overflow** 兜底；
-> 整段对话未超预算时**什么都不会压**。这条规则已**教给 Agent**（R6），
+> **保留多少近端内容**（R5+R16）：无论哪条触发，都先按**会话档位**自算范围 → 只压这一段。
+> 三档：**light = 窗口 × 8%**（1M ⇒ ~80k，深压）/ **standard = 16%**（~160k，默认）/
+> **heavy = 24%**（~240k，浅压）；预算被夹取在 `[40k, 窗口 × 50%]`。
+> 边界不合法则逐节点回退；仍不行或压完还在强制线之上，才**沿用官方 overflow** 兜底；
+> 整段对话未超预算时**什么都不会压**。这条规则已**教给 Agent**（R6/R16），
 > 所以它知道压缩后还剩什么，不必靠猜。
-> 详见 [`docs/r5-retention-range-design.md`](docs/r5-retention-range-design.md)。
+> 详见 [`docs/r5-retention-range-design.md`](docs/r5-retention-range-design.md) 与
+> [`docs/milestones.md`](docs/milestones.md) 的 R16 节。
 >
 > **「先说，再调用」**（R6，用户要求）：工具调用对用户**静默**（只显示「调用了某工具」），
 > 所以两个工具——`compact_context` 与 `set_reasoning_effort`——的描述、一次性说明、决策卡
@@ -187,8 +193,9 @@ Agent 自改档不应改掉新会话的默认档。
 > `import(\`./effort.mjs?ts=${implTs}\`)` 加载（ts 取自 impl 自身），**与 impl 同批热换**；
 > `static.mjs` §4/§5 的依赖方向与「动态 import 必须带 `?ts=`」护栏自动覆盖它。
 > R5（2026-10-08）同款加载 `plugin/compact-range.mjs`（保留范围自选，纯函数叶子）。
-> ⚠️ **保留比例 `RETAIN_RATIO` 目前是模块常量**（0.16，= 引擎默认）。要变成面板可调，
-> 需给 `plugin-config.schema.mjs` 加字段 + **重启 DSH**——未做，等用户确认。
+> ⚠️ **压缩档位是模块常量表 `TIERS`**（R16：light 0.08 / standard 0.16 = 引擎默认 / heavy 0.24），
+> 由 **Agent 经 `compact_context(tier=…)` 选择**（会话级持续生效，含强制线；未选 = standard），
+> 不在面板配置。要改成面板可调，需给 `plugin-config.schema.mjs` 加字段 + **重启 DSH**——未做，等用户确认。
 
 详见 [`docs/setup.md`](docs/setup.md#4-部署矩阵)。
 
@@ -276,9 +283,9 @@ node docs/reference/tools/session-records.cjs --find <会话 id 片段> --from 1
 | **智能思考** | `effortEnabled` | false | 开=暴露思考档位 + 注册 `set_reasoning_effort` 工具；关=提示词不注入、工具也不注册 |
 | **换档冷却(秒)** | `effortCooldownMs` | 30 | 两次换档的最小间隔（存储为 ms）。**换档会使前缀缓存失效 ⇒ 计费敏感**，故可配（R3-S7） |
 | **智能压缩线** | `markerMinRatio` | 0.2 | 占用达此值时注入决策卡，模型可自行决定压缩（**决策卡门槛**，与已退役的文本标记无关） |
-| **强制压缩线** | `criticalRatio` | 0.85 | 占用达此值无条件**发起**压缩（先自算保留范围，官方 overflow 兜底/收口）；**生效值 = min(配置, 引擎阈值 − 5pp)**（内置 80% ⇒ 75%） |
+| **强制压缩线** | `criticalRatio` | 0.85 | 占用达此值无条件**发起**压缩（先按**会话档位**自算保留范围，官方 overflow 兜底/收口）；**生效值 = min(配置, 引擎阈值 − 5pp)**（内置 80% ⇒ 75%） |
 | 强制压缩冷却(秒) | `sweepMinIntervalMs` | 600 | 两次强制压缩的最小间隔（存储为 ms） |
-| （无面板字段） | — | — | **保留预算** = 窗口 × `RETAIN_RATIO`（0.16，模块常量）= 1M 窗口 ⇒ **160k token**。取代引擎 `context-overflow` 的 `retainTokens = 0`（R5）；见 [`docs/r5-retention-range-design.md`](docs/r5-retention-range-design.md) |
+| （无面板字段） | — | — | **压缩档位**（R16）：`tier` = light 8% / standard 16% / heavy 24%，**Agent 经工具选档、会话级持续生效**（含强制线），预算夹取 `[40k, 窗口×50%]`；取代引擎 `context-overflow` 的 `retainTokens = 0`（R5）；见 [`docs/r5-retention-range-design.md`](docs/r5-retention-range-design.md) 与 milestones 的 R16 节 |
 
 > **R7 删除的两个字段**：`marker`（压缩标记）与 `armedTtlMs`（标记有效期）——随 marker 通道整体退役。
 > 压缩改由工具 `compact_context` 在轮内触发，回复尾行文本标记既无教学也无执行路径。
@@ -336,9 +343,9 @@ node docs/reference/tools/asar-query.cjs grep --pattern compactIfNeeded --ext js
 ## 9. 验收标准
 
 1. 每轮 prompt 含实时用量三元组（上限/已用/占比），模型可正确复述；
-2. 占用达**智能压缩线**时，模型可写标记触发压缩，插件自动执行并自动拉起续跑任务（用户零重发）；
-3. 占用达**强制压缩线**时，插件在 pre-step / idle 无条件发起压缩（同样先自算保留范围，
-   官方 overflow 只作兜底/收口），压缩事件出现在会话日志；
+2. 占用达**智能压缩线**时，模型可调用 `compact_context` 触发压缩（**可选 tier 选档**），插件在下一步自动执行（用户零重发）；
+3. 占用达**强制压缩线**时，插件在 pre-step / idle 无条件发起压缩——保留范围按**会话档位**自算
+   （未选 = standard 兜底；官方 overflow 只作兜底/收口），压缩事件出现在会话日志；
 4. 两条线可经 Config 配置（面板按秒/比率显示），改后**即时生效**（活读，无需重启）；
 5. 插件任何异常不影响 DSH 主流程（激活安全零抛）。
 6. **智能思考**（开启时）：注入当前档位 + 可选档；Agent 调用工具 `set_reasoning_effort`
