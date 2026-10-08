@@ -847,8 +847,10 @@ window.__ModuleLoader__.load({
 						className: "dcp-chip-icon",
 						"aria-hidden": "true",
 						/* 24px = 与 chip 等高；alignSelf:center + lineHeight:0 双保险
-						 * 防 inline 基线偏移（外层已是 align-items:center）。 */
-						style: { position: "relative", width: "24px", height: "24px", flex: "none", alignSelf: "center", lineHeight: 0 },
+						 * 防 inline 基线偏移（外层已是 align-items:center）。
+						 * 视觉微调（用户实测）：纯几何居中显得偏高——火花质量集中在下半部、
+						 * 右上小星点又轻，视觉重心偏低 ⇒ 下移 2px 校正（top 不影响布局流）。 */
+						style: { position: "relative", width: "24px", height: "24px", flex: "none", alignSelf: "center", lineHeight: 0, top: "2px" },
 					},
 						el("img", { src: grayUrl, alt: "", draggable: false,
 							style: { position: "absolute", inset: 0, width: "24px", height: "24px" } }),
