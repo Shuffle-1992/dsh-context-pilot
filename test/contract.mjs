@@ -366,6 +366,11 @@ ok('R16.7 换档统计持久化：读写 effort-stats.json（toggle/重启后计
   /effort-stats\.json/.test(effort) && /const savedStats = loadStats\(\)/.test(effort)
     && /savedStats\[sid\]/.test(effort) && /saveStats\(\)/.test(effort),
   '内存态随 toggle 清零 ⇒ 「会话切换次数」归零（用户实测）');
+/* R16.8（用户提出的时机逻辑）三源对账断言放在 ct 声明之后（文件下方）——
+ * 此处只保留 m2 侧（m2src 在此已可用）。 */
+ok('R16.8 时机教学（回执侧）：压缩自检回执含「压缩后换档只付一次缓存重建」',
+  /这正是换档的最佳时机/.test(m2src),
+  '回执缺位 ⇒ Agent 刚压缩完（缓存已重置）却不知道此刻换档最省');
 /* R16.7b 行为级（用户实测「重启后仍显示 0 次」的根因变异抓取）：
  * 真 effort 域写盘 → 新实例（= 重启）→ hudPayload 必须读到恢复值。
  * hudPayload 若退回 bySid.get（不合并落盘），新实例没有会话槽位 ⇒ 返回 0（该变异曾逃逸）。 */
@@ -456,6 +461,14 @@ console.log('\n== 6.15 自动压缩工具触发（替代 marker + 伪造恢复�
 /* 用户明确要求（2026-10-08）：「自动压缩时，**不用伪造一条我的信息**重新拉起会话」。
  * 证据链与方案取舍见 docs/r4-compaction-tool-design.md；本段把该结论固化成绊线。 */
 const ct = read('compact-tool.mjs');
+/* R16.8（用户提出的时机逻辑）三源对账：压缩重置前缀缓存 + 换档使缓存失效 ⇒
+ * 同轮顺带换档只付一次重建成本。回执侧断言在 m2src 处；此处对 compact/effort 两源。 */
+ok('R16.8 时机教学（compact 侧）：决策卡与 description 都含「顺带换档只付一次缓存重建」',
+  /压缩的同一条消息里顺带调用 set_reasoning_effort 换档，缓存重建只付一次/.test(ct),
+  '决策卡缺位 ⇒ Agent 压缩时不知道可以同轮换档（错过缓存最优时机）');
+ok('R16.8 时机教学（effort 侧）：换档工具 description 也写明该时机',
+  /顺带换档是最优时机/.test(effort) && /只付一次重建成本/.test(effort),
+  '换档侧缺位 ⇒ 两个工具的教学不互指，Agent 只能单边知晓');
 /* R9/R10：M3 压缩域（执行核心 + 编排层）已整体搬进 plugin/m3.compact.mjs ⇒
  * 凡引用该域实现的断言一律从**模块**取切片，并额外钉「宿主不得把它抄回来」。 */
 const m3src = read('m3.compact.mjs');

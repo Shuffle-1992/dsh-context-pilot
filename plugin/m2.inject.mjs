@@ -171,7 +171,11 @@ export function createM2Injection(deps) {
       const head = parts.length ? `（${parts.join('，')}）` : '';
       if (v.state === 'executed') {
         const k = Number.isFinite(v.shadowedTokens) ? `省 ~${(v.shadowedTokens / 1000).toFixed(1)}K token` : '已执行';
-        return `【压缩自检】你上次请求的压缩**已执行**${head}：${k}（保留策略 ${v.rangeSource ?? '?'}，${v.ms ?? '?'}ms）。`;
+        /* R16.8（用户提出的时机逻辑）：压缩已重置前缀缓存 ⇒ 同一轮里顺带换档，
+         * 缓存重建只付一次——这是换档的**最佳时机**（提升给更难的任务 / 降低省额度）。 */
+        return `【压缩自检】你上次请求的压缩**已执行**${head}：${k}（保留策略 ${v.rangeSource ?? '?'}，${v.ms ?? '?'}ms）。`
+          + `**压缩已重置前缀缓存——这正是换档的最佳时机**（换档同样会使缓存失效，现在换只付一次重建成本）：`
+          + `若接下来的任务更难可顺带升档、进入机械阶段可降档省额度——调用 set_reasoning_effort 即可（可选，不需要则忽略本句）。`;
       }
       if (v.state === 'no-need') {
         return `【压缩自检】你上次请求的压缩**已执行但判定无需压缩**${head}（${v.skipWhy ?? 'nothing-to-compact'}）`
