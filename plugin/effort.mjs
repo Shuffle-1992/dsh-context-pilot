@@ -73,12 +73,15 @@ export function createEffort(deps) {
   /* ═══════════ 状态：按 sid 单对象（R3-S6：原先三张 Map 各自 delete，漏删即留孤儿） ═══════════
    * 原先拆成 pendingEffortBySid / effortSwitchAtBySid / appliedEffortBySid —— 三者同键同生命周期，
    * 合并后只有一个删除点（dropSid），孤儿在结构上不可能出现。 */
-  /** @type {Map<string, {want: string|null, wantAt: number, switchedAt: number, applied: string|undefined}>} */
+  /** @type {Map<string, {want: string|null, wantAt: number, switchedAt: number, applied: string|undefined,
+   *   lastSwitch: {from: string|null, to: string, at: number}|null, switchCount: number}>} */
   const bySid = new Map();
   const slot = (sid) => {
     let s = bySid.get(sid);
     if (!s) {
-      s = { want: null, wantAt: 0, switchedAt: 0, applied: undefined };
+      /* R16.6：lastSwitch/switchCount —— chip tooltip 的「最近切换 / 会话切换次数」数据源
+       * （按会话记，全局计数在多会话下没有意义）。只记**真变化**（与 effortSwitches 同判据）。 */
+      s = { want: null, wantAt: 0, switchedAt: 0, applied: undefined, lastSwitch: null, switchCount: 0 };
       bySid.set(sid, s);
     }
     return s;
@@ -214,6 +217,10 @@ export function createEffort(deps) {
        * 但客户端那一次 getHud 恰好夹在中间 ⇒ 若在这里无条件重锚，chip 就永远看不到冷却（真机实测）。 */
       if (!s.switchedAt) s.switchedAt = Date.now();
       state.m3.effortSwitches += 1;
+      /* R16.6：按会话记「最近切换 / 次数」（chip tooltip 数据源）。
+       * from 取**会话上一档**（config.reasoningEffort 是请求头里的旧值，等价）。 */
+      s.lastSwitch = { from: config?.reasoningEffort ?? null, to: want, at: Date.now() };
+      s.switchCount += 1;
       state.m3.lastEffortApply = {
         at: new Date().toISOString(), sessionId: sidKey, want,
         from: config?.reasoningEffort ?? null, applied: true,
@@ -525,7 +532,17 @@ export function createEffort(deps) {
     const cap = cooldownMs();
     const base = s?.switchedAt ?? 0;
     const until = base ? base + cap : 0;
-    return { ...eff, cooldownUntil: until > Date.now() ? until : 0, cooldownTotalMs: cap };
+    /* R16.6：chip tooltip 的「最近切换 / 会话切换次数」。
+     * 时间用 toLocaleTimeString（本地短时），与用户在 DSH 界面看到的时间口径一致。 */
+    const ls = s?.lastSwitch ?? null;
+    return {
+      ...eff, cooldownUntil: until > Date.now() ? until : 0, cooldownTotalMs: cap,
+      lastSwitch: ls ? {
+        from: ls.from ?? '(默认)', to: ls.to,
+        at: new Date(ls.at).toLocaleTimeString('zh-CN', { hour12: false }),
+      } : null,
+      switchCount: s?.switchCount ?? 0,
+    };
   }
 
   /** 取证快照（宿主报告用；只读，不暴露内部 Map）。 */

@@ -293,27 +293,23 @@ const chipBody = /function EffortChip\([\s\S]*?\n\t\t\}/.exec(client)?.[0] ?? ''
 ok('解析出 EffortChip 函数体', chipBody.length > 0, '未找到 EffortChip');
 /* 2026-10-08 用户要求重做 chip：**删除内联的档位值与冷却秒数**、文案固定「智能思考就绪」、
  * 状态改由**两个样式 + 进度条式过渡**承担（底层 warn=冷却，上层 success 按冷却进度扫满=就绪）。 */
-ok('chip 标签不再用「智能思考档位」',
-  !/el\("span", \{ style: \{ opacity: "\.75" \} \}, "智能思考档位"\)/.test(client),
-  '仍是旧的「智能思考档位」标签 span ⇒ 用户已要求改成「智能思考就绪」');
-/* R16.5c（2026-10-08 用户两次实测「窗口缩小时 chip 仍显示文字」）：
- * 窄屏收起必须走 **CSS 容器查询**（与 DSH 模型选择器同机制、同断点 560px），
- * 不得退回 JS 观察chip 自身宽度（chip 是 flex:none 永不收缩 ⇒ 死路）。 */
-ok('chip 窄屏收起走 @container 容器查询（断点 560px，与模型选择器同刻度）',
-  /@container \(width <= 560px\)/.test(client)
-    && /\.dcp-effort-chip \.dcp-chip-label\{display:none\}/.test(client)
-    && /\.dcp-effort-chip \.dcp-chip-icon\{display:inline-flex\}/.test(client),
-  '容器查询缺失 ⇒ 窄屏下仍显示文字（两版 JS 观察已实测失败：量自己/观察器未装上）');
-ok('chip 三元素齐备（dot 宽态 / icon 窄态 / label 宽态），显隐交给 CSS',
-  chipBody.includes('dcp-chip-dot') && chipBody.includes('dcp-chip-icon') && chipBody.includes('dcp-chip-label')
-    && !/getBoundingClientRect\(\)\.width/.test(chipBody),
-  'chip 内仍量自身宽度 ⇒ 回到死路（flex:none 永不收缩）');
+/* R16.6（2026-10-09 用户要求）：**恒为图标**——任何尺寸都不再显示文字。
+ * 历史护栏保留为「防退化」：不得再出现文字 label / 宽窄两态元素（那套已整体退役）。 */
+ok('chip 恒为图标态：dot/label 元素已移除，无容器查询分支（R16.6）',
+  !chipBody.includes('dcp-chip-dot') && !chipBody.includes('dcp-chip-label')
+    && !/@container/.test(chipBody) && chipBody.includes('dcp-chip-icon'),
+  '仍渲染文字/宽窄两态 ⇒ 用户已要求「不管什么尺寸都显示为图标」');
+ok('chip 盒样式整体关闭（背景/边框/扫色 overlay 不再渲染出「框」）',
+  /background:transparent!important/.test(client) && /box-shadow:none!important/.test(client)
+    && !/boxShadow: `inset/.test(chipBody),
+  'chip 残留盒样式 ⇒ 窄态图标外面又会出现「框」（R16.5g 已实测）');
 /* 判据必须与样式**同源**（都用 cooling）。缺少 `!` 锚定会让 `!cooling ? …` 这类
- * 「文案与颜色相反」的回归从子串匹配漏过去（变异实测：加锚定前该变异未被抓住）。 */
-ok('chip 文案两态（冷却=「智能思考冷却」/ 就绪=「智能思考就绪」）',
+ * 「文案与颜色相反」的回归从子串匹配漏过去（变异实测：加锚定前该变异未被抓住）。
+ * R16.6 后文案只剩 img 的 alt（tooltip 承担语义），但 cooling 判据仍须同源不得取反。 */
+ok('chip 冷却判据与样式同源（cooling 不被取反）',
   /cooling \? "智能思考冷却" : "智能思考就绪"/.test(chipBody) &&
   !/!\s*cooling\s*\?/.test(chipBody),
-  '未按 cooling 切换文案，或判据被取反 ⇒ 冷却时显示「就绪」（与样式相反）');
+  '判据被取反 ⇒ 冷却时显示「就绪」（与样式相反）');
 ok('chip 不再把档位值渲染成子节点（用户要求删除）',
   !/\}, effort\)/.test(chipBody),
   '仍把 effort 值当子节点渲染 ⇒ 用户要求删除内联档位显示');
@@ -352,19 +348,20 @@ ok('chip 就绪色 = 发送按钮的填充 token（不含绿 / 不含 brand-prim
   !/--dsw-alias-state-success-primary/.test(cOkDecl) && !/#34c759/.test(cOkDecl)
   && !/--dsw-alias-brand-primary/.test(cOkDecl),
   '就绪色不是发送按钮的 token（绿色残留，或退回了中性反转的 brand-primary）');
-ok('chip 进度条宽度由冷却进度驱动',
+ok('chip 显色进度由冷却进度驱动（R16.6：显色窗 = progress × 100%）',
   /const progress = cooling \? Math\.min\(1, Math\.max\(0, \(totalMs - remainMs\) \/ totalMs\)\) : 1;/.test(chipBody) &&
-  /width: `\$\{progress \* 100\}%`/.test(chipBody),
-  '冷却进度未接到进度条宽度 ⇒ 用户要的「像进度条一样过渡」未实现');
-ok('chip 冷却结束与进度扫满同一时刻（cooling=false ⇒ progress=1）',
+  /height: `\$\{clipPct\}%`/.test(chipBody),
+  '冷却进度未接到显色窗高度 ⇒ 用户要的「从下往上显色」未实现');
+ok('chip 冷却结束与显色满格同一时刻（cooling=false ⇒ progress=1）',
   /: 1;/.test(chipBody) && /const cooling = until > now;/.test(chipBody),
   'progress 未在冷却结束时取 1 ⇒ 出现「样式已就绪但条没满」');
-ok('chip 进度条有 CSS transition 补帧（1s tick 仍平滑）',
-  /transition: "width 1s linear, opacity \.3s linear"/.test(chipBody),
+ok('chip 显色有 CSS transition 补帧（1s tick 仍平滑）',
+  /transition: "height 1s linear"/.test(chipBody),
   '缺 transition ⇒ 1s tick 呈跳变而非平滑过渡');
-ok('chip 的档位/冷却信息移入 title 提示（未丢失）',
-  /当前档位：\$\{effort\}/.test(chipBody) && /换档冷却中：还剩 \$\{coolLeft\}s/.test(chipBody),
-  '信息被直接删掉而非移入 title ⇒ 用户失去查看途径');
+ok('chip 的档位/冷却/最近切换/次数信息移入 title（未丢失，R16.6 增补）',
+  /当前档位：\$\{effort\}/.test(chipBody) && /换档冷却中：还剩 \$\{coolLeft\}s/.test(chipBody)
+    && /最近切换：/.test(chipBody) && /会话切换次数：/.test(chipBody),
+  '信息被直接删掉而非移入 title ⇒ 用户失去查看途径（R16.6 新增两项）');
 ok('投影 pending 优先显示（已选待生效提前可见）',
   /sel\.pending \|\| sel\.lastUsed/.test(client),
   '未优先取 pending ⇒ 换档后要等下一轮才显示');

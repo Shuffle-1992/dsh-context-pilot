@@ -637,26 +637,20 @@ window.__ModuleLoader__.load({
 		 *   ① v1 量 chip 自己——chip 是 flex:none 永不收缩 ⇒ 永远量到宽；
 		 *   ② v2 观察父容器——但 effect 依赖 [] 只在挂载跑一次，而 chip 首帧常因
 		 *      hostInfo 未就绪 return null ⇒ ref 为空、观察器根本没装上。
-		 *   CSS 容器查询不依赖任何挂载时序，与 DSH 模型选择器完全同机制。 */
+		 *   CSS 容器查询不依赖任何挂载时序，与 DSH 模型选择器完全同机制。
+		 * R16.6（用户要求）简化：**恒为图标态**（任何尺寸都不再显示文字）——
+		 * 容器查询分支与 dot/label 元素一并移除，chip 恒显 24px 火花。 */
 		const ensureChipStyle = () => {
 			try {
 				if (typeof document === "undefined" || document.getElementById("dcp-effort-chip-style")) return;
 				const st = document.createElement("style");
 				st.id = "dcp-effort-chip-style";
 				st.textContent = [
-					".dcp-effort-chip .dcp-chip-icon{display:none}",
-					"@container (width <= 560px){",
-					".dcp-effort-chip .dcp-chip-label{display:none}",
-					".dcp-effort-chip .dcp-chip-dot{display:none}",
-					/* 窄态 = 纯图标：去掉 chip 自身的背景/边框/扫色 overlay（否则收缩后的
-					 * chip 底+边框就是用户看到的「外层的框」），padding 也收掉。 */
-					".dcp-effort-chip{background:transparent!important;box-shadow:none!important;padding:0 2px!important}",
+					".dcp-effort-chip{background:transparent!important;box-shadow:none!important;padding:0!important;margin-right:0!important}",
 					".dcp-effort-chip>[data-bg],.dcp-effort-chip>[data-progress]{display:none!important}",
-					".dcp-effort-chip .dcp-chip-icon{display:inline-flex}",
-					"}",
 				].join("\n");
 				document.head.appendChild(st);
-			} catch { /* 注入失败 ⇒ 退化为始终显示文字（不崩） */ }
+			} catch { /* 注入失败 ⇒ 图标仍显示（盒样式走内联兜底） */ }
 		};
 
 		function EffortChip(props) {
@@ -761,12 +755,17 @@ window.__ModuleLoader__.load({
 			 *   回退值取该 token 的真值 #4176e6。 */
 			const C_OK = "var(--dsw-alias-button-info-fill, #4176e6)";
 			const accent = cooling ? C_WARN : C_OK;
+			/* R16.6（用户要求）：tooltip 增补「最近切换 / 会话切换次数」。
+			 * 数据来自 getHud 的 effort 字段（host 从按会话的 lastSwitch/switchCount 组装）。 */
+			const ls = hostInfo && hostInfo.lastSwitch ? hostInfo.lastSwitch : null;
 			const tip = [
 				`模型：${shown.provider}/${shown.model}`,
 				`当前档位：${effort}${pendingNow ? "（已选，下一步生效）" : ""}`,
 				coolLeft > 0
 					? `换档冷却中：还剩 ${coolLeft}s（冷却 ${Math.round(totalMs / 1000)}s，防频繁换档打断前缀缓存）`
 					: "换档冷却：已就绪",
+				ls ? `最近切换：${ls.from} → ${ls.to}（${ls.at}）` : "最近切换：本会话还没有",
+				`会话切换次数：${(hostInfo && hostInfo.switchCount) || 0} 次`,
 				"Agent 可调用 set_reasoning_effort 工具自主换档（本次任务内立即生效）",
 			].join("\n");
 			/* 小尺寸态专用图标（R16.5f 定稿）：**思考火花（四角星 + 小星点），无外框**。
@@ -789,85 +788,43 @@ window.__ModuleLoader__.load({
 			const colorUrl = `data:image/svg+xml;utf8,${encodeURIComponent(sparkSvg(iconColor))}`; // 已显色
 			/* 显色窗：高度 = progress × 100%，底部对齐 ⇒ 从下往上涨；冷却完成(progress=1)全显。 */
 			const clipPct = Math.round(progress * 100);
-			/* ⑦（最终形态）：**全部元素都渲染**——点（宽态）/ 灰+彩双层火花（窄态）/ 文字（宽态）
-			 * ——由注入的 `@container (width<=560px)` CSS 决定显隐；显隐与 JS 时序彻底解耦：
-			 * 模型选择器收图标的那一刻，本 chip 必然同步收（同一 composer 容器、同一断点）。 */
+			/* R16.6（最终形态）：**恒为图标**——点与文字已按用户要求移除，任何尺寸都只显示火花。
+			 * 盒样式（背景/边框/扫色 overlay）由注入样式表整体关闭（不再有宽窄两态）。 */
 			return el("div", {
 				ref,
 				className: "dcp-effort-chip",
 				"data-state": cooling ? "cooling" : "ready",
 				title: tip,
 				style: {
-					position: "relative", overflow: "hidden", flex: "none",
-					display: "inline-flex", alignItems: "center", gap: "6px",
-					marginRight: "8px", padding: "0 8px", height: "24px",
-					borderRadius: "6px", fontSize: "12px", lineHeight: 1,
-					background: "var(--dsw-alias-bg-layer-2, rgba(128,128,128,.14))",
-					color: "var(--dsw-alias-label-secondary, rgba(200,200,200,.9))",
-					boxShadow: `inset 0 0 0 1px ${accent}`,
-					transition: "box-shadow .3s linear",
-					whiteSpace: "nowrap", userSelect: "none",
+					position: "relative", overflow: "visible", flex: "none",
+					display: "inline-flex", alignItems: "center",
+					height: "24px", lineHeight: 0,
+					userSelect: "none", cursor: "default",
 				},
 			},
+				/* 火花 = 双层叠放：底层灰色（未点亮），上层彩色装在**底部对齐的裁剪窗**里
+				 * （高度 = 冷却进度）⇒ 显色从下往上涨，进度条式；冷却完成整颗点亮。
+				 * ⚠️ img 不写内联 display（R16.5d 教训）。 */
 				el("span", {
-					"data-bg": "true",
+					className: "dcp-chip-icon",
 					"aria-hidden": "true",
-					style: {
-						position: "absolute", left: 0, top: 0, right: 0, bottom: 0,
-						background: C_WARN, opacity: cooling ? ".16" : "0",
-						transition: "opacity .3s linear",
-					},
-				}),
-				el("span", {
-					"data-progress": "true",
-					"aria-hidden": "true",
-					style: {
-						position: "absolute", left: 0, top: 0, bottom: 0,
-						width: `${progress * 100}%`,
-						background: C_OK, opacity: ".26",
-						transition: "width 1s linear, opacity .3s linear",
-					},
-				}),
-				el("span", {
-					style: { position: "relative", zIndex: 1, display: "inline-flex", alignItems: "center", gap: "6px" },
+					/* 24px 与 chip 等高；alignSelf:center + lineHeight:0 防 inline 基线偏移。
+					 * 视觉微调（用户实测）：火花质量集中在下半部 ⇒ 下移 2px 校正视觉重心。 */
+					style: { position: "relative", width: "24px", height: "24px", flex: "none", alignSelf: "center", lineHeight: 0, top: "2px" },
 				},
+					el("img", { src: grayUrl, alt: "", draggable: false,
+						style: { position: "absolute", inset: 0, width: "24px", height: "24px" } }),
 					el("span", {
-						className: "dcp-chip-dot",
 						"aria-hidden": "true",
 						style: {
-							width: "6px", height: "6px", borderRadius: "50%", flex: "none",
-							background: accent, transition: "background .3s linear",
+							position: "absolute", left: 0, right: 0, bottom: 0,
+							height: `${clipPct}%`, overflow: "hidden",
+							transition: "height 1s linear",
 						},
-					}),
-					/* 窄态图标 = 双层叠放：底层灰色火花（未点亮），上层彩色火花装在
-					 * **底部对齐的裁剪窗**里（高度 = 冷却进度）⇒ 显色从下往上涨，进度条式；
-					 * 冷却完成整颗点亮。两层同形同位，显隐同样交给容器查询样式表。
-					 * ⚠️ img 不写内联 display（R16.5d 教训：内联会压过 @container 规则）。 */
-					el("span", {
-						className: "dcp-chip-icon",
-						"aria-hidden": "true",
-						/* 24px = 与 chip 等高；alignSelf:center + lineHeight:0 双保险
-						 * 防 inline 基线偏移（外层已是 align-items:center）。
-						 * 视觉微调（用户实测）：纯几何居中显得偏高——火花质量集中在下半部、
-						 * 右上小星点又轻，视觉重心偏低 ⇒ 下移 2px 校正（top 不影响布局流）。 */
-						style: { position: "relative", width: "24px", height: "24px", flex: "none", alignSelf: "center", lineHeight: 0, top: "2px" },
 					},
-						el("img", { src: grayUrl, alt: "", draggable: false,
-							style: { position: "absolute", inset: 0, width: "24px", height: "24px" } }),
-						el("span", {
-							"aria-hidden": "true",
-							style: {
-								position: "absolute", left: 0, right: 0, bottom: 0,
-								height: `${clipPct}%`, overflow: "hidden",
-								transition: "height 1s linear",
-							},
-						},
-							el("img", { src: colorUrl, alt: cooling ? "智能思考冷却" : "智能思考就绪", draggable: false,
-								style: { position: "absolute", left: 0, bottom: 0, width: "24px", height: "24px" } }),
-						),
+						el("img", { src: colorUrl, alt: cooling ? "智能思考冷却" : "智能思考就绪", draggable: false,
+							style: { position: "absolute", left: 0, bottom: 0, width: "24px", height: "24px" } }),
 					),
-					el("span", { className: "dcp-chip-label", style: { opacity: ".85" } },
-						cooling ? "智能思考冷却" : "智能思考就绪"),
 				),
 			);
 		}
