@@ -12,9 +12,10 @@
  * 用法：node test/contract.mjs
  * 退出码：0 = 全通过；1 = 有漂移
  */
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, statSync, mkdtempSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { tmpdir } from 'node:os';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PLUGIN = join(ROOT, 'plugin');
@@ -365,6 +366,38 @@ ok('R16.7 换档统计持久化：读写 effort-stats.json（toggle/重启后计
   /effort-stats\.json/.test(effort) && /const savedStats = loadStats\(\)/.test(effort)
     && /savedStats\[sid\]/.test(effort) && /saveStats\(\)/.test(effort),
   '内存态随 toggle 清零 ⇒ 「会话切换次数」归零（用户实测）');
+/* R16.7b 行为级（用户实测「重启后仍显示 0 次」的根因变异抓取）：
+ * 真 effort 域写盘 → 新实例（= 重启）→ hudPayload 必须读到恢复值。
+ * hudPayload 若退回 bySid.get（不合并落盘），新实例没有会话槽位 ⇒ 返回 0（该变异曾逃逸）。 */
+{
+  const eMod = await import(pathToFileURL(join(PLUGIN, 'effort.mjs')).href);
+  const mk = (dir) => eMod.createEffort({
+    svc: (k) => (k === 'tools' ? { register: () => {} } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e?.message ?? e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { effortSkips: {}, effortDiag: {}, effortSwitches: 0, effortReasserts: 0, effortHooks: 0, effortToolCalls: 0 } },
+    readCfg: () => ({ enabled: true, effortEnabled: true, effortCooldownMs: 30000 }),
+    getDefineTool: () => (spec) => spec, pluginDir: dir,
+  });
+  const tmpStats = mkdtempSync(join(tmpdir(), 'dcp-stats-'));
+  const inst1 = mk(tmpStats);
+  await inst1.ensure();
+  const sidP = 'persist-sid';
+  /* slot 路径（apply 消费时会走）：登记一次切换并落盘 */
+  const st1 = inst1.diag ? null : null;
+  inst1.setPersistForTest?.(sidP, { from: 'high', to: 'max', at: Date.now() });
+  ok('R16.7b 前置：测试注入口存在（setPersistForTest）',
+    typeof inst1.setPersistForTest === 'function', '缺注入口 ⇒ 无法构造「重启」场景');
+  const inst2 = mk(tmpStats); // 第二个实例 = 模拟重启（fresh bySid，同一 pluginDir）
+  await inst2.ensure();
+  /* read() 需要 requestHeader 提供 provider/model，否则提前 return（统计恢复读不到）。 */
+  const agentP = { session: { id: sidP, requestHeader: () => ({ config: { provider: 'deepseek-account', model: 'deepseek-flash', reasoningEffort: 'high' } }) }, id: sidP };
+  const payload = await inst2.hudPayload(agentP, sidP);
+  ok('R16.7b 行为级：重启后 hudPayload 恢复计数与最近切换（slot 合并落盘）',
+    payload?.switchCount === 1 && payload?.lastSwitch?.to === 'max',
+    `实际 switchCount=${JSON.stringify(payload?.switchCount)} lastSwitch=${JSON.stringify(payload?.lastSwitch)}`);
+  rmSync(tmpStats, { recursive: true, force: true });
+}
 ok('投影 pending 优先显示（已选待生效提前可见）',
   /sel\.pending \|\| sel\.lastUsed/.test(client),
   '未优先取 pending ⇒ 换档后要等下一轮才显示');

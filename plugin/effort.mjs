@@ -572,7 +572,10 @@ export function createEffort(deps) {
     const eff = await read(agent);
     if (!eff?.ok) return eff;
     const sid = sidOf(agent) || String(sidHint ?? '');
-    const s = bySid.get(sid);
+    /* R16.7 修复（用户实测重启后计数归零）：这里**必须走 slot(sid)** 而不是 bySid.get(sid)——
+     * slot 会把落盘的 switchCount/lastSwitch 合并进新建的会话槽位；
+     * 直接 get 在「重启后未切换过」时拿到 undefined ⇒ tooltip 永远显示 0 次。 */
+    const s = slot(sid);
     const cap = cooldownMs();
     const base = s?.switchedAt ?? 0;
     const until = base ? base + cap : 0;
@@ -597,5 +600,14 @@ export function createEffort(deps) {
     return { sids: sids.slice(0, 8), tracked: bySid.size, toolRegistered };
   }
 
-  return { TOOL_NAME, read, ensure, renderBrief, renderSuffix, hudPayload, diag };
+  /** R16.7b：**仅测试用**注入口——向落盘写一条换档记录（构造「重启后恢复」场景，
+   * 而不必真跑一遍 agent/request waterfall）。生产路径不经过这里。 */
+  function setPersistForTest(sid, lastSwitch) {
+    const s = slot(sid);
+    s.lastSwitch = { ...lastSwitch };
+    s.switchCount = (s.switchCount || 0) + 1;
+    saveStats();
+  }
+
+  return { TOOL_NAME, read, ensure, renderBrief, renderSuffix, hudPayload, diag, setPersistForTest };
 }
