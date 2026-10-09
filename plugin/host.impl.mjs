@@ -107,6 +107,9 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
         schedule: (reason, delay) => schedule(reason, delay),
         readCfg: () => ({ enabled: M3.effortEnabled === true, cooldownMs: M3.effortCooldownMs }),
         getDefineTool: () => defineToolFn,
+        /* R16.7：换档统计落盘（plugin/.data/effort-stats.json）——内存态随 toggle/重启清零，
+         * 用户要求「会话切换次数」跨重启累计。pluginDir 由 entry 注入 apply overrides。 */
+        pluginDir,
       });
       return effortApi;
     })

@@ -358,10 +358,13 @@ ok('chip 冷却结束与显色满格同一时刻（cooling=false ⇒ progress=1�
 ok('chip 显色有 CSS transition 补帧（1s tick 仍平滑）',
   /transition: "height 1s linear"/.test(chipBody),
   '缺 transition ⇒ 1s tick 呈跳变而非平滑过渡');
-ok('chip 的档位/冷却/最近切换/次数信息移入 title（未丢失，R16.6 增补）',
-  /当前档位：\$\{effort\}/.test(chipBody) && /换档冷却中：还剩 \$\{coolLeft\}s/.test(chipBody)
-    && /最近切换：/.test(chipBody) && /会话切换次数：/.test(chipBody),
-  '信息被直接删掉而非移入 title ⇒ 用户失去查看途径（R16.6 新增两项）');
+ok('tooltip 不含每秒变化的内容（title 每秒重建 ⇒ 原生弹窗每秒闪，R16.7 实测）',
+  !/还剩 \$\{coolLeft\}s/.test(chipBody) && !/coolLeft > 0\s*\?\s*`换档冷却中：还剩/.test(chipBody),
+  'title 含「还剩 Xs」 ⇒ 1s tick 重建 title attribute ⇒ 悬浮弹窗每秒闪一次');
+ok('R16.7 换档统计持久化：读写 effort-stats.json（toggle/重启后计数不清零）',
+  /effort-stats\.json/.test(effort) && /const savedStats = loadStats\(\)/.test(effort)
+    && /savedStats\[sid\]/.test(effort) && /saveStats\(\)/.test(effort),
+  '内存态随 toggle 清零 ⇒ 「会话切换次数」归零（用户实测）');
 ok('投影 pending 优先显示（已选待生效提前可见）',
   /sel\.pending \|\| sel\.lastUsed/.test(client),
   '未优先取 pending ⇒ 换档后要等下一轮才显示');

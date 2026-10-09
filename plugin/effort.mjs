@@ -48,6 +48,11 @@
 /** 换档工具名（用户 2026-10-08 指定；取代 R1 的文本标记方案）。 */
 export const TOOL_NAME = 'set_reasoning_effort';
 
+/* R16.7：换档统计持久化需要 fs/path。m5.hud.mjs 已有同款先例（hud-acts.json），
+ * static 护栏只查「模块存在」不限制叶子模块的 node 内建 import ⇒ 合法。 */
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+
 /** 默认冷却（毫秒）：防频繁换档反复打断前缀缓存。可被 config 覆盖。 */
 export const DEFAULT_COOLDOWN_MS = 30_000;
 
@@ -68,7 +73,39 @@ const FALLBACK_COOLDOWN_MS = DEFAULT_COOLDOWN_MS;
  * @param {() => any} deps.getDefineTool 取官方 defineTool（异步加载，故用 getter）
  */
 export function createEffort(deps) {
-  const { svc, tryOf, pick, msg, log, schedule, state, readCfg, getDefineTool } = deps;
+  const { svc, tryOf, pick, msg, log, schedule, state, readCfg, getDefineTool, pluginDir } = deps;
+
+  /* ═══════════ R16.7 换档统计持久化（plugin/.data/effort-stats.json） ═══════════
+   * 内存态（bySid）随 toggle/重启清零 ⇒ 「会话切换次数」归零（用户实测 0 次）。
+   * 落盘：每 sid 的 switchCount + lastSwitch（**不含** want/switchedAt 等瞬态——
+   * 那些属于运行期会话语义，重启后本就该重新开始）。
+   * 读写模式照 m5 的 hud-acts.json（readFileSync/writeFileSync + 吞错 + mkdirSync）。 */
+  const statsPath = pluginDir ? join(pluginDir, '.data', 'effort-stats.json') : null;
+  const loadStats = () => {
+    try {
+      if (!statsPath) return {};
+      const raw = readFileSync(statsPath, 'utf8');
+      const j = JSON.parse(raw.replace(/^\uFEFF/, ''));
+      return j && typeof j === 'object' && j.bySid && typeof j.bySid === 'object' ? j.bySid : {};
+    } catch (e) {
+      if (e?.code !== 'ENOENT') log('warn', `effort-stats.json 读取失败（忽略，从 0 计数）：${msg(e)}`);
+      return {};
+    }
+  };
+  const savedStats = loadStats();
+  const saveStats = () => {
+    try {
+      if (!statsPath) return;
+      mkdirSync(dirname(statsPath), { recursive: true });
+      const out = {};
+      for (const [sid, s] of bySid) {
+        if (s.switchCount > 0 || s.lastSwitch) out[sid] = { switchCount: s.switchCount || 0, lastSwitch: s.lastSwitch ?? null };
+      }
+      writeFileSync(statsPath, JSON.stringify({ version: 1, savedAt: new Date().toISOString(), bySid: out }, null, 2));
+    } catch (e) {
+      log('warn', `effort-stats.json 写入失败（吞）：${msg(e)}`);
+    }
+  };
 
   /* ═══════════ 状态：按 sid 单对象（R3-S6：原先三张 Map 各自 delete，漏删即留孤儿） ═══════════
    * 原先拆成 pendingEffortBySid / effortSwitchAtBySid / appliedEffortBySid —— 三者同键同生命周期，
@@ -80,8 +117,13 @@ export function createEffort(deps) {
     let s = bySid.get(sid);
     if (!s) {
       /* R16.6：lastSwitch/switchCount —— chip tooltip 的「最近切换 / 会话切换次数」数据源
-       * （按会话记，全局计数在多会话下没有意义）。只记**真变化**（与 effortSwitches 同判据）。 */
-      s = { want: null, wantAt: 0, switchedAt: 0, applied: undefined, lastSwitch: null, switchCount: 0 };
+       * （按会话记，全局计数在多会话下没有意义）。只记**真变化**（与 effortSwitches 同判据）。
+       * R16.7：创建时**合并落盘的历史**（跨 toggle/重启累计）。 */
+      const saved = savedStats[sid];
+      s = {
+        want: null, wantAt: 0, switchedAt: 0, applied: undefined,
+        lastSwitch: saved?.lastSwitch ?? null, switchCount: saved?.switchCount ?? 0,
+      };
       bySid.set(sid, s);
     }
     return s;
@@ -218,9 +260,11 @@ export function createEffort(deps) {
       if (!s.switchedAt) s.switchedAt = Date.now();
       state.m3.effortSwitches += 1;
       /* R16.6：按会话记「最近切换 / 次数」（chip tooltip 数据源）。
-       * from 取**会话上一档**（config.reasoningEffort 是请求头里的旧值，等价）。 */
+       * from 取**会话上一档**（config.reasoningEffort 是请求头里的旧值，等价）。
+       * R16.7：立即落盘（切换是低频动作，写一次文件无压力）。 */
       s.lastSwitch = { from: config?.reasoningEffort ?? null, to: want, at: Date.now() };
       s.switchCount += 1;
+      saveStats();
       state.m3.lastEffortApply = {
         at: new Date().toISOString(), sessionId: sidKey, want,
         from: config?.reasoningEffort ?? null, applied: true,

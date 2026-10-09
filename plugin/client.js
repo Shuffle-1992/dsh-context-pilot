@@ -758,12 +758,13 @@ window.__ModuleLoader__.load({
 			/* R16.6（用户要求）：tooltip 增补「最近切换 / 会话切换次数」。
 			 * 数据来自 getHud 的 effort 字段（host 从按会话的 lastSwitch/switchCount 组装）。 */
 			const ls = hostInfo && hostInfo.lastSwitch ? hostInfo.lastSwitch : null;
+			/* R16.7 修复「悬浮弹窗 1 秒闪一次」：`title` 里的「还剩 Xs」每秒随 tick 变化 ⇒
+			 * React 更新 title attribute ⇒ 浏览器重置原生 tooltip（用户悬停时弹窗每秒闪）。
+			 * ✔ title 只放**稳定内容**；剩余秒数本就有火花显色动画承担（进度即信息），不再进 title。 */
 			const tip = [
 				`模型：${shown.provider}/${shown.model}`,
 				`当前档位：${effort}${pendingNow ? "（已选，下一步生效）" : ""}`,
-				coolLeft > 0
-					? `换档冷却中：还剩 ${coolLeft}s（冷却 ${Math.round(totalMs / 1000)}s，防频繁换档打断前缀缓存）`
-					: "换档冷却：已就绪",
+				cooling ? "换档冷却中（剩余时间见火花显色，从下往上）" : "换档冷却：已就绪",
 				ls ? `最近切换：${ls.from} → ${ls.to}（${ls.at}）` : "最近切换：本会话还没有",
 				`会话切换次数：${(hostInfo && hostInfo.switchCount) || 0} 次`,
 				"Agent 可调用 set_reasoning_effort 工具自主换档（本次任务内立即生效）",
