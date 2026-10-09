@@ -686,6 +686,11 @@ window.__ModuleLoader__.load({
 								on: env.effortEnabled === true,
 								cooldownUntil: e && typeof e.cooldownUntil === "number" ? e.cooldownUntil : 0,
 								cooldownTotalMs: e && typeof e.cooldownTotalMs === "number" ? e.cooldownTotalMs : 30000,
+								/* R16.6/R16.7：tooltip 的「最近切换 / 会话切换次数」。
+								 * ⚠️ 必须在这里透传——hudPayload 返回了这两个字段，但这里不取
+								 * 就永远到不了 tooltip（用户实测重启后显示 0 次的另一半根因）。 */
+								lastSwitch: e && e.lastSwitch ? e.lastSwitch : null,
+								switchCount: e && Number.isFinite(e.switchCount) ? e.switchCount : 0,
 							}
 							: null);
 					} catch { /* 吞 */ }

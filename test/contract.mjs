@@ -366,6 +366,13 @@ ok('R16.7 换档统计持久化：读写 effort-stats.json（toggle/重启后计
   /effort-stats\.json/.test(effort) && /const savedStats = loadStats\(\)/.test(effort)
     && /savedStats\[sid\]/.test(effort) && /saveStats\(\)/.test(effort),
   '内存态随 toggle 清零 ⇒ 「会话切换次数」归零（用户实测）');
+/* R16.7c（用户实测「重启后仍 0 次」的另一半根因）：host 侧 hudPayload 已返回
+ * lastSwitch/switchCount，但 client 的 setHostInfo 只挑了冷却三字段 ⇒ 字段到不了 tooltip。
+ * 护栏：client 必须透传这两个字段。 */
+ok('client 透传 lastSwitch/switchCount 到 tooltip 数据（R16.7c）',
+  /lastSwitch: e && e\.lastSwitch \? e\.lastSwitch : null/.test(client)
+    && /switchCount: e && Number\.isFinite\(e\.switchCount\) \? e\.switchCount : 0/.test(client),
+  'hudPayload 的字段没进 hostInfo ⇒ tooltip 永远显示 0 次（宿主白算）');
 /* R16.8（用户提出的时机逻辑）三源对账断言放在 ct 声明之后（文件下方）——
  * 此处只保留 m2 侧（m2src 在此已可用）。 */
 ok('R16.8 时机教学（回执侧）：压缩自检回执含「压缩后换档只付一次缓存重建」',
