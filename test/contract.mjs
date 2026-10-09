@@ -457,6 +457,67 @@ ok('R16.10 静态：传了 sid 时不得回退到 agents[0]（跨会话串数据
     `实际 switchCount=${JSON.stringify(hudX?.effort?.switchCount)} lastSwitch=${JSON.stringify(hudX?.effort?.lastSwitch)}（应为 0 / null）`);
   rmSync(tmpDir, { recursive: true, force: true });
 }
+/* R16.12（用户反馈「Agent 换档意愿不高」）：教学改**可判定的触发表** + 每轮**有信号才提醒**。
+ * 归因证据：报告里部署以来 effortToolCalls/switches 长期为 0（峰值 4/4 全是开发期自测）。 */
+{
+  const eMod12 = await import(pathToFileURL(join(PLUGIN, 'effort.mjs')).href);
+  const effNow = { ok: true, current: 'high', efforts: ['off', 'low', 'high', 'max'] };
+  const brief12 = eMod12.createEffort({
+    svc: () => null, tryOf: (f) => ({ value: f(), error: null }), pick: (...a) => a.find((x) => x != null),
+    msg: (e) => String(e), log: () => {}, schedule: () => {}, state: { m3: {} },
+    readCfg: () => ({ enabled: true, effortEnabled: true, effortCooldownMs: 30000 }),
+    getDefineTool: () => (sp) => sp,
+  }).renderBrief(effNow) ?? '';
+  ok('R16.12 教学含**可判定的触发表**（升/降/不变三类 + 显式允许不变）',
+    /跨文件因果排查/.test(brief12) && /机械改动/.test(brief12) && /「不变」也是合法结论/.test(brief12),
+    '仍是自指式判据（「需要更深推理时」）⇒ 等于没有触发条件（实测换档数为 0）');
+  ok('R16.12 教学含**成本澄清**（只打断一次缓存 / 冷却拒绝不影响任务）',
+    /只打断一次前缀缓存/.test(brief12) && /冷却拒绝\*\*不影响任务/.test(brief12),
+    '只讲冷却与「唯一硬约束」读起来像劝退 ⇒ 模型倾向不动');
+
+  const tmp12 = mkdtempSync(join(tmpdir(), 'dcp-nudge-'));
+  const eApi12 = eMod12.createEffort({
+    svc: (k) => (k === 'tools' ? { register: () => {} } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e?.message ?? e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { effortSkips: {}, effortDiag: {}, effortSwitches: 0, effortReasserts: 0, effortHooks: 0, effortToolCalls: 0 } },
+    readCfg: () => ({ enabled: true, effortEnabled: true, effortCooldownMs: 30000 }),
+    getDefineTool: (sp) => sp, pluginDir: tmp12,
+  });
+  await eApi12.ensure();
+  const agN = { id: 'nudge-sid', session: { id: 'nudge-sid' } };
+  const n1 = eApi12.renderNudge(effNow, { agent: agN, turn: 3, userText: '帮我排查这个 bug 的根因' });
+  ok('R16.12 行为级：用户要求深入 ⇒ 提示可升档',
+    typeof n1 === 'string' && /升档/.test(n1), `实际：${JSON.stringify(n1)}`);
+  const n2 = eApi12.renderNudge(effNow, { agent: agN, turn: 4, userText: '快点，只要改个名' });
+  ok('R16.12 行为级：提醒**限量**（两次间隔 < 4 轮不再提示）', n2 === null, `实际：${JSON.stringify(n2)}`);
+  const n3 = eApi12.renderNudge(effNow, { agent: agN, turn: 8, userText: '快点，只要改个名' });
+  ok('R16.12 行为级：用户要求快速 ⇒ 提示可降档',
+    typeof n3 === 'string' && /降档/.test(n3), `实际：${JSON.stringify(n3)}`);
+  const n4 = eApi12.renderNudge(effNow, { agent: agN, turn: 20, userText: '继续' });
+  ok('R16.12 行为级：本会话从未换档（≥8 轮）⇒ 提醒评估一次',
+    typeof n4 === 'string' && /尚未换过档/.test(n4), `实际：${JSON.stringify(n4)}`);
+  const n5 = eApi12.renderNudge(effNow, { agent: agN, turn: 21, userText: '继续' });
+  ok('R16.12 行为级：无信号时**零注入**（返回 null）',
+    n5 === null, `实际：${JSON.stringify(n5)}`);
+  eApi12.setPersistForTest('nudge-sid', { from: 'high', to: 'max', at: Date.now() });
+  const n6 = eApi12.renderNudge(effNow, { agent: agN, turn: 40, userText: '继续' });
+  ok('R16.12 行为级：换过档之后不再提「尚未换过档」', n6 === null, `实际：${JSON.stringify(n6)}`);
+  rmSync(tmp12, { recursive: true, force: true });
+}
+ok('R16.12 接线：nudge 判定在 effort 域、取用户文本在 core、注入在 m2（三端齐全）',
+  /function renderNudge\(eff, ctx\)/.test(effort)
+    && /renderNudge, hudPayload/.test(effort)
+    && /const lastUserText = \(session/.test(coreSrc)
+    && /kind !== 'user'/.test(coreSrc)
+    && /getLastUserText: \(agent\) => lastUserText\(agent\?\.session\)/.test(host)
+    && /effortApi\.renderNudge\(eff, \{ agent, turn, userText: getLastUserText\?\.\(agent\) \?\? '' \}\)/.test(m2src)
+    && /\[baseText, effNudge, card, brief, effBrief/.test(m2src),
+  '任一环缺位 ⇒ 提醒要么不触发、要么永远不出现（接线不可达 = R11 那类静默失效）');
+ok('R16.12 冷却期间不提示（避免「让你切但工具必然拒绝」的无效往返）',
+  /if \(s\.switchedAt && Date\.now\(\) - s\.switchedAt < cap\) return null;/.test(effort),
+  '冷却中仍提示 ⇒ 工具必被拒绝，制造挫折与噪声');
+
 ok('投影 pending 优先显示（已选待生效提前可见）',
   /sel\.pending \|\| sel\.lastUsed/.test(client),
   '未优先取 pending ⇒ 换档后要等下一轮才显示');
@@ -1171,10 +1232,11 @@ ok('解析出 renderBrief（教学文本函数）', effBrief.length > 0, '未找
 for (const [name, re] of [
   ['① 当前值', /当前思考强度档位：' \+ eff\.current/],
   ['② 可选档', /本模型可选 ' \+ opts/],
-  ['③ 工具名+调用方式', /TOOL_NAME \+ '（参数 effort=<档位>）切换：'/],
-  ['④ 何时该用', /更深推理|更快响应/],
+  ['③ 工具名+调用方式', /TOOL_NAME \+ '（参数 effort=<档位>）/],
+  /* R16.12：判据从自指式（「需要更深推理时」）改为**可核对的触发表**。 */
+  ['④ 何时该用（触发表）', /什么时候该切/],
   ['⑤ 生效时机+不中断', /本次任务内立即生效|任务与上下文不中断/],
-  ['⑥ 代价提醒', /缓存失效|1-2 次/],
+  ['⑥ 代价提醒', /只打断一次前缀缓存|冷却拒绝\*\*不影响任务/],
 ]) {
   ok(`教学覆盖 ${name}`, re.test(effBrief), `教学文本缺 ${name} ⇒ 模型无法自主调用`);
 }

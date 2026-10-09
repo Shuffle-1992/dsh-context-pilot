@@ -295,6 +295,9 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
         getRangeApi: () => rangeApi,
         getCompactToolApi: () => compactToolApi,
         getEffortApi: () => effortApi,
+        /* R16.12：换档提醒的**外部触发**输入——最近一条真人用户消息文本
+         * （实现在 core.lastUserText：只读 surface 尾部并跳过插件自己的注入行）。 */
+        getLastUserText: (agent) => lastUserText(agent?.session),
         getCreateUserMessage,
         SOURCE_KIND,
       });

@@ -519,22 +519,29 @@ export function createEffort(deps) {
     try {
       if (!eff?.ok || !eff.current) return null;
       const opts = Array.isArray(eff.efforts) && eff.efforts.length ? eff.efforts.join('/') : null;
+      /* R16.12（用户反馈「Agent 切换档位的意愿不高」）：原教学只有**自指式**判据
+       * （「需要更深推理时升档」）——「需不需要」交给模型自己判 ⇒ 等于没有触发条件；
+       * 而压缩那条教学有**外部可观测**触发（占用 % + 强制线），所以它被调用得多。
+       * 现补三件东西，逐条对治实测到的低意愿成因：
+       *   ① **可判定的触发表**（升/降/不变各自给可核对的场景），并**显式允许「不变」**——
+       *      不写这句时，「没切」会被当成失职，模型索性不提；
+       *   ② **成本澄清**：只打断一次前缀缓存（与压缩同轮更省）、冷却拒绝不影响任务 ——
+       *      旧文本只强调「唯一硬约束是冷却」，读起来像劝退；
+       *   ③ 保留用户要求的「先说再调用」与自检回执两条。 */
       return [
         '【智能思考（本会话仅此一次）】当前思考强度档位：' + eff.current + (opts ? '（本模型可选 ' + opts + '）' : '（可选档位未取到）') + '。',
-        '需要更深推理（复杂设计、疑难排查、长链规划）或更快响应（简单查询、机械修改）时，调用工具 '
-          + TOOL_NAME + '（参数 effort=<档位>）切换：',
-        '**先说，再调用**：工具调用对用户是**静默的**——用户在对话里只看到「调用了某个工具」，看不到你的理由。'
-          + '所以请**先在回复正文里用一句话说明**（例：「这个排查需要更深推理，我升到 max」），**然后**再调用 ' + TOOL_NAME + '。',
-        '它会在**本次任务内立即生效**（下一步请求即用新档位），任务与上下文不中断，用户无需操作。',
-        /* R15（用户要求 2026-10-08）：「时刻可以进行思考强度切换…如果是长任务，有必要可以增加次数，以实际需求为准」。
-         * ⇒ 删掉原先的「一次任务 1-2 次为宜」——那句话把档位切换说成了需要克制的稀有动作，
-         *   而用户要的是**每个阶段都重新判断一次**。唯一硬约束是冷却（可用性），不是次数。 */
-        '**什么时候该重新判断**：任务开始时、以及任务**阶段变化**时（例如「读代码查因」→「动手改多文件」→「写文档」）'
-          + '各判断一次；遇到需要更深推理的疑难排查就升档，进入机械改动就降档。'
-          + '**长任务按实际需求可以切多次**，唯一硬约束是换档冷却（默认 30 秒，工具会在冷却中直接返回剩余秒数）。',
+        '**先说，再调用**：切换前先在回复正文里用一句话说明理由'
+          + '（用户看不到工具调用的理由），然后调 ' + TOOL_NAME + '（参数 effort=<档位>）——本次任务内立即生效，任务与上下文不中断。',
+        '**什么时候该切（命中任一条就当场评估一次，别默认不动）**：',
+        '· **升档**：跨文件因果排查 / 需要反复试错才能定位 / 要做设计取舍或方案对比 / 用户明确要求「彻底、根因、严谨、评估、全面」；',
+        '· **降档**：连续机械改动（改名、格式化、加断言、照抄改动、只跑命令看结果）/ 简单查询 / 用户明确要求「快点、只要、简单、省点」；',
+        '· **不变**：正常编码推进（当前档位通常够用）——**不确定就不切，「不变」也是合法结论**。',
+        '**任务阶段变化时重新评估一次**（读代码查因 → 动手改多文件 → 写文档…）；**长任务按实际需求可以切多次**'
+          + '（次数没有限制，唯一硬约束是换档冷却：默认 30 秒，冷却中调用会返回剩余秒数）。',
+        '**成本很低，别怕动它**：换档只打断一次前缀缓存（若刚压缩过上下文，缓存已重置 ⇒ 与压缩同轮切只付一次）；'
+          + '被冷却拒绝**不影响任务**，按返回的剩余秒数稍后重试即可。',
         '每次切换后**下一步的用量行后缀**会显示当前实际档位（例：`思考强度 max`）——那就是你的自检回执；'
-          + '若下次请求后仍显示旧档位，说明未生效，请在正文里说明并告知用户。'
-          + '档位非法或处于冷却时工具会返回原因，按提示处理即可。',
+          + '若下次请求后仍显示旧档位，说明未生效，请在正文里说明并告知用户。',
       ].join('');
     } catch {
       return null;
@@ -557,6 +564,74 @@ export function createEffort(deps) {
       const opts = Array.isArray(eff.efforts) && eff.efforts.length ? eff.efforts.join('/') : null;
       return '思考强度 ' + eff.current + (eff.adapterDefault ? '(默认)' : '')
         + (opts ? '（可选 ' + opts + '，需要时先说再调用 ' + TOOL_NAME + '）' : '');
+    } catch {
+      return null;
+    }
+  }
+
+  /* ═══════════ R16.12 换档提醒（renderNudge） ═══════════
+   * 为什么需要（实测证据）：报告里部署以来的 `effortToolCalls/switches` 长期为 0
+   * （历史峰值 4/4，全是开发期自测切出来的）。归因**不是**「模型觉得不需要」，而是
+   * **决策时刻没有任何信号**：
+   *   · 一次性教学出现在会话开头（那时还不知道要做什么），压缩后虽会重讲但不挑时机；
+   *   · 每轮后缀只有「需要时先说再调用」——「需要」是自指判据，且每轮同文（习惯化）；
+   *   · 不切档**没有任何可见代价**（压缩有 75% 硬线）⇒ 两种动作的激励完全不对称。
+   * 因此给三类**可观测**触发，并严格限量（只在真有信号时出现，避免噪声与习惯化）：
+   *   ① 用户本轮明确要求深入 → 提示可升档；
+   *   ② 用户本轮明确要求快速 / 只需机械改动 → 提示可降档；
+   *   ③ 本会话已跑 ≥8 轮且**从未换过档** → 提醒评估一次（间隔 ≥10 轮）。
+   * 冷却中一律不提示（避免「让你切、但工具必然拒绝」的无效往返）。 */
+
+  /** 用户意图关键词（保守：宁可漏报，不可误报成噪声）。 */
+  const WANT_DEEP_RE = /(排查|根因|为什么|彻底|仔细|严谨|评估|权衡|架构|设计|深入|全面|复杂|难点)/;
+  const WANT_FAST_RE = /(快点|快些|尽快|简单|只要|仅需|直接改|格式化|改名|重命名|机械|省点|别啰嗦|别废话)/;
+  const NUDGE_MIN_GAP = 4;    // 任意两次提醒的最小间隔（轮）
+  const NUDGE_IDLE_TURNS = 8; // 「从未换档」提醒的起始轮次
+  const NUDGE_IDLE_GAP = 10;  // 「从未换档」提醒的最小间隔（轮）
+
+  /**
+   * 生成一条换档提醒；无信号返回 null（不注入、不占 token）。
+   * @param {object} eff `read(agent)` 的结果（含 current/efforts）
+   * @param {{agent?: object, turn?: number, userText?: string}} ctx 注入上下文
+   */
+  function renderNudge(eff, ctx) {
+    try {
+      if (!eff?.ok || !eff.current) return null;
+      const sid = sidOf(ctx?.agent) || '';
+      if (!sid) return null;
+      const s = slot(sid);
+      /* 冷却中不提示：此时工具必然拒绝，提示只会制造无效往返。 */
+      const cap = cooldownMs();
+      if (s.switchedAt && Date.now() - s.switchedAt < cap) return null;
+      const turn = Number(ctx?.turn) || 0;
+      /* ⚠️「从未提醒过」必须与「上次提醒在第 0 轮」区分开：用 null 兜底，
+       * 否则会话前几轮会被最小间隔规则误挡（用户第 3 轮就说「排查根因」也不提示）。 */
+      const last = s.nudgeAtTurn ?? null;
+      const gap = last === null ? Infinity : turn - last;
+      const opts = Array.isArray(eff.efforts) && eff.efforts.length ? eff.efforts.join('/') : '';
+      const tail = '（当前 ' + eff.current + (opts ? '，可选 ' + opts : '')
+        + '；先说一句理由再调 ' + TOOL_NAME + '，不需要则忽略）';
+      const text = String(ctx?.userText ?? '');
+      /* ①② 用户意图（间隔 NUDGE_MIN_GAP 轮，防每轮重复）。 */
+      if (gap >= NUDGE_MIN_GAP && text) {
+        const up = WANT_DEEP_RE.exec(text);
+        if (up) {
+          s.nudgeAtTurn = turn;
+          return '【换档提示】用户本轮要求深入（命中「' + up[1] + '」）——可考虑**升档**' + tail;
+        }
+        const down = WANT_FAST_RE.exec(text);
+        if (down) {
+          s.nudgeAtTurn = turn;
+          return '【换档提示】用户本轮要求快速／只需机械改动（命中「' + down[1] + '」）——可考虑**降档**省额度' + tail;
+        }
+      }
+      /* ③ 会话内从未换档：把「没切过」这件事直接摆到眼前（对治「意愿不高」）。 */
+      if (turn >= NUDGE_IDLE_TURNS && (s.switchCount ?? 0) === 0 && gap >= NUDGE_IDLE_GAP) {
+        s.nudgeAtTurn = turn;
+        return '【换档提示】本会话已 ' + turn + ' 轮、**尚未换过档**——近端若是机械编辑可降档、任务变难可升档；'
+          + '一句话理由即可' + tail;
+      }
+      return null;
     } catch {
       return null;
     }
@@ -617,5 +692,5 @@ export function createEffort(deps) {
     saveStats();
   }
 
-  return { TOOL_NAME, read, ensure, renderBrief, renderSuffix, hudPayload, diag, setPersistForTest };
+  return { TOOL_NAME, read, ensure, renderBrief, renderSuffix, renderNudge, hudPayload, diag, setPersistForTest };
 }

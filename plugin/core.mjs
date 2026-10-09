@@ -514,6 +514,26 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
     return messageText(m);
   };
 
+  /** R16.12：最近一条**真人用户**消息的文本（换档提醒的外部触发输入）。
+   * 只读 surface 尾部若干节点；跳过插件自己注入的 user/message（kind=context-pilot）
+   * 与 UI 产生的 model-selection，否则会读到自己的用量行。
+   * 读不到就返回空串 —— 调用方据此不提示，绝不影响注入主流程。 */
+  const lastUserText = (session, maxNodes = 8, maxLen = 400) => {
+    try {
+      const nodes = session?.surface;
+      if (!Array.isArray(nodes) || typeof session?.eventAt !== 'function') return '';
+      for (let i = nodes.length - 1, k = 0; i >= 0 && k < maxNodes; i -= 1, k += 1) {
+        const ev = session.eventAt(nodes[i]);
+        if (!ev || ev.type !== 'user/message') continue;
+        const kind = ev.data?.source?.kind;
+        if (kind !== undefined && kind !== null && kind !== 'user') continue;
+        const t = extractEventText(ev);
+        if (t) return String(t).slice(0, maxLen);
+      }
+    } catch { /* 吞：读不到即不提示 */ }
+    return '';
+  };
+
   /* R7：`decideCompaction` 已删除。
    * 它原本服务三个调用点（inbox 审计 / idle 兜底 / pre-step），但审计监听器与决策主体都已退役，
    * 只剩下 idleSweep 读它的 `ok`/`ratio`——其余产物（`compact`/`reason`/`used`/`window`）全部无消费者，
@@ -702,7 +722,7 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
     state, log, msg, svc, tryOf, pick, kfmt, nfmt, errCodeOf, remember, SET_CAP,
     M3, mergeConfig, effEnabled, schedule, addListener, SOURCE_KIND, TAG,
     COMPACT_TIMEOUT_MS, HISTORY_CAP, HEARTBEAT_MS, SESSION_CAP,
-    compactMeasure, summarizeBreakdown, messageText, messageTextLength, extractEventText,
+    compactMeasure, summarizeBreakdown, messageText, messageTextLength, extractEventText, lastUserText,
     loadCreateUserMessage, loadDefineTool, getCreateUserMessage: () => createUserMessage,
     attachSnapshot, loadReportBase, refresh, writeReport,
   };

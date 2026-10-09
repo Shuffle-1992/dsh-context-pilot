@@ -38,6 +38,7 @@ export function createM2Injection(deps) {
     state, log, msg, pick, schedule, svc, tryOf, nfmt, summarizeBreakdown, remember,
     M3, effEnabled, criticalCapOf, measureRatio,
     getRangeApi, getCompactToolApi, getEffortApi, getCreateUserMessage, SOURCE_KIND, takeCompactVerify,
+    getLastUserText,
   } = deps;
 
   /* ═══════════ 一次性说明的「已讲」标记（R1：压缩后必须重讲） ═══════════
@@ -266,6 +267,15 @@ export function createM2Injection(deps) {
       const effSuffix = effortApi?.renderSuffix(eff) ?? null;
       const baseText = effSuffix ? `${r.text} ｜ ${effSuffix}` : r.text;
       if (effSuffix) state.m2.effortSuffixes = (state.m2.effortSuffixes ?? 0) + 1;
+      /* R16.12：换档提醒——**只在真有信号时出现**（用户意图关键词 / 本会话从未换档），
+       * 由 effort 域判定与限量（冷却中不提示、两次间隔 ≥4 轮）。无信号 ⇒ null ⇒ 零 token。 */
+      let effNudge = null;
+      try {
+        effNudge = eff && effortApi?.renderNudge
+          ? (effortApi.renderNudge(eff, { agent, turn, userText: getLastUserText?.(agent) ?? '' }) ?? null)
+          : null;
+      } catch { /* 提醒失败绝不影响注入 */ }
+      if (effNudge) state.m2.effortNudges = (state.m2.effortNudges ?? 0) + 1;
       const brief = briefedBySid.has(sid) ? null : renderBrief(effCrit, r.window); // M2.5+A3：现拼活值（含生效强制线 + 保留范围）
       /* 思考强度教学与「插件说明」同一时机（会话首次）——合并进同一条消息，
        * 不额外增加消息结构开销（role 框架/JSON 包装各一次）。 */
@@ -278,7 +288,7 @@ export function createM2Injection(deps) {
         remember(briefedBySid, sid); // C 类审查：有界化（原先无上限）
         state.m2.briefings = (state.m2.briefings ?? 0) + 1;
       }
-      const fullText = [baseText, card, brief, effBrief, renderCompactReceipt(takeCompactReceipt(sidEarly))].filter(Boolean).join('\n\n');
+      const fullText = [baseText, effNudge, card, brief, effBrief, renderCompactReceipt(takeCompactReceipt(sidEarly))].filter(Boolean).join('\n\n');
       const message = createUserMessage({
         content: [{ type: 'text', text: fullText }],
         source: { kind: SOURCE_KIND, form: 'snapshot', sections: [{ name: SOURCE_KIND, text: fullText }] },
@@ -287,7 +297,7 @@ export function createM2Injection(deps) {
       if (card) state.m3.policyCards += 1;
       state.m2.lastText = fullText;
       state.m2.lastAt = new Date().toISOString();
-      log('info', `M2 注入 turn=${turn} step=${step}${card ? ' ＋政策卡' : ''}：${r.text}`);
+      log('info', `M2 注入 turn=${turn} step=${step}${card ? ' ＋政策卡' : ''}${effNudge ? ' ＋换档提示' : ''}：${r.text}`);
       schedule('m2-inject', 500);
       return { message, text: fullText, card: !!card };
     } catch (e) {
