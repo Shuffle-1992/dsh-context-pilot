@@ -120,7 +120,10 @@ const getHudBody = (() => {
   const m = /const buildHudResponse = async \(sid\) => \{/.exec(m5);
   if (!m) return '';
   const s = m.index;
-  const e = m5.indexOf('state.m5.hudPollReq', s);
+  /* ⚠️ 结束标记必须是**赋值语句** `state.m5.hudPollReq = {`，不能只用字段名——
+   * 函数体内外的注释/说明里也会出现字段名（R16.10：注释里引用了它，
+   * 导致切片在注释处提前截断 ⇒ targetAgent/criticalCap 断言全部误报失败）。 */
+  const e = m5.indexOf('state.m5.hudPollReq = {', s);
   return e > s ? m5.slice(s, e) : m5.slice(s, s + 4000);
 })();
 ok('解析出 onGetHud 函数体（m5.hud.mjs buildHudResponse）', getHudBody.length > 0, '未找到 onGetHud');

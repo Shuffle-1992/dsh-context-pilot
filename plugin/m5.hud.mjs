@@ -139,8 +139,17 @@ export function createM5Hud(deps) {
      * 弹窗恒「本会话暂无压缩记录」。此前追的会话 id/血统链理论都在修一条走不到的路径。 */
     const agents = svc('agents')?.list?.() ?? [];
     const sess = svc('sessions')?.list?.() ?? [];
-    /* R1：思考强度的目标 Agent（有 sid 用该会话，否则首个）+ 开关活读（关闭则不返回，UI 不显示） */
-    const targetAgent = (sid && agents.find((x) => String(pick(x?.session?.id, x?.sessionId, x?.id)) === sid)) || agents[0] || null;
+    /* R16.10（用户实测「最近切换/会话切换次数跨会话显示一样」）：
+     * ⚠️ 原来 sid 传了但**匹配不到 agent 时回退 agents[0]**——agents[0] 是「第一个会话」，
+     * 于是每个会话的 chip 都显示同一个会话的换档统计（跨会话串数据）。真机取证见
+     * `state.m5.hudPollReq`：sid=session-70a55b1a… 时 matched=0，却拿到了 agents[0] 的统计。
+     * 压缩记录没这问题，因为它直接 `list.filter(a => a.sid === sid)`（不经 agent 查表）。
+     * 修：**只认请求的 sid**——匹配不到就给 null（宁缺勿错）；sid 为空（全局查询）也不回退首个
+     * agent（那会让「sid 还没解析出来」的刷新帧闪出别的会话的统计）。统计本身走
+     * hudPayload(agent, sid) 的 **sid 主键**，与 agent 查找解耦 ⇒ 没有 agent 也答得对。 */
+    const targetAgent = sid
+      ? (agents.find((x) => String(pick(x?.session?.id, x?.sessionId, x?.id)) === sid) ?? null)
+      : null;
     const effOn = (() => { try { mergeConfig(); return M3.effortEnabled === true; } catch { return false; } })();
     /* 占用读数：让弹窗能显示「距智能压缩线还差多少」（client 侧可选消费，缺省不影响）。
      * 取目标会话的实时 measure —— sid 传了就测该会话，否则测最热的那个。 */

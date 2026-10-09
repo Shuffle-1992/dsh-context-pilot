@@ -410,6 +410,53 @@ ok('R16.8 时机教学（回执侧）：压缩自检回执含「压缩后换档�
     `实际 switchCount=${JSON.stringify(payload?.switchCount)} lastSwitch=${JSON.stringify(payload?.lastSwitch)}`);
   rmSync(tmpStats, { recursive: true, force: true });
 }
+ok('R16.10 静态：传了 sid 时不得回退到 agents[0]（跨会话串数据的根源）',
+  !/\|\|\s*agents\[0\]\s*\|\|\s*null;\s*$/.test(m5src) || /agents\.find\(\(x\) => String\(pick\(x\?\.session\?\.id, x\?\.sessionId, x\?\.id\)\) === sid\) \?\? null\)/.test(m5src),
+  'm5 仍 `sid && find(...) || agents[0]` ⇒ sid 匹配不到就借别的会话的 agent（tooltip 跨会话同值）');
+/* R16.10 行为级（用户实测「最近切换/会话切换次数跨会话显示一样」）：
+ * 真 m5 + 真 effort 域，两个 agent（A 在前、B 在后），问 B 的 hud ⇒
+ * 统计必须是 B 的；问一个匹配不到 agent 的会话 ⇒ 也得是它自己的（不能借 A 的）。
+ * 该 bug 的成因是 m5 回退 agents[0] + hudPayload 以 agent 的 sid 优先。 */
+{
+  const [m5Mod, eMod2] = await Promise.all([
+    import(pathToFileURL(join(PLUGIN, 'm5.hud.mjs')).href),
+    import(pathToFileURL(join(PLUGIN, 'effort.mjs')).href),
+  ]);
+  const tmpDir = mkdtempSync(join(tmpdir(), 'dcp-hud-'));
+  const effApi10 = eMod2.createEffort({
+    svc: (k) => (k === 'tools' ? { register: () => {} } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e?.message ?? e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { effortSkips: {}, effortDiag: {}, effortSwitches: 0, effortReasserts: 0, effortHooks: 0, effortToolCalls: 0 } },
+    readCfg: () => ({ enabled: true, effortEnabled: true, effortCooldownMs: 30000 }),
+    getDefineTool: () => (spec) => spec, pluginDir: tmpDir,
+  });
+  await effApi10.ensure();
+  const now = Date.now();
+  effApi10.setPersistForTest('sess-A', { from: 'low', to: 'high', at: now - 60000 });  // A: 1 次
+  effApi10.setPersistForTest('sess-B', { from: 'high', to: 'max', at: now });           // B: 1 次
+  effApi10.setPersistForTest('sess-B', { from: 'max', to: 'low', at: now });            // B: 共 2 次
+  const mkAgent = (id) => ({ id, session: { id, requestHeader: () => ({ config: { provider: 'deepseek-account', model: 'deepseek-flash', reasoningEffort: 'high' } }) } });
+  const m5Api10 = m5Mod.createM5Hud({
+    state: { m5: { hud: {}, acts: [] }, m3: {} }, log: () => {}, msg: (e) => String(e), schedule: () => {}, pluginDir: tmpDir,
+    svc: (k) => (k === 'agents' ? { list: () => [mkAgent('sess-A'), mkAgent('sess-B')] } : k === 'sessions' ? { list: () => [] } : null),
+    pick: (...a) => a.find((x) => x != null), measureRatio: () => ({ ok: false }), criticalCapOf: () => 0.8,
+    mergeConfig: () => {}, M3: { effortEnabled: true, criticalRatio: 0.75 }, getEffortApi: () => effApi10, getReportBase: () => null,
+  });
+  const hudB = await m5Api10.buildHudResponse('sess-B');
+  ok('R16.10 行为级：问 B 会话说必须回 B 的统计（不借第一个 agent）',
+    hudB?.effort?.switchCount === 2 && hudB?.effort?.lastSwitch?.to === 'low',
+    `实际 switchCount=${JSON.stringify(hudB?.effort?.switchCount)} lastSwitch=${JSON.stringify(hudB?.effort?.lastSwitch)}（应为 2 / to=low）`);
+  const hudA = await m5Api10.buildHudResponse('sess-A');
+  ok('R16.10 行为级：问 A 会话说回 A 的统计（两会话互不串）',
+    hudA?.effort?.switchCount === 1 && hudA?.effort?.lastSwitch?.to === 'high',
+    `实际 switchCount=${JSON.stringify(hudA?.effort?.switchCount)} lastSwitch=${JSON.stringify(hudA?.effort?.lastSwitch)}（应为 1 / to=high）`);
+  const hudX = await m5Api10.buildHudResponse('sess-不存在的会话');
+  ok('R16.10 行为级：匹配不到 agent 的会话不得借第一个 agent 的统计',
+    hudX?.effort?.switchCount === 0 && hudX?.effort?.lastSwitch === null,
+    `实际 switchCount=${JSON.stringify(hudX?.effort?.switchCount)} lastSwitch=${JSON.stringify(hudX?.effort?.lastSwitch)}（应为 0 / null）`);
+  rmSync(tmpDir, { recursive: true, force: true });
+}
 ok('投影 pending 优先显示（已选待生效提前可见）',
   /sel\.pending \|\| sel\.lastUsed/.test(client),
   '未优先取 pending ⇒ 换档后要等下一轮才显示');

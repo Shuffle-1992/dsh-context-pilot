@@ -572,26 +572,32 @@ export function createEffort(deps) {
    */
   async function hudPayload(agent, sidHint) {
     const eff = await read(agent);
-    if (!eff?.ok) return eff;
-    const sid = sidOf(agent) || String(sidHint ?? '');
-    /* R16.7 修复（用户实测重启后计数归零）：这里**必须走 slot(sid)** 而不是 bySid.get(sid)——
-     * slot 会把落盘的 switchCount/lastSwitch 合并进新建的会话槽位；
-     * 直接 get 在「重启后未切换过」时拿到 undefined ⇒ tooltip 永远显示 0 次。 */
-    const s = slot(sid);
+    /* R16.10（用户实测「最近切换/会话切换次数跨会话显示一样」）：统计必须**严格按请求的 sid**。
+     * 原实现 `sidOf(agent) || sidHint` —— agent 优先 ⇒ 一旦宿主回退到「第一个 agent」
+     * （m5 此前在 sid 匹配不到时会 `agents[0]`），就取到**另一个会话**的统计（跨会话串数据）。
+     * 现改为 **sidHint 优先**（调用方明确问哪个会话就答哪个），agent 再作为兜底。
+     * ⚠️ 无 agent / 读档失败时**仍返回该会话的统计**（只查内存+落盘，不需要 agent）——
+     * 否则匹配不到 agent 的会话会连统计一起消失（宁缺勿错的另一半：有 sid 就该有统计）。 */
+    const requested = String(sidHint ?? '').trim();
+    const sid = requested || sidOf(agent) || '';
+    const s = sid ? slot(sid) : null;
     const cap = cooldownMs();
     const base = s?.switchedAt ?? 0;
     const until = base ? base + cap : 0;
     /* R16.6：chip tooltip 的「最近切换 / 会话切换次数」。
      * 时间用 toLocaleTimeString（本地短时），与用户在 DSH 界面看到的时间口径一致。 */
     const ls = s?.lastSwitch ?? null;
-    return {
-      ...eff, cooldownUntil: until > Date.now() ? until : 0, cooldownTotalMs: cap,
+    const stats = {
+      cooldownUntil: until > Date.now() ? until : 0,
+      cooldownTotalMs: cap,
       lastSwitch: ls ? {
         from: ls.from ?? '(默认)', to: ls.to,
         at: new Date(ls.at).toLocaleTimeString('zh-CN', { hour12: false }),
       } : null,
       switchCount: s?.switchCount ?? 0,
     };
+    if (!eff?.ok) return { ...(eff ?? {}), ...stats };
+    return { ...eff, ...stats };
   }
 
   /** 取证快照（宿主报告用；只读，不暴露内部 Map）。 */

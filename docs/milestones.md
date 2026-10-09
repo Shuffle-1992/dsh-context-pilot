@@ -1761,3 +1761,40 @@ DSH 引擎在该压缩失败路径的 turn 收尾处抛出 `sid` ReferenceError�
 
 **绕行**：该会话切到 `workbuddy/glm-5.3-flash` 等支持该思考强度的组合即可正常。
 引擎侧的 sid 收尾错误建议向 DSH 反馈。
+
+### R16.10 chip 统计「按会话过滤」修复 —— ✅ 已修（2026-10-10）
+
+**用户报告**：「最近切换 / 会话切换次数」跨会话显示一样的值，没有按会话过滤；
+参考智能压缩信息的按会话过滤显示（「可能是一样的问题」——**判断正确**）。
+
+**真机取证**（报告里的 `hudPollReq`，60 条轮询记录）：
+```
+36×  sid=session-16616c07…  matched=9   ← client 传的 sid 一直是对的
+ 3×  sid=session-70a55b1a…  matched=0
+ 2×  sid=null               matched=14
+```
+⇒ **client 侧无问题、压缩记录过滤也正常**（`list.filter(a => a.sid === sid)`）；泄漏全在宿主侧两处：
+
+1. `m5.hud.mjs`：`sid && agents.find(...) || agents[0]` —— **sid 匹配不到 agent 时回退「第一个会话」**，
+   于是那个会话的 chip 借用了另一个会话的 agent；
+2. `effort.mjs` 的 `hudPayload`：`sidOf(agent) || sidHint` —— **agent 优先**，配合上面那条
+   就取到了「另一个会话」的 `lastSwitch/switchCount`（跨会话串数据）。
+
+**修**：
+- m5：只认请求的 sid（匹配不到给 `null`，不再回退 `agents[0]`；sid 为空也不回退）；
+- effort：`sidHint` **优先**（调用方问哪个会话就答哪个），agent 兜底；且**无 agent / 读档失败时
+  仍返回该会话的统计**（键在 sid 上，与 agent 查找解耦 ⇒ 没有 agent 也答得对）。
+
+**护栏**（1 静态 + 3 行为级 + 变异验证）：
+- 静态：m5 不得出现 `|| agents[0]` 回退；
+- 行为级：真 m5 + 真 effort 域，两个 agent（A 在前 B 在后）⇒ 问 B 得 B 的数（2 次/to=low）、
+  问 A 得 A 的数（1 次/to=high）、**问不存在的会话得 0/null（不得借 A 的）**；
+- 变异：单点变异**逃逸**（两处修复互为冗余 ⇒ 单独还原任一处都被另一处兜住），
+  **组合变异（同时还原两处 = 复现原始 bug）⇒ CAUGHT（6 条失败）**。
+
+**顺带修测试脆弱性**：`report.mjs` 的 getHud 切片用**字段名** `state.m5.hudPollReq` 当结束标记，
+而注释里也会出现该字段名 ⇒ R16.10 的长注释让切片提前截断、3 条断言误报失败。
+改用**赋值语句** `state.m5.hudPollReq = {` 作标记（唯一、且正是断言要的东西）。
+
+**验证**：contract 385 + static 61 + report 54 + boot 21 = **521 断言**全绿。
+**部署**：m5.hud.mjs / effort.mjs —— toggle 热换（client 无需改动）。
