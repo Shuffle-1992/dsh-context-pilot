@@ -20,6 +20,19 @@ window.__ModuleLoader__.load({
 		 * 控制台取证路径变更：__DSH_CONTEXT_PILOT__.sid / .hudDebug / .gen 一次可读全貌。 */
 		const NS = (window.__DSH_CONTEXT_PILOT__ = window.__DSH_CONTEXT_PILOT__ || {});
 
+		/* R16.11：**唯一的「当前会话 id」解析口**（所有按会话过滤的查询都必须走它）。
+		 * 优先级：① 窗口自身 URL 里的 session id（本窗口路由，每次现读 ⇒ 切换会话即变）；
+		 * ② `NS.sid`（fetch first-wins 捕获的兜底，见 mount 处的钩子）。
+		 * 起因（用户实测）：原实现只认「最后一个带 sessionId 的请求」，会被别的会话抢走 ⇒
+		 * 面板/弹窗列出别的会话的压缩记录（「新会话只压了一次却显示很多条」）。 */
+		const resolveSid = () => {
+			try {
+				const m = /(session-[A-Za-z0-9-]{8,})/.exec(String(location.href || ""));
+				if (m) return m[1];
+			} catch { /* 忽略 */ }
+			return NS.sid || "";
+		};
+
 		/** 卡片 key = bundle 包名（plugins.bundle.config slot 契约）。 */
 		const BUNDLE_KEY = "@local/dsh-context-pilot";
 		/** 设置命名空间匹配（host 的 settingsNs = Loader entry id，本插件）。 */
@@ -677,7 +690,7 @@ window.__ModuleLoader__.load({
 				const pullOnce = async () => {
 					try {
 						if (!hudRemoteSvc || typeof hudRemoteSvc.getHud !== "function") return;
-						const raw = await hudRemoteSvc.getHud(NS.sid || "");
+						const raw = await hudRemoteSvc.getHud(resolveSid());
 						const env = raw && typeof raw === "object" && "value" in raw ? (raw.ok ? raw.value : null) : raw;
 						if (!alive) return;
 						const e = env && env.effort ? env.effort : null;
@@ -939,8 +952,15 @@ window.__ModuleLoader__.load({
 				} catch (e) {
 					console.warn(`${LOG} HUD 轮询面挂载失败（吞）:`, e && e.message);
 				}
-				/* sessionId 捕获（按会话过滤 HUD）：钩一次 fetch，从任意 API URL 抓 sessionId=；
-				 * 页面已发出的历史请求从 resource timing 补捞。会话切换后 5s 内自动跟随。 */
+				/* sessionId 捕获（按会话过滤 HUD）：**绝不能"谁带 sessionId 就认谁"**——
+				 * R16.11（2026-10-10 用户实测「新会话只压了一次，记录却显示很多条」）：
+				 * 原实现钩 fetch 并从**任意** URL 抓 `sessionId=`（last-wins），而 DSH 页面里
+				 * 别的会话/后台请求同样携带 sessionId ⇒ NS.sid 随时被**抢成另一个会话**，
+				 * 面板就列出了那个会话的记录（正是「串会话」）。
+				 * 现改为**多源择优 + 冲突留痕**：
+				 *   ① `location.href` 里出现 session id（本窗口自身的路由）——最高优先，每次轮询都重读；
+				 *   ② 首次 fetch 捕获（**first-wins**：本窗口的第一个会话请求必是自己的）；
+				 *   ③ 之后任何不同的 id 一律**不覆盖**，只累计到 NS.sidConflicts 供取证。 */
 				try {
 					if (!NS.sidHook) {
 						NS.sidHook = true;
@@ -950,7 +970,13 @@ window.__ModuleLoader__.load({
 								try {
 									const u = String((args[0] && args[0].url) || args[0] || "");
 									const m = /sessionId=(session-[A-Za-z0-9-]+)/.exec(u);
-									if (m) NS.sid = m[1];
+									if (m) {
+										if (!NS.sid) NS.sid = m[1]; // first-wins
+										else if (NS.sid !== m[1]) {
+											NS.sidConflicts = (NS.sidConflicts || 0) + 1;
+											NS.sidConflictLast = m[1].slice(0, 24);
+										}
+									}
 								} catch { /* 忽略 */ }
 								return origFetch.apply(this, args);
 							};
@@ -958,8 +984,15 @@ window.__ModuleLoader__.load({
 						try {
 							for (const e of performance.getEntriesByType("resource")) {
 								const m = /sessionId=(session-[A-Za-z0-9-]+)/.exec(e.name || "");
-								if (m) NS.sid = m[1];
+								if (m && !NS.sid) NS.sid = m[1]; // 只补空，不覆盖
 							}
+						} catch { /* 忽略 */ }
+						/* 会话切换（同窗口内导航）⇒ 立即重问一次（事件驱动，非轮询）。
+						 * `NS.hudSid` 与「数据所属 sid」不一致时 renderHud/pullHud 也会自行清缓存。 */
+						try {
+							const onNav = () => { try { NS.pullHud?.(); } catch { /* 忽略 */ } };
+							window.addEventListener("popstate", onNav);
+							window.addEventListener("hashchange", onNav);
 						} catch { /* 忽略 */ }
 					}
 				} catch { /* 忽略 */ }
@@ -1179,7 +1212,7 @@ window.__ModuleLoader__.load({
 							const actLines = detail && detail.length
 								? detail.map((x) => `${fmtFullTime(x && x.at)} · ${stripHhmm(x && x.text)}`)
 								: (act ? [act] : []);
-							row.title = `${actLines.length ? actLines.join("\n") : "（暂无压缩记录）"}\n—— dcp: gen=${v.gen || "?"} sid=${(NS.sid || "").slice(0, 13) || "?"}`;
+							row.title = `${actLines.length ? actLines.join("\n") : "（暂无压缩记录）"}\n—— dcp: gen=${v.gen || "?"} sid=${(resolveSid() || "?").slice(0, 13)} n=${Array.isArray(v.actsDetail) ? v.actsDetail.length : 0}`;
 							/* R7：原「武装中」(`v.hudArmed === "armed"`) 与「待执行」(解析 `v.hudPending`)
 							 * 两个徽章随 marker 通道退役删除——压缩已改由工具在轮内触发，
 							 * **不存在**任何「压缩后自动恢复执行」的动作，徽章文案本身已失真。 */
@@ -1261,7 +1294,16 @@ window.__ModuleLoader__.load({
 								NS.hudDebug = { svc: false, at: Date.now() };
 								return;
 							}
-							const sidNow = NS.sid || "";
+							/* R16.11：sid 择优（URL 优先，其次 first-wins 捕获）。
+							 * ⚠️ **换代即弃缓存**：本次轮询用的 sid 与 `hudRemote` 所属的 sid
+							 * （NS.hudSid）不一致时，先把缓存清空再渲染——否则会拿**上一个会话**
+							 * 的记录顶替（用户实测「新会话只压一次却显示很多条」的另一条路径）。 */
+							const sidNow = resolveSid();
+							if ((NS.hudSid || "") !== sidNow) {
+								hudRemote = null;
+								NS.hudSid = sidNow;
+								try { renderHud(); } catch { /* 忽略 */ }
+							}
 							const r = unwrapEnv(await hudRemoteSvc.getHud(sidNow));
 							/* 2026-10-08：**删除「带参失败即退回无参全局查询」的回退**。
 							 * 原回退的初衷是「旧 face 未重载时带参被拒」，但它在协议不匹配时会把

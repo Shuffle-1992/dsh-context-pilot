@@ -1798,3 +1798,30 @@ DSH 引擎在该压缩失败路径的 turn 收尾处抛出 `sid` ReferenceError�
 
 **验证**：contract 385 + static 61 + report 54 + boot 21 = **521 断言**全绿。
 **部署**：m5.hud.mjs / effort.mjs —— toggle 热换（client 无需改动）。
+
+### R16.11 压缩记录同样串会话 —— 三层堵漏（2026-10-10）
+
+**用户报告**：R16.10 修好换档统计后，「压缩记录」**仍然串**——描述极准：
+「新开的会话窗口，就刚才才压缩一次，但看记录却显示了很多条。」
+
+**取证**（报告的 `hudPollReq` 轮询记录 + hud-acts.json）：
+- client 传的 sid 在**记录到的那些轮询里**一直是对的（如本会话 `matched=10`）；
+- 但 hud-acts.json 里是 **5 个会话的 16 条**记录 ⇒ 只要 sid 有一刻为「空」或「别人的」，
+  面板就会列出**全量**（`sid ? filter : list` 的全局兜底）或**别的会话**的记录。
+
+**三层根因与堵漏**：
+
+| # | 位置 | 原行为（泄漏点） | 修 |
+| --- | --- | --- | --- |
+| ① | `m5.hud.mjs` | `sid ? filter : list` —— **空 sid 返回全量**（UI 里这份列表永远是会话内的，全局视图没有消费者） | 空 sid ⇒ 返回空列表（宁缺勿错）；全量只在 `actsTotal` 计数留痕 |
+| ② | `client.js` fetch 钩子 | 从**任意** URL 抓 `sessionId=` 且 **last-wins** ⇒ 任意带 sessionId 的后台请求都能把 `NS.sid` 抢成**别的会话** | **first-wins**（本窗口第一个会话请求必是自己的）+ 统一解析口 `resolveSid()`（**窗口 URL 优先**，每次轮询现读 ⇒ 切换会话即变）+ 冲突计数 `NS.sidConflicts` 留痕 |
+| ③ | `client.js` 轮询 | `hudRemote` 缓存**不绑定 sid** ⇒ 会话切换后仍渲染上一个会话的记录 | 轮询时 `NS.hudSid !== sidNow` ⇒ **先清缓存再渲染**，并立即重问；另挂 `popstate`/`hashchange` 事件触发重问 |
+
+**护栏**（4 静态 + 3 变异验证，全部 CAUGHT）：
+- 静态：m5 空 sid 不得回退全量（含 `actsTotal` 存在）；client 必须有 `resolveSid` 且两处查询都走它；
+  fetch 必须 first-wins（且**不得**再有 last-wins 写法）；轮询必须有「换代弃缓存」；
+- 变异：① 空 sid 回退全量、② fetch 改回 last-wins、③ 去掉换代弃缓存 —— 逐个还原**都被抓住**（各 2 条失败）。
+
+**验证**：contract 388 + static 61 + report 54 + boot 21 = **524 断言**全绿。
+**部署**：`m5.hud.mjs` + `client.js` —— toggle 热换 + **刷新页面**。
+**验证手段**：弹窗底部指纹带上 `sid=<13 位> n=<条数>`，截图即可核对「这个窗口查的是哪个会话、拿到几条」。

@@ -131,8 +131,13 @@ export function createM5Hud(deps) {
      *   ⇒ 从 16616c07 回溯得 { 16616c07, f4154f01 }，命中 4/5 条，
      *     而 f4154f01 属 `keysion-dac-vue` workspace、cb8d115e 属 `zcode-dispatch`
      *     —— 都是**另一个对话**，只因 UI 的 NS.sid 漂移过一次就被连成一条链。
-     * 这正是用户看到的「弹窗里显示全 DSH 的压缩记录」。故彻底改回精确匹配。 */
-    const filtered = sid ? list.filter((a) => a.sid === sid) : list;
+     * 这正是用户看到的「弹窗里显示全 DSH 的压缩记录」。故彻底改回精确匹配。
+     * R16.11（2026-10-10 用户复现「新会话只压了一次却显示很多条」）：**空 sid 也不再返回全量**——
+     * 原 `sid ? filter : list` 里 `list` 是**全局**：只要 client 那一刻没解析出 sid（新窗口首帧、
+     * 或 sid 被抢成别的会话），面板就会列出所有会话的记录。UI 里这份列表**永远是会话内的**，
+     * 全局视图没有消费者 ⇒ 空 sid 视为「无会话上下文」：不返回任何记录（宁缺勿错），
+     * 全量只在 `actsTotal` 里留一个计数供取证。 */
+    const filtered = sid ? list.filter((a) => a.sid === sid) : [];
     /* ⚠️ 2026-10-07 真根因修复：agents/sess 必须提到本函数作用域。
      * 原实现在下方 occ IIFE 内部声明 agents，而 criticalCap 在 IIFE 外引用它
      * ⇒ 每次 getHud 抛 ReferenceError("agents is not defined") ⇒ client 永远拿不到数据，
@@ -181,6 +186,9 @@ export function createM5Hud(deps) {
        * `hudLastActGlobal` 一并退役——它正是「弹窗混进别会话记录」的来源。 */
       actsDetail: filtered.slice(0, 8).map((a) => ({ at: a.at, text: a.text })),
       sessionMatched: filtered.length,
+      /* R16.11：全量计数（取证用，UI 不消费）——空 sid 时不返回任何记录，
+       * 但保留总数便于判断「是不是没解析出 sid」。 */
+      actsTotal: list.length,
       occupancyRatio: occ.ratio,
       occupancyWindow: occ.window,
       criticalCap: criticalCapOf(targetAgent),

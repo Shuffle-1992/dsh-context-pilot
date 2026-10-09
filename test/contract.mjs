@@ -474,9 +474,25 @@ const hostNoComment = host.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$
 /* client 也常需要在「不得出现某字符串」类断言里剥注释——本轮已两次栽在这一点上：
  * 解释性注释里引用了被禁的 token/文案，导致断言被自己的说明判失败。 */
 const clientNoComment = client.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
-ok('getHud 按 sid 精确过滤（不再走血统链，查 m5.hud.mjs）',
-  /const filtered = sid \? list\.filter\(\(a\) => a\.sid === sid\) : list;/.test(m5src),
-  '过滤仍走 lineage 链 ⇒ 会命中别的会话的记录');
+ok('getHud 按 sid 精确过滤（不再走血统链；R16.11 起空 sid 也不再返回全量）',
+  /const filtered = sid \? list\.filter\(\(a\) => a\.sid === sid\) : \[\];/.test(m5src)
+    && /actsTotal: list\.length,/.test(m5src),
+  '过滤仍走 lineage 链 / 或空 sid 回退全量 ⇒ 面板会列出别会话的记录（用户实测「新会话只压一次却显示很多条」）');
+/* R16.11（用户实测「压缩记录也串」）：三层堵漏，逐层钉死。 */
+ok('R16.11 client：sid 统一解析口 resolveSid（URL 优先，其次 first-wins 兜底）',
+  /const resolveSid = \(\) => \{/.test(client)
+    && /location\.href/.test(client)
+    && /const sidNow = resolveSid\(\);/.test(client)
+    && /hudRemoteSvc\.getHud\(resolveSid\(\)\)/.test(client),
+  'client 仍各自读 NS.sid ⇒ 会话身份可被别的请求抢走，按会话过滤失效');
+ok('R16.11 client：fetch 捕获改 first-wins（绝不 last-wins 覆盖）+ 冲突留痕',
+  /if \(!NS\.sid\) NS\.sid = m\[1\]; \/\/ first-wins/.test(client)
+    && /NS\.sidConflicts = \(NS\.sidConflicts \|\| 0\) \+ 1;/.test(client)
+    && !/if \(m\) NS\.sid = m\[1\];/.test(client),
+  '仍是 last-wins ⇒ 任意带 sessionId 的请求都会把 NS.sid 改成别的会话');
+ok('R16.11 client：轮询换代即弃缓存（sid 变了先清 hudRemote 再渲染）',
+  /if \(\(NS\.hudSid \|\| ""\) !== sidNow\) \{/.test(client) && /hudRemote = null;/.test(client),
+  '缺换代弃缓存 ⇒ 会话切换后仍渲染上一个会话的记录（「很多条」的直因）');
 ok('血统链机制已整体退役（noteSessionId / state.m5.lineage / lastSid）',
   !/noteSessionId/.test(hostNoComment) && !/state\.m5\.lineage/.test(hostNoComment) && !/state\.m5\.lastSid/.test(hostNoComment),
   '血统链残留 ⇒ 跨会话误连可复活');
