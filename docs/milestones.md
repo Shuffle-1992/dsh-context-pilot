@@ -1864,3 +1864,48 @@ DSH 引擎在该压缩失败路径的 turn 收尾处抛出 `sid` ReferenceError�
 即便用户明说「排查根因」也不提示；改用 `null` 区分「从未提醒」与「第 0 轮提醒」（行为级测试抓到的）。
 
 **部署**：effort.mjs / m2.inject.mjs / core.mjs / host.impl.mjs —— toggle 热换。
+
+### R16.13 引擎/命令发起的压缩「零记录」—— 事件补记（2026-10-10）
+
+**用户报告**：另一会话（正在运行）中途**触发两次强制压缩，但看不到任何记录落盘**。
+
+**取证（三份数据对照）**：
+- 会话日志：`session-70a55b1a` 在 19:47 有 `compaction/start {turn:29, src:engine}` → OK；
+- 插件报告：该会话的 `lastPreStep` 停在 16:04（插件自己的压缩有记录）；
+- `hud-acts.json`：该 sid 只有 1 条旧记录 ⇒ **19:47 那次完全没进插件**。
+
+**根因**：插件只在**自己**的两条路径写记录——pre-step（工具意图 / 越强制线）与 idle 安全网。
+而 **引擎自动压缩**（context-overflow 恢复 / 引擎阈值）与 **`/compact` 命令**全程绕过插件 ⇒
+「压了但零记录」。更深一层：插件的 pre-step 走 `compactRegion(start, end, agent, signal)`，
+而引擎签名**没有** sourceCommandId ⇒ 自家压缩与引擎压缩在事件流里**无法靠字段区分**（这也是
+之前没敢用事件补记的原因）。
+
+**修（R16.13）**：
+1. **m3 加「在飞标记」**：三处自家压缩调用（own-range / official 兜底 / idle compactNow）都
+   `markOwnCompaction(sid)`、结束即 `clearOwnCompaction()`，另有 90s TTL 兜底防漏清；
+   导出 `isCompactionInFlight()` 供事件侧判定「这是我自己的压缩」。
+2. **m3 新增 `noteEngineCompaction(event, session)`**：在 `compaction/end` 上补记，
+   跳过 ① `sourceCommandId === 'context-pilot'`（idle 路径自带标记）② 在飞窗口（pre-step 路径）；
+   文案分 **引擎自动压缩** / **手动压缩（/compact）**，**失败也记**（「压了但失败」同样是无痕盲区）；
+   落 `recordHudAct` + `publishHud`（与插件自己的记录同表、同样按 sid 过滤），
+   并留 `state.m3.engineCompacts` / `lastEngineCompact` 取证。
+3. **host**：`session/event` 监听器把 `compaction/end` 转发给 m3（一行）。
+   该监听器的边界由「纯只读探针」明确放宽为「**允许记录，仍禁止触发**任何压缩」——
+   R7 删掉的是「标记→自动压缩」那条**触发**链，补记不改变压缩行为。
+4. **m5**：`hudReasonLabel` 增加两个来源标签，避免与他人/插件自己的「强制压缩」混淆。
+
+**为什么这次一定能生效（预检）**：报告里的 `m3.eventProbe` 累计到 `compaction/start` **40 次**、
+`compaction/end` **38 次**、`compaction/summary` —— 监听器确实收得到这些事件（不是空修）。
+
+**验证**：contract 406 + static 61 + report 54 + boot 21 = **542 断言**全绿；
+新增 2 静态 + 6 行为级（引擎/命令/失败/两种跳过/计数留痕）；**变异 4/4 CAUGHT**
+（host 不转发、不跳过 context-pilot、不打在飞标记、文案退化为枚举名）。
+
+**顺带修**：`fix-esc` 全局替换曾误伤文件头注释里**特意转义**的反引号
+（那处转义正是为了躲开依赖扫描，去掉后触发「自循环依赖」误报）——已按 HEAD 逐行恢复。
+
+**遗留说明**：修复**不追溯**——19:47 那两次压缩在 hud-acts 里没有数据（插件当时没收到），
+只能从会话日志看到；此后所有来源（插件 / 引擎 / 命令）的压缩都会出现在面板里。
+
+**部署**：m3.compact.mjs / host.impl.mjs / m5.hud.mjs —— toggle 热换（client 无需改动，
+面板每 5s 轮询自动出现新记录）。

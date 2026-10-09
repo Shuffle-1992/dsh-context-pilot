@@ -518,6 +518,80 @@ ok('R16.12 冷却期间不提示（避免「让你切但工具必然拒绝」的
   /if \(s\.switchedAt && Date\.now\(\) - s\.switchedAt < cap\) return null;/.test(effort),
   '冷却中仍提示 ⇒ 工具必被拒绝，制造挫折与噪声');
 
+/* R16.13（用户实测「另一会话中途被引擎自动压缩两次，插件里没有记录」）：
+ * 插件只在**自己**的 pre-step / idle 路径写记录 ⇒ 引擎自动压缩与 `/compact` 全程绕过插件、零记录。
+ * 取证：会话日志有 `compaction/start {turn:29, src:engine}`，hud-acts 里该 sid 只有旧记录。 */
+{
+  const m3Mod13 = await import(pathToFileURL(join(PLUGIN, 'm3.compact.mjs')).href);
+  const st13 = { m3: {} };
+  const acts = [];
+  const hud = [];
+  const m3x = m3Mod13.createM3Compaction({
+    state: st13, log: () => {}, msg: (e) => String(e?.message ?? e),
+    pick: (...a) => a.find((x) => x != null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    nfmt: (n) => String(n), errCodeOf: (e) => String(e?.code ?? 'err'), schedule: () => {},
+    svc: () => null, M3: {}, effEnabled: () => true, criticalCapOf: () => 0.8,
+    resolveCompactionFor: () => ({ service: null, via: 'stub' }),
+    publishHud: (patch) => hud.push(patch), recordHudAct: (sid, text) => acts.push({ sid, text }),
+    formatAct: (reason) => 'hh:mm · ' + ({ 'engine-auto': '引擎自动压缩', 'engine-manual': '手动压缩（/compact）' }[reason] ?? String(reason)),
+    clearBriefed: () => {}, awaitRange: async () => null, getCompactTool: () => null,
+    COMPACT_TIMEOUT_MS: 180000, SET_CAP: 200,
+  });
+  const sess13 = { id: 'sess-13', surface: [], eventAt: () => null };
+  ok('R16.13 行为级：引擎自动压缩被补记（含「压后占用」）',
+    (() => {
+      const t = m3x.noteEngineCompaction?.({ type: 'compaction/end', data: { compactionId: 'c1', turn: 29 } }, sess13);
+      return typeof t === 'string' && /引擎自动压缩/.test(t) && acts.length === 1 && acts[0].sid === 'sess-13' && hud.length === 1;
+    })(),
+    `实际：acts=${JSON.stringify(acts)} hud=${hud.length}`);
+  ok('R16.13 行为级：命令压缩（/compact）标注为「手动压缩」',
+    (() => {
+      const t = m3x.noteEngineCompaction?.({ type: 'compaction/end', data: { compactionId: 'c2', sourceCommandId: 'cmd-abc' } }, sess13);
+      return typeof t === 'string' && /手动压缩/.test(t);
+    })(),
+    '命令压缩与引擎自动压缩混为一谈 ⇒ 用户分不清是谁压的');
+  ok('R16.13 行为级：失败的压缩同样留痕（否则「压了但失败」零记录）',
+    (() => {
+      const t = m3x.noteEngineCompaction?.({ type: 'compaction/end', data: { compactionId: 'c3', error: '400: x' } }, sess13);
+      return typeof t === 'string' && /失败/.test(t);
+    })(),
+    '失败不记录 ⇒ 与用户实测症状同形（看不到任何痕迹）');
+  ok('R16.13 行为级：跳过插件自己的压缩（sourceCommandId=context-pilot）',
+    (() => {
+      const before = acts.length;
+      const t = m3x.noteEngineCompaction?.({ type: 'compaction/end', data: { compactionId: 'c4', sourceCommandId: 'context-pilot' } }, sess13);
+      return t === null && acts.length === before;
+    })(),
+    '插件自己的压缩被重复补记 ⇒ 面板出现两条同一次压缩');
+  ok('R16.13 行为级：跳过「自己的压缩在飞」窗口（pre-step 的 compactRegion 无标记）',
+    (() => {
+      const before = acts.length;
+      st13.m3.ownCompact = { at: 'now', sessionId: 'sess-13', until: Date.now() + 5000 };
+      const t = m3x.noteEngineCompaction?.({ type: 'compaction/end', data: { compactionId: 'c5' } }, sess13);
+      st13.m3.ownCompact = null;
+      return t === null && acts.length === before;
+    })(),
+    '无标记的自家压缩被当引擎压缩补记 ⇒ 重复记录');
+  ok('R16.13 计数与取证留痕（engineCompacts / lastEngineCompact）',
+    st13.m3.engineCompacts === 3 && typeof st13.m3.lastEngineCompact === 'object' && st13.m3.lastEngineCompact.ok === false,
+    `实际：compacts=${st13.m3.engineCompacts} last=${JSON.stringify(st13.m3.lastEngineCompact)}`);
+}
+/* ⚠️ m3src 在本文件稍后（L677）才声明 ⇒ 这里就地取一份，避免 TDZ。 */
+const m3src13 = read('m3.compact.mjs');
+ok('R16.13 接线：host 把 compaction/end 转发给 m3；m3 三处自己的压缩都打「在飞标记」并导出',
+  /if \(event\?\.type === 'compaction\/end'\) m3Ctl\?\.noteEngineCompaction\?\.\(event, session\);/.test(host)
+    && /noteEngineCompaction/.test(m3src13)
+    && /if \(src === 'context-pilot'\) return null;/.test(m3src13)
+    && /if \(isCompactionInFlight\(\)\) return null;/.test(m3src13)
+    && (m3src13.match(/markOwnCompaction\(sid\)/g) ?? []).length >= 3
+    && (m3src13.match(/clearOwnCompaction\(\)/g) ?? []).length >= 3
+    && /isCompactionInFlight, noteEngineCompaction \}/.test(m3src13),
+  '任一环缺位 ⇒ 引擎压缩仍无记录，或自家压缩被重复记录');
+ok('R16.13 文案：m5 为两种「非插件压缩」提供标签（不与「强制压缩」混淆）',
+  /reason === 'engine-auto' \? '引擎自动压缩'/.test(m5src) && /reason === 'engine-manual' \? '手动压缩（\/compact）'/.test(m5src),
+  '标签缺位 ⇒ 弹窗会显示内部枚举名或与插件自己的压缩混淆');
+
 ok('投影 pending 优先显示（已选待生效提前可见）',
   /sel\.pending \|\| sel\.lastUsed/.test(client),
   '未优先取 pending ⇒ 换档后要等下一轮才显示');

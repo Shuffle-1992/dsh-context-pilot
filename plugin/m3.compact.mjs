@@ -60,6 +60,66 @@ export function createM3Compaction(deps) {
     return { ok: true, used, surface, window, ratio, measure: m.value };
   };
 
+  /* ═══ R16.13：我们自己的压缩「在飞标记」（区分事件流里的自己 vs 引擎）═══
+   * 起因（用户实测）：另一个会话中途被**引擎自动压缩**两次，插件面板里一条记录都没有。
+   * 取证：会话日志 `compaction/start {turn:29, src:engine}` 而 hud-acts 里该 sid 只有旧记录。
+   * 机制：插件的 pre-step 走 `compactRegion(start, end, agent, signal)`（引擎签名**无**
+   * sourceCommandId）⇒ 其事件与引擎自动压缩在事件流里**无法区分**；故用时间窗把
+   * 「我自己的压缩」圈出来，供 session/event 监听器跳过补记（只有引擎/手动压缩才补记）。
+   * TTL 兜底：某条路径异常未清（await 抛错等）时，窗口过期即失效，不会永久吞掉引擎事件。 */
+  const OWN_COMPACT_TTL_MS = 90000;
+  const markOwnCompaction = (sid) => {
+    try { state.m3.ownCompact = { at: new Date().toISOString(), sessionId: String(sid ?? ''), until: Date.now() + OWN_COMPACT_TTL_MS }; } catch { /* 吞 */ }
+  };
+  const clearOwnCompaction = () => { try { state.m3.ownCompact = null; } catch { /* 吞 */ } };
+  /** 是否有「我们自己的压缩」正在进行（事件监听器据此跳过补记）。 */
+  const isCompactionInFlight = () => {
+    try {
+      const o = state.m3.ownCompact;
+      return !!(o && Number(o.until) > Date.now());
+    } catch { return false; }
+  };
+
+  /* ═══ R16.13：补记「非插件发起」的压缩（引擎自动 / `/compact` 命令）═══
+   * 起因（用户实测）：另一会话中途被引擎自动压缩两次，插件面板/报告里一条记录都没有。
+   * 取证：会话日志有 `compaction/start {turn:29, src:engine}`，而 hud-acts 里该 sid 只有旧记录。
+   * 机制：插件只在**自己**的 pre-step / idle 路径写记录；引擎自动压缩（context-overflow 恢复 /
+   * 引擎阈值）与命令压缩全程绕过插件 ⇒ 无记录。现由 session/event 的 `compaction/end` 补记。
+   * 去重：① sourceCommandId=context-pilot（插件 idle 路径自带标记）跳过；
+   *       ② isCompactionInFlight()（插件 pre-step 的 compactRegion 无标记，用时间窗圈定）跳过。
+   * 只在 **end** 记（start 未完成就报成功会误导）；失败也记（否则「压了但失败」同样无痕）。 */
+  const noteEngineCompaction = (event, session) => {
+    try {
+      const d = event?.data ?? {};
+      const src = d.sourceCommandId;
+      if (src === 'context-pilot') return null; // 插件 idle 路径（已在 idle 里记过）
+      if (isCompactionInFlight()) return null;  // 插件 pre-step 路径（在飞窗口内）
+      const sidE = String(pick(session?.id, session?.header?.id, ''));
+      if (!sidE) return null;
+      const kind = typeof src === 'string' && src.startsWith('cmd') ? 'manual' : 'engine';
+      const mr = measureRatio(session);
+      const ratioAfter = mr?.ok && Number.isFinite(mr.ratio) ? mr.ratio : null;
+      const base = formatAct(kind === 'manual' ? 'engine-manual' : 'engine-auto', null);
+      const text = base + (d.error
+        ? ' · 失败'
+        : (ratioAfter != null ? ` · 压后占用 ${(ratioAfter * 100).toFixed(1)}%` : ''));
+      recordHudAct(sidE, text);
+      publishHud({ hudLastAct: text });
+      state.m3.engineCompacts = (state.m3.engineCompacts ?? 0) + 1;
+      state.m3.lastEngineCompact = {
+        at: new Date().toISOString(), sessionId: sidE, kind,
+        sourceCommandId: src ?? null, ok: !d.error,
+        error: d.error ? String(d.error).slice(0, 200) : null,
+        ratioAfter, recorded: text,
+      };
+      log('info', `M3.13 补记非插件压缩（${kind}${d.error ? '，失败' : ''}）：${text}`);
+      return text;
+    } catch (e) {
+      log('warn', `M3.13 补记异常（吞）：${msg(e)}`);
+      return null;
+    }
+  };
+
   /* ═══ R16.1：压缩自检回执按 sid 存 ═══
    * 多会话并发压缩时，全局单槽 `lastCompactVerify` 会被后完成的会话覆盖 ⇒ 另一个会话的
    * Agent 看不到自己的回执（压缩本身不受影响，但「工具完成后自检」在那条会话失效）。
@@ -98,13 +158,18 @@ export function createM3Compaction(deps) {
    */
   const compactWithOwnRange = async (agent, compaction, ctx) => {
     const { forced, sig, sid, window, measure, tierName } = ctx;
-    const official = async (why) => ({
-      result: await compaction.service.compactIfNeeded(agent, 'context-overflow', sig),
-      source: 'official',
-      officialWhy: why ?? null,
-      retainBudget: null,
-      walkBacks: 0,
-    });
+    const official = async (why) => {
+      markOwnCompaction(sid);
+      try {
+        return {
+          result: await compaction.service.compactIfNeeded(agent, 'context-overflow', sig),
+          source: 'official',
+          officialWhy: why ?? null,
+          retainBudget: null,
+          walkBacks: 0,
+        };
+      } finally { clearOwnCompaction(); }
+    };
     const api = await awaitRange();
     if (!api) return official('no-range-module');
     /* R16：档位 → 保留预算。resolveTier 内含夹取（下限 40k、上限窗口 50%）与未知档位回落；
@@ -154,7 +219,14 @@ export function createM3Compaction(deps) {
     let walkBacks = 0;
     for (;;) {
       try {
-        const result = await compaction.service.compactRegion(sel.start, end, agent, sig);
+        /* R16.13：本条 `compactRegion` **不带 sourceCommandId**（引擎签名无此参数）
+         * ⇒ 它产生的 compaction/start|end 事件与「引擎自动压缩」在事件流里**无法区分**。
+         * 故用「在飞标记」把窗口圈出来：事件监听器据此判定「这是我自己的压缩」并跳过补记。 */
+        markOwnCompaction(sid);
+        let result;
+        try {
+          result = await compaction.service.compactRegion(sel.start, end, agent, sig);
+        } finally { clearOwnCompaction(); }
         return { result, source: 'own', retainBudget: budget, walkBacks, tier: tierInfo.tier, range: { start: sel.start, end } };
       } catch (e) {
         /* 末端不合法 ⇒ 回退一个 surface 节点重试（零副作用、零 LLM 成本，见文件头）。 */
@@ -378,6 +450,7 @@ export function createM3Compaction(deps) {
        * ⚠️ F1（同批修）：冷却 `state.m3.sweeps[sid]` 改为**只在成功分支**记录——原实现发起前就记，
        * 一次失败即消耗掉 `sweepMinIntervalMs`（默认 10 分钟）安全网。 */
       sweepInFlight.add(sid);
+      markOwnCompaction(sid);
       compaction.service
         .compactNow(agent, AbortSignal.timeout(COMPACT_TIMEOUT_MS), 'context-pilot')
         .then((result) => {
@@ -431,11 +504,11 @@ export function createM3Compaction(deps) {
           log('warn', `M3 idle 扫除失败（${code}）：${msg(e)}`);
           schedule('m3-act', 500);
         })
-        .finally(() => sweepInFlight.delete(sid));
+        .finally(() => { clearOwnCompaction(); sweepInFlight.delete(sid); });
     } catch (e) {
       log('warn', `M3 idle 扫除异常（吞）：${msg(e)}`);
     }
   };
 
-  return { measureRatio, compactWithOwnRange, preStepCompaction, idleSweep, setCompactVerify, takeCompactVerify };
+  return { measureRatio, compactWithOwnRange, preStepCompaction, idleSweep, setCompactVerify, takeCompactVerify, isCompactionInFlight, noteEngineCompaction };
 }

@@ -43,7 +43,11 @@ export function createM5Hud(deps) {
     reason === 'context-overflow' ? '智能压缩'
       : reason === 'safety-net' ? '兜底'
         : reason === 'pressure' ? '强制压缩'
-          : String(reason ?? '');
+          /* R16.13：非插件发起的压缩（引擎自动 / `/compact` 命令）——来源必须与插件自己的
+           * 「强制压缩 / 智能压缩」区分开，否则用户会以为插件压了却没记录。 */
+          : reason === 'engine-auto' ? '引擎自动压缩'
+            : reason === 'engine-manual' ? '手动压缩（/compact）'
+              : String(reason ?? '');
 
   /* B1（审查）：formatAct 统一「hh:mm · 原因 · 省 xK」模板——运行期（at 缺省=现在）与启动回填（at=记录时刻）共用 */
   const formatAct = (reason, tokens, at) => {

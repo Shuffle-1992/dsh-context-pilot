@@ -438,19 +438,20 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
     schedule('agent/status', 1500);
   });
 
-  /* ---- 事件形状探针（**唯一职责**：记录到达的 session/event，供协议取证）----
-   * R7 起本监听器**不再有任何业务逻辑**：它原来还负责「模型回复尾部标记 → idle 自动压缩」，
-   * 那条通道已随 marker 整体退役（压缩改由工具在轮内完成）。
-   * 保留探针的理由：本插件依赖多个**未文档化**的内部事件（`session/event` 的形状、
-   * `agent/inbox/*`、`step/*`），M1 阶段正是靠它一次性摸清了事件形状；
-   * 成本仅为一次类型计数 + 至多 12 条样本（slim 报告档位会丢弃），换的是下次 API 变动时能立刻看见。
-   * ⚠️ 探针**纯只读**：不得在此监听器里加入任何会改状态或触发压缩的逻辑（那正是 R7 删掉的东西）。 */
+  /* ---- 事件监听：形状探针 + **非插件压缩的补记**（R16.13）----
+   * R7 起探针**不再有压缩触发逻辑**（「模型回复尾部标记 → idle 自动压缩」已随 marker 退役）。
+   * R16.13 放宽的边界：允许**记录**（补记引擎/手动压缩），仍然**禁止触发**任何压缩。
+   * 起因（用户实测）：另一会话中途被引擎自动压缩两次，插件面板里一条记录都没有——
+   * 因为插件只在**自己**的 pre-step / idle 路径写记录，而引擎自动压缩与 `/compact` 全程绕过插件。 */
   state.listeners['session/event'] = addListener('session/event', (session, event) => {
     try {
       /* R13：探针实现已搬进 plugin/m1.snapshot.mjs（recordEvent）——只读形状探针。 */
       recordSessionEvent(event, session);
+      /* R16.13：补记非插件发起的压缩（引擎自动 / `/compact`）。判定与去重全在 m3 域内
+       * （sourceCommandId=context-pilot 与「自己的压缩在飞」都跳过）——这里只做转发。 */
+      if (event?.type === 'compaction/end') m3Ctl?.noteEngineCompaction?.(event, session);
     } catch (e) {
-      log('warn', `M3.6 标记处理异常（吞）：${msg(e)}`);
+      log('warn', `session/event 处理异常（吞）：${msg(e)}`);
     }
   });
   log('info', `事件监听：${JSON.stringify(state.listeners)}`);
