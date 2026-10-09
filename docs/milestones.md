@@ -1733,3 +1733,31 @@ CSS 容器查询（DSH 自身的机制）才是正解。内联样式会压过 @c
 
 **验证**：contract 375 + static 61 + report 54 + boot 21 = **511 断言**全绿。
 **部署**：client.js / icon.svg —— chip 部分 toggle+刷新页面；插件列表图标需重启 DSH。
+
+### R16.9 归因「另一会话 sid is not defined + 压缩失败」—— 与本插件无关（2026-10-09）
+
+用户报告另一会话每轮失败于「sid is not defined」且压缩失败，ZCode 协查指向本插件。
+取证（会话 38fe6ea4 / **dsh-browser-kit 工作区** / turn138 完整记录还原）：
+
+- turn138/s1 一切正常：插件注入在案（`kind=context-pilot`）→ assistant → pwsh 工具
+  → tool/result → step/end ✓；
+- **引擎自动压缩**（`compaction/start` 无 `sourceCommandId=context-pilot` 标记 ⇒ 非插件触发）
+  → `compaction/end` **error 400**：「workbuddy upstream client (http 400): 模型不支持该思考强度」；
+- **1ms 后** turn/end 报 `sid is not defined`——这是引擎收尾路径上的错误；
+- 同会话 idle 安全网失败（报告 `lastActError code=summary`）同源：也是那个 400
+  （「Compaction could not produce a useful summary」即摘要 400 的包装）。
+
+**本插件零嫌疑**：
+- 11 个源文件 `node --check` 全过；自由变量扫描（剥注释/字符串后找裸 `sid` 标识符）
+  **0 处真裸引用**（唯一近似命中 m3 L365，`sid` 在同函数 L358 已定义，系扫描误报）；
+- 插件在 `compaction/end` 之后**没有任何同步钩子**（pre-step 在 turn 开始、idle 在
+  turn 完全结束后）⇒ 压缩失败 1ms 内的 turn 收尾时段，插件没有代码在跑；
+- 全库会话存储与 120 条报告记录中，均无插件产生的「sid is not defined」。
+
+**根因归属**：workbuddy 上游对摘要请求报 400（该 provider×model 不支持对应思考强度——
+与 [`docs/compaction-failure-diagnosis.md`](compaction-failure-diagnosis.md) 的结论同族），
+DSH 引擎在该压缩失败路径的 turn 收尾处抛出 `sid` ReferenceError（**引擎侧问题**，
+与本插件及 R16.7 的换档统计改动无关——那部分只读写 `effort-stats.json`，不参与请求路径）。
+
+**绕行**：该会话切到 `workbuddy/glm-5.3-flash` 等支持该思考强度的组合即可正常。
+引擎侧的 sid 收尾错误建议向 DSH 反馈。
