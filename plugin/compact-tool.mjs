@@ -127,6 +127,11 @@ export function createCompactTool(deps) {
     } catch { return 'standard'; }
   }
 
+  /** R16.14：本会话**是否申报过**档位（未申报=强制压缩走兜底 standard，UI/记录要标「系统代压」）。 */
+  function hasTier(sid) {
+    try { return tierBySid.has(String(sid ?? '')); } catch { return false; }
+  }
+
   /**
    * 未过期的意图清单（**诊断出口**）。
    * 用途：宿主在本 sid 查不到意图、但表里还有**别的 sid** 的意图时落痕——
@@ -171,16 +176,24 @@ export function createCompactTool(deps) {
       const sid = sidOf(agent);
       if (!sid) return { ok: false, error: '无法解析会话 id。' };
       const reason = String(args?.reason ?? '').trim().slice(0, 200);
+      /* R16.14（另一会话的评审意见，最高杠杆项）：把「档位登记」与「立即压缩」**解耦**。
+       * 评审原文：「`compact_context` 一调用就当场压，而档位只是它的参数 ⇒ 想『先登记 heavy、
+       * 暂不压』在工具面上做不到；于是理性选择就是别碰它。」这正是「Agent 从不主动声明档位」的
+       * 结构性原因——**唯一的低成本动作不存在**。现加 `action`：
+       *   · 'compact'（默认）——登记意图并压缩（原行为，向后兼容）；
+       *   · 'set-tier'——**只登记档位，不登记压缩意图**（不压、不丢近端、零缓存成本）。 */
+      const action = args?.action === 'set-tier' ? 'set-tier' : 'compact';
       /* R16：档位是**会话级持久偏好**（智能压缩线与强制线都读它）；未选/非法 ⇒ standard 兜底。 */
       const { tier, fallback } = normTier(args?.tier);
       setTier(sid, tier);
       const at = Date.now();
       const prev = bySid.get(sid);
-      bySid.set(sid, { at, reason });
+      if (action === 'compact') bySid.set(sid, { at, reason });
       state.m3.compactToolCalls = (state.m3.compactToolCalls ?? 0) + 1;
       state.m3.lastCompactTool = {
         at: new Date().toISOString(),
         sessionId: sid,
+        action,
         reason: reason || null,
         tier,
         tierFallback: fallback || null,
@@ -188,17 +201,30 @@ export function createCompactTool(deps) {
          * 拒绝会让模型以为自己没调成功而反复重试；意图是幂等的（覆盖写）。 */
         repeated: !!prev && at - prev.at < 5000,
       };
-      log('info', `智能压缩 工具已登记：下一步开始前执行（sid ${sid.slice(0, 8)}…，档位 ${tier}${fallback ? '（非法值兜底）' : ''}${reason ? '，理由：' + reason : ''}）`);
+      log('info', `智能压缩 工具已登记：${action === 'set-tier' ? '仅档位（不压缩）' : '下一步开始前执行'}（sid ${sid.slice(0, 8)}…，档位 ${tier}${fallback ? '（非法值兜底）' : ''}${reason ? '，理由：' + reason : ''}）`);
       schedule('compact-tool', 400);
       /* R15（用户要求「工具完成后进行检查，起码 agent 自己过一遍」）：
        * 工具只能**登记**，真正的执行在下一步的 pre-step ⇒ 必须给出**自检契约**，否则
        * 「回了 ok 但实际没执行」对模型完全不可见（2026-10-08 真机踩过：M3 域加载失败两版，
        * 工具一直回 ok/scheduled，压缩一次都没发生）。回执由插件在下一步开头注入。 */
+      const pctOf = (t2) => (t2 === 'light' ? 8 : t2 === 'heavy' ? 24 : 16);
+      if (action === 'set-tier') {
+        return {
+          ok: true,
+          action: 'set-tier',
+          scheduled: false, // 明确：**没有**安排压缩
+          tier,
+          verify: `档位已登记为 ${tier}（保留窗口 × ${pctOf(tier)}%）——**本次不压缩**。`
+            + '该档位此后对本会话的压缩（包括系统在强制线代替你执行的那次）持续生效，直到再次改选。'
+            + '想在低占用时提前锁定档位，就用这条路径（零压缩成本）。',
+        };
+      }
       return {
         ok: true,
+        action: 'compact',
         scheduled: 'next-step',
         tier,
-        verify: `已登记，档位 ${tier}（保留窗口 × ${tier === 'light' ? 8 : tier === 'heavy' ? 24 : 16}%）——该档位此后对本会话的压缩（含强制线）持续生效，直到再次改选。下一步开头会有一条「压缩自检」回执；若显示「未执行」，请再调用一次 compact_context，或直接告知用户。`,
+        verify: `已登记，档位 ${tier}（保留窗口 × ${pctOf(tier)}%）——该档位此后对本会话的压缩（含强制线）持续生效，直到再次改选。下一步开头会有一条「压缩自检」回执；若显示「未执行」，请再调用一次 compact_context，或直接告知用户。`,
       };
     } catch (e) {
       log('warn', `智能压缩 工具执行异常（吞）：${msg(e)}`);
@@ -261,8 +287,16 @@ export function createCompactTool(deps) {
          * （2026-10-08 真机踩过：M3 域两版缺失，压缩一次没发生而模型毫无察觉）。 */
         `**调用后请看回执**：下一步开头会有一条「压缩自检」——显示「已执行」即完成；`
           + `显示「未执行」（附原因）就**再调用一次** ${TOOL_NAME}，或直接在正文里告知用户这次压缩没生效。`,
-        '若接下来的任务依赖更早的细节（要引用之前的文件路径/结论/报错现场/长推理链中间量）则先不要调用（或改用 heavy 浅压）；'
-          + `占用达 ${crit} 强制压缩线时系统会自动压缩（同样按会话档位自算保留范围，摘要+近期消息；届时无需操作）。`,
+        /* R16.14（评审建议 1）：把「只登记档位、暂不压」这条**低成本动作**教出来——
+         * 评审原文：「想『先登记 heavy、暂不压』在工具面上做不到 ⇒ 理性选择就是别碰它」。 */
+        `**只想提前锁定档位、不想现在丢近端** ⇒ 调 ${TOOL_NAME} 时加 \`action:'set-tier'\`（+ 可选 tier）：`
+          + '**只登记档位、本次不压缩**（零压缩成本）——这是低占用期的推荐动作，登记后强制压缩也会按它执行。',
+        /* R16.14（评审建议 4）：删掉「届时无需操作」——它替模型的不作为背书。改为讲清代价。 */
+        `**「不压」的代价不是零**：占用达 ${crit} 强制压缩线时**系统会代替你压缩**——时机由系统选、`
+          + '按**那一刻**生效的档位执行（未声明档位就是 standard=16%）、摘要会把**当时已过期的事实**一并写进概要。'
+          + `⇒ 低占用时用 \`action:'set-tier'\` 声明档位，是把这份控制权提前拿回来。`,
+        /* R16.14（评审建议 3）：要求把「不压」也写成一行决策——让沉默变成可检查产物。 */
+        '**每轮留一行决策**（含不压）：`压缩决策：压｜占用 N%｜理由…` 或 `压缩决策：不压｜占用 N%｜理由…｜tier 保持 X`。',
       ].join('');
     } catch {
       return null;
@@ -276,7 +310,7 @@ export function createCompactTool(deps) {
    * 压缩会在下一步开始前落地。教学若没写清这点，模型会退回「停下等压缩」的旧习惯。
    * ⚠️ 卡片每轮（占用达标时）都出现 ⇒ 比一次性说明更该承担「先说再调用」的提醒职责。
    */
-  function renderCard({ ratio, minRatio, criticalRatio, retainRatio, retainTokens } = {}) {
+  function renderCard({ ratio, minRatio, criticalRatio, retainRatio, retainTokens, usedTokens, deltaTokens, turnsToLine } = {}) {
     try {
       if (ratio == null || ratio < minRatio) return null;
       const pct = `${(ratio * 100).toFixed(0)}%`;
@@ -292,25 +326,51 @@ export function createCompactTool(deps) {
       const keep = Number.isFinite(r) && r > 0 && Number.isFinite(t) && t > 0
         ? `近端约 ${kfmt(t)} token 原样保留（窗口 × ${Math.round(r * 100)}%），更早的转摘要；未超预算则什么都不压`
         : '近端内容原样保留，更早的转摘要；未超预算则什么都不压';
+      /* R16.14（评审建议 6）：把「压了会丢什么」变成**数字**，而不是让模型猜。
+       * 判据：当前上下文总量 ≈ ratio × window；与当前档位的保留预算比较。 */
+      const used = Number.isFinite(Number(usedTokens)) && Number(usedTokens) > 0
+        ? Number(usedTokens)
+        : (Number.isFinite(Number(ratio)) ? Math.round(Number(ratio) * (Number(retainTokens) / (Number(retainRatio) || 0.16))) : null);
+      let loss = '';
+      if (used != null && Number.isFinite(t) && t > 0) {
+        loss = used <= t
+          ? `**当前上下文 ≈${kfmt(used)} token ≤ 本档位保留预算 ${kfmt(t)} ⇒ 现在压，近端一点都不丢**（只会把更早的转摘要）。`
+          : `**当前上下文 ≈${kfmt(used)} token > 本档位保留预算 ${kfmt(t)} ⇒ 现在压会摘要掉较早的 ~${kfmt(used - t)} token 近端内容**。`;
+      }
+      /* R16.14（评审建议 2）：把「若预计会推高」从预测题变成算术题（用实测的每轮增量）。 */
+      const delta = Number(deltaTokens);
+      const trend = Number.isFinite(delta) && delta > 0
+        ? `**趋势**：本轮上下文 +${kfmt(delta)} token${Number.isFinite(Number(turnsToLine)) && Number(turnsToLine) > 0 ? `，按此速度约 **${Number(turnsToLine)} 轮**触 ${crit} 强制线` : ''}`
+          + `——若这个轮数很小，现在就是**提前声明档位的窗口期**（尤其当你后续仍要频繁引用近端细节）。`
+        : '';
       return [
         `压缩决策卡（context-pilot，当前占用 ${pct}）：先判断接下来的任务是否还依赖本轮之前的对话细节——`,
+        `• **先落一行决策**（把「不动」也变成可检查的产物，避免默认沉默）：在回复正文里写`
+          + `\`压缩决策：压｜占用 ${pct}｜理由…\` 或 \`压缩决策：不压｜占用 ${pct}｜理由…｜tier 保持 <档位>\`。`,
         `• 不依赖（换了话题/新子任务/上一阶段已收尾），或任务繁重需要预留空间：**先在回复正文里用一句话说明你要压缩的理由**`
           + `（例：「占用 ${pct}，接下来是新子任务，我先压缩再继续」），**再**调用工具 ${TOOL_NAME}（可选 reason 说明理由）。`
           + `它会让压缩在**你的下一个步骤开始前**执行，**本轮不中断**。`
           + `调用后请**直接继续当前任务**——不要为了压缩而停下、不要结束回合；之后的所有步骤都在压缩后的上下文上继续。`,
         `• 压缩档位（tier，3 选 1，可选；范围由插件按档位自算，不会切坏 tool 对）：${tierLine}`
           + `档位对本会话后续所有压缩（含 ${crit} 强制线）持续生效，直到再次改选；不传参 = 维持现状（初始 standard）。`
+          + `**想只登记档位、现在不压** ⇒ 调 ${TOOL_NAME} 时加 \`action:'set-tier'\`（零压缩成本；这是提前锁定档位的推荐路径）。`
           + `**当前占用 ${pct} ${ratio < (Number(criticalRatio) || 0.8) ? '尚在强制线之下' : '已越强制线'}——`
           + `若预计任务会推高占用，趁还在强制线之下时选定档位，越线那一刻的自动压缩就按它执行`
           + `${ratio < (Number(criticalRatio) || 0.8) ? '' : '（本次已越线，改档下一轮起生效）'}**。`
           + `（现行生效：${keep}。）`,
+        loss,
+        trend,
+        /* R16.14（评审建议 4）：删掉「届时无需操作」——那句在替模型的不作为背书。
+         * 改成把「系统代你决策」的代价讲清楚：时机不可选、档位取当时值、摘要会把过期事实写进去。 */
         `• 依赖（要引用之前给出的文件路径/结论/报错现场/长推理链中间量）：不要调用（或改用 heavy 浅压）。`
-          + `占用达 ${crit} 时系统会强制压缩（同样先自算保留范围，摘要+近期消息），无需任何操作。`,
+          + `**但要清楚「不压」的代价不是零**：占用达 ${crit} 时**系统会代替你压缩**——时机由系统选（通常在最不巧的步骤之间）、`
+          + `按**那一刻**生效的档位执行（若你从未声明档位，就是 standard=16%）、且摘要会把**当时已过期的事实**`
+          + `（旧版本号/旧结论）一并写进概要以供后续引用。想拿回这份控制权，就在低占用时用 \`action:'set-tier'\` 声明档位。`,
         `• 调用前自检：本轮关键产物（文件路径、决策、未落盘的结论）先写入文件或本回复正文，再调用压缩。`,
         `• 顺带换档（可选，缓存最优时机）：压缩会重置前缀缓存，换档也会使缓存失效——`
           + `**压缩的同一条消息里顺带调用 set_reasoning_effort 换档，缓存重建只付一次**`
           + `（任务变难升档 / 进入机械阶段降档）。不需要则忽略本条。`,
-      ].join('\n');
+      ].filter(Boolean).join('\n');
     } catch {
       return null;
     }
@@ -346,6 +406,13 @@ export function createCompactTool(deps) {
          * 实测 `unsupported JSON schema: parameters.reason.required must be true when present`
          * ⇒ 工具**静默不注册**、模型看不到它。此坑由 m3.compactTool 取证字段当场暴露
          * （若无该字段，现象只是「模型从不用这个工具」，无从定位）。 */
+        /* R16.14（评审最大杠杆项）：`action` 把「登记档位」从「立即压缩」里解耦出来——
+         * `action:'set-tier'` **只登记不压缩**，让「趁低位提前声明档位」变成一个真实的低成本动作。 */
+        action: {
+          type: 'string',
+          description: '（可选，默认 compact）动作：compact=登记并在下一步开始前压缩；'
+            + 'set-tier=**只登记档位、本次不压缩**（零压缩成本）——想在低占用时提前锁定档位、或不希望现在丢近端时用。',
+        },
         reason: {
           type: 'string',
           description: '（可选）为什么现在压缩——**同一句话也要写在你的回复正文里**，便于用户当场看到决策依据。',
@@ -364,14 +431,15 @@ export function createCompactTool(deps) {
           additionalProperties: false,
           properties: {
             ok: { type: 'boolean', required: true, description: '是否已登记压缩。' },
-            scheduled: { type: 'string', description: '执行时机，固定为 next-step（下一步开始前）。' },
+            scheduled: { type: 'string', description: '执行时机：next-step（下一步开始前压缩）；set-tier 时为空（本次不压缩）。' },
             /* R15.3（2026-10-08 真机事故）：宿主**按 output.schema 校验工具返回值**
              * （additionalProperties:false ⇒ 多一个字段就整条工具调用失败：
              * `"value.verify" is not a declared property`）⇒ 加返回字段必须同时在这里声明。 */
+            action: { type: 'string', description: '本次动作：compact（登记并压缩）或 set-tier（只登记档位，不压缩）。' },
             tier: { type: 'string', description: '本次登记并持续生效的压缩档位（light/standard/heavy）。' },
             verify: {
               type: 'string',
-              description: '自检契约：下一步开头会有「压缩自检」回执；显示未执行就再调用一次或告知用户。',
+              description: '自检契约：next-step 压缩会有「压缩自检」回执；显示未执行就再调用一次或告知用户。',
             },
             error: { type: 'string', description: '未登记时的原因。' },
           },
@@ -438,5 +506,5 @@ export function createCompactTool(deps) {
     };
   }
 
-  return { TOOL_NAME, ensure, peekIntent, takeIntent, pending, getTier, setTier, renderBrief, renderCard, diag };
+  return { TOOL_NAME, ensure, peekIntent, takeIntent, pending, getTier, hasTier, setTier, renderBrief, renderCard, diag };
 }

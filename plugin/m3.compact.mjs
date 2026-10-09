@@ -99,10 +99,14 @@ export function createM3Compaction(deps) {
       const kind = typeof src === 'string' && src.startsWith('cmd') ? 'manual' : 'engine';
       const mr = measureRatio(session);
       const ratioAfter = mr?.ok && Number.isFinite(mr.ratio) ? mr.ratio : null;
+      /* R16.14（评审建议 7）：把「系统代你决策」显性化——若本会话**从未申报档位**，
+       * 这次强制压缩用的是兜底 standard，而模型很可能以为「我没选=系统会按需要选」。
+       * 标出来才有动机在低占用时提前用 `action:'set-tier'` 声明档位。 */
+      const declared = (() => { try { return getCompactTool()?.hasTier?.(sidE) === true; } catch { return false; } })();
       const base = formatAct(kind === 'manual' ? 'engine-manual' : 'engine-auto', null);
-      const text = base + (d.error
-        ? ' · 失败'
-        : (ratioAfter != null ? ` · 压后占用 ${(ratioAfter * 100).toFixed(1)}%` : ''));
+      const text = base
+        + (declared ? '' : ' · 系统代压（本会话未申报档位 ⇒ 按兜底 standard）')
+        + (d.error ? ' · 失败' : (ratioAfter != null ? ` · 压后占用 ${(ratioAfter * 100).toFixed(1)}%` : ''));
       recordHudAct(sidE, text);
       publishHud({ hudLastAct: text });
       state.m3.engineCompacts = (state.m3.engineCompacts ?? 0) + 1;
@@ -110,7 +114,7 @@ export function createM3Compaction(deps) {
         at: new Date().toISOString(), sessionId: sidE, kind,
         sourceCommandId: src ?? null, ok: !d.error,
         error: d.error ? String(d.error).slice(0, 200) : null,
-        ratioAfter, recorded: text,
+        ratioAfter, tierDeclared: declared, recorded: text,
       };
       log('info', `M3.13 补记非插件压缩（${kind}${d.error ? '，失败' : ''}）：${text}`);
       return text;

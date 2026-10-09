@@ -592,6 +592,87 @@ ok('R16.13 文案：m5 为两种「非插件压缩」提供标签（不与「强
   /reason === 'engine-auto' \? '引擎自动压缩'/.test(m5src) && /reason === 'engine-manual' \? '手动压缩（\/compact）'/.test(m5src),
   '标签缺位 ⇒ 弹窗会显示内部枚举名或与插件自己的压缩混淆');
 
+/* R16.14（另一会话的评审意见，7 条建议）：逐条落地并验证。
+ * 最锋利的原文：「『提前登记档位』被耦合进了『立即压缩』⇒ 想先登记 heavy、暂不压做不到，
+ * 于是理性选择就是别碰它」；「只有例外路径（调用）才需要理由 ⇒ 『不压』零成本零证据，沉默胜出」。 */
+{
+  const ctMod14 = await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href);
+  const acts14 = [];
+  let spec14 = null;
+  const api14 = ctMod14.createCompactTool({
+    svc: (k) => (k === 'tools' ? { register: () => {} } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { compactToolDiag: { calls: 0 } } }, readCfg: () => ({ enabled: true, effortEnabled: true }),
+    getDefineTool: () => (sp) => { spec14 = sp; return sp; },
+    getRangeApi: () => ({ TIER_NAMES: ['light', 'standard', 'heavy'] }),
+  });
+  api14.ensure();
+  const agent14 = { session: { id: 'sess-14' }, id: 'sess-14' };
+  const run14 = (args) => spec14.execute(args, { agent: agent14 });
+  /* ① 最高杠杆：action='set-tier' 只登记档位、**不登记压缩意图** */
+  const rSet = await run14({ action: 'set-tier', tier: 'heavy', reason: '提前锁定档位' }, { agent: agent14 });
+  ok('R16.14 行为级：action=set-tier 只登记档位（scheduled:false，且不产生压缩意图）',
+    rSet?.ok === true && rSet?.scheduled === false && rSet?.action === 'set-tier'
+      && rSet?.tier === 'heavy' && api14.peekIntent('sess-14') === null
+      && /本次不压缩/.test(String(rSet?.verify)),
+    `实际：${JSON.stringify(rSet)} intent=${JSON.stringify(api14.peekIntent('sess-14'))}`);
+  ok('R16.14 行为级：set-tier 后档位真的持久生效（hasTier/getTier 都为 heavy）',
+    api14.hasTier('sess-14') === true && api14.getTier('sess-14') === 'heavy',
+    '登记未生效 ⇒ 「提前锁定档位」与宣传不符');
+  /* ② action 缺省仍是 compact（向后兼容） */
+  const rCompact = await run14({ tier: 'light' }, { agent: agent14 });
+  ok('R16.14 行为级：action 缺省 = compact（向后兼容，仍登记意图）',
+    rCompact?.ok === true && rCompact?.action === 'compact' && rCompact?.scheduled === 'next-step'
+      && api14.peekIntent('sess-14') !== null,
+    `实际：${JSON.stringify(rCompact)}`);
+  api14.takeIntent('sess-14');
+  /* ③ 决策行要求（把沉默变成可检查产物） */
+  const card14 = api14.renderCard({ ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, usedTokens: 500000 }) ?? '';
+  ok('R16.14 决策卡：要求**先落一行决策**（含「不压」这一支）',
+    /先落一行决策/.test(card14) && /压缩决策：不压/.test(card14),
+    '仍只对「调用」提要求 ⇒ 沉默仍是零成本零证据（评审原话）');
+  /* ④ 不作为的代价显式化（删掉「无需任何操作」这句替模型背书的话） */
+  ok('R16.14 决策卡：不再出现「无需任何操作」，改为讲清系统代压的代价',
+    !/无需任何操作/.test(card14) && /系统会代替你压缩/.test(card14) && /已过期的事实/.test(card14),
+    '「届时无需操作」= 替模型的不作为背书（评审点名）');
+  /* ⑤ 损失数字（评审建议 6） */
+  ok('R16.14 决策卡：给出「现在压会丢多少近端」的数字（超预算时）',
+    /保留预算 160k ⇒ 现在压会摘要掉/.test(card14),
+    '没有损失数字 ⇒ 模型只能猜、倾向不动');
+  const cardUnder14 = api14.renderCard({ ratio: 0.1, minRatio: 0.05, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, usedTokens: 100000 }) ?? '';
+  ok('R16.14 决策卡：未超预算时明确「近端一点都不丢」',
+    /近端一点都不丢/.test(cardUnder14),
+    '不说明「压了也不丢」⇒ 错失零损失压缩机会');
+  /* ⑥ 趋势算术化（评审建议 2） */
+  const cardTrend14 = api14.renderCard({ ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, usedTokens: 500000, deltaTokens: 50000, turnsToLine: 5 }) ?? '';
+  ok('R16.14 决策卡：用实测增量给出「约几轮触线」（把预测题变算术题）',
+    /本轮上下文 \+50k token/.test(cardTrend14) && /约 \*\*5 轮\*\*触/.test(cardTrend14),
+    '仍要求模型自己预测未来占用 ⇒ 该条件「从未成立」（评审实测）');
+  /* ⑦ set-tier 路径要在卡片与说明里都出现（否则模型不知道有这条低成本动作） */
+  ok('R16.14 教学：卡片与一次性说明都教 set-tier 这条低成本动作',
+    /action:'set-tier'/.test(card14) && /action:'set-tier'/.test(api14.renderBrief({ criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000 }) ?? ''),
+    '只有卡片教/或都没教 ⇒ 「提前声明档位」在工具面上仍不可达');
+  /* ⑧ 换档侧同款：档位决策行（本文件稍后才有 effApi ⇒ 这里自建一个实例） */
+  const effMod14 = await import(pathToFileURL(join(PLUGIN, 'effort.mjs')).href);
+  const eBrief14 = effMod14.createEffort({
+    svc: () => null, tryOf: (f) => ({ value: f(), error: null }), pick: (...a) => a.find((x) => x != null),
+    msg: (e) => String(e), log: () => {}, schedule: () => {}, state: { m3: {} },
+    readCfg: () => ({ enabled: true, effortEnabled: true, effortCooldownMs: 30000 }), getDefineTool: () => (sp) => sp,
+  }).renderBrief({ ok: true, current: 'high', efforts: ['low', 'high', 'max'] }) ?? '';
+  ok('R16.14 换档教学：阶段变化要留一行档位决策（含「保持」）',
+    /档位决策：保持/.test(eBrief14) && /要写出来/.test(eBrief14),
+    '换档侧仍只对「切换」提要求 ⇒ 与压缩侧同一个缺陷（评审：两次独立复现）');
+}
+const m3src14 = read('m3.compact.mjs'); // ⚠️ m3src 在本文件稍后声明 ⇒ 就地取，避免 TDZ
+ok('R16.14 接线：趋势数据（增量/触线轮数）由 m2 现算并注入卡片；m3 标注「系统代压」',
+  /const trendOf = \(sid, ratio, win, crit\) => \{/.test(m2src)
+    && /renderPolicyCard\(r\.ratio, effCrit, r\.window, trendOf\(sid, r\.ratio, r\.window, effCrit\)\)/.test(m2src)
+    && /lastUsedBySid\.set\(sid, used\)/.test(m2src)
+    && /系统代压（本会话未申报档位/.test(m3src14)
+    && /getCompactTool\(\)\?\.hasTier\?\.\(sidE\)/.test(m3src14),
+  '任一环缺位 ⇒ 趋势是空的、或「系统代压」不显性（评审建议 2/7 落不了地）');
+
 ok('投影 pending 优先显示（已选待生效提前可见）',
   /sel\.pending \|\| sel\.lastUsed/.test(client),
   '未优先取 pending ⇒ 换档后要等下一轮才显示');
@@ -1003,7 +1084,7 @@ ok('拿不到活值时不编**当前窗口的 token 数**（档位比例是常�
 ok('「保留多少」活值传进两个教学出口（读常量 + 按当前窗口现算，查 m2.inject.mjs）',
   /const ratio = getRangeApi\(\)\?\.RETAIN_RATIO \?\? null;/.test(m2src)
   && /Math\.floor\(w \* ratio\)/.test(m2src)
-  && /renderCard\(\{ ratio, minRatio: M3\.markerMinRatio, criticalRatio: crit, \.\.\.retentionTeach\(win\) \}\)/.test(m2src)
+  && /renderCard\(\{ ratio, minRatio: M3\.markerMinRatio, criticalRatio: crit, \.\.\.retentionTeach\(win\), \.\.\.\(trend \?\? \{\}\) \}\)/.test(m2src)
   && /renderBrief\(\{ criticalRatio: crit, \.\.\.retentionTeach\(win\) \}\)/.test(m2src),
   '活值没接上 ⇒ 教学与实际保留范围脱节（写死 16%/160k 会随常量与窗口漂移）');
 
@@ -1171,7 +1252,7 @@ ok('autoClamped 异步分支有 alive 守卫（写入后 + 错误分支两处）
 /* ═══ 教学必须教**生效值**（2026-10-08 实测：卡片写「占用达 80%」而实际 75%） ═══ */
 ok('决策卡/一次性说明拿到的是**生效**强制线（不是配置值）',
   /const effCrit = Math\.min\(M3\.criticalRatio, criticalCapOf\(agent\)\);/.test(m2src)
-  && /renderPolicyCard\(r\.ratio, effCrit, r\.window\)/.test(m2src) && /renderBrief\(effCrit, r\.window\)/.test(m2src),
+  && /renderPolicyCard\(r\.ratio, effCrit, r\.window, trendOf\(sid, r\.ratio, r\.window, effCrit\)\)/.test(m2src) && /renderBrief\(effCrit, r\.window\)/.test(m2src),
   '教学仍用配置值 ⇒ 教一个不会触发的数字（与门控不同源）');
 ok('两个出口都把 effCrit 落进模块参数（不是各自再读 M3.criticalRatio）',
   /* 必须数**两处**（renderPolicyCard 与 renderBrief 各一）——只匹配到一处时，

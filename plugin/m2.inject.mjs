@@ -116,13 +116,36 @@ export function createM2Injection(deps) {
    *  模型收不到卡 ⇒ 不知道标记 ⇒ 永远不写标记 ⇒ 该区间内标记通道完全不可达；
    *  且若 markerMinRatio > 卡门槛则反向错配（教了却不执行）。现统一为同一门槛。
    *  ⚠️ 门槛名里的 `marker` 是**历史遗留**：文本标记通道已退役，这个字段现在只是「决策卡注入门槛」。 */
-  const renderPolicyCard = (ratio, effCrit, win) => {
+  const renderPolicyCard = (ratio, effCrit, win, trend) => {
     try {
       const api = getCompactToolApi();
       if (!api) { warnTeachOnce('压缩教学模块未就绪：决策卡与一次性说明本次为空（模型将看不到压缩工具的用法）'); return null; }
       const crit = Number.isFinite(effCrit) ? effCrit : M3.criticalRatio;
-      return api.renderCard({ ratio, minRatio: M3.markerMinRatio, criticalRatio: crit, ...retentionTeach(win) });
+      return api.renderCard({ ratio, minRatio: M3.markerMinRatio, criticalRatio: crit, ...retentionTeach(win), ...(trend ?? {}) });
     } catch (e) { warnTeachOnce(`决策卡渲染异常：${msg(e)}`); return null; }
+  };
+
+  /* R16.14（另一会话评审建议 2）：把「若预计会推高」从**预测题**变成**算术题**——
+   * 记录每会话上一轮的上下文总量，算出「本轮增量」与「按此速度还有几轮触强制线」。
+   * 评审原文：「我无法估算后面几步会产生多少 token，每轮的占用百分比都是事后给的。
+   * 这个条件在我这里从未成立。」⇒ 用实测增量替代预测。 */
+  const lastUsedBySid = new Map();
+  const trendOf = (sid, ratio, win, crit) => {
+    try {
+      if (!Number.isFinite(ratio) || !Number.isFinite(win) || win <= 0) return {};
+      const used = Math.round(ratio * win);
+      const prev = lastUsedBySid.get(sid);
+      lastUsedBySid.set(sid, used);
+      if (lastUsedBySid.size > 64) { // 有界化：只保留最近 64 个会话
+        const oldest = lastUsedBySid.keys().next().value;
+        if (oldest !== sid) lastUsedBySid.delete(oldest);
+      }
+      const delta = prev == null ? null : used - prev;
+      const turnsToLine = Number.isFinite(delta) && delta > 0 && Number.isFinite(crit) && ratio < crit
+        ? Math.ceil(((crit - ratio) * win) / delta)
+        : null;
+      return { usedTokens: used, deltaTokens: Number.isFinite(delta) ? delta : null, turnsToLine };
+    } catch { return {}; }
   };
 
   /* ---- 一次性插件说明：让任何新会话的 Agent 不靠外部文档就明白压缩流程与用法 ----
@@ -255,8 +278,9 @@ export function createM2Injection(deps) {
       /* 强制压缩线的**生效值**（= min(配置, 引擎阈值 − 5pp)）——教学与决策卡都必须教这个数，
        * 教配置值会让模型以为 80% 才触发（实际 75%）。与 pre-step/idle 门控同源。 */
       const effCrit = Math.min(M3.criticalRatio, criticalCapOf(agent));
-      const card = renderPolicyCard(r.ratio, effCrit, r.window); // M3.5 通道2：政策卡（相关占用以上才出现）
       const sid = String(pick(agent.session.id, agent.sessionId, 'unknown'));
+      /* R16.14：先用**实测的每轮增量**算趋势，再渲染卡片（评审建议 2：把预测题变算术题）。 */
+      const card = renderPolicyCard(r.ratio, effCrit, r.window, trendOf(sid, r.ratio, r.window, effCrit)); // M3.5 通道2：政策卡（相关占用以上才出现）
       /* 智能思考：**独立门控**（effortEnabled），与压缩的 markerMinRatio 完全解耦——
        * 用户明确要求「全程允许」：低占用也必须能注入/换档（压缩的卡在低占用时是不注入的）。 */
       const effortApi = getEffortApi();
