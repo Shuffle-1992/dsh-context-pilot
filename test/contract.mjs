@@ -12,7 +12,7 @@
  * 用法：node test/contract.mjs
  * 退出码：0 = 全通过；1 = 有漂移
  */
-import { readFileSync, statSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, statSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -814,6 +814,60 @@ ok('R16.14 接线：趋势数据（增量/触线轮数）由 m2 现算并注入�
     /若先声明 heavy（保留 240k）：只丢 ~/.test(cardTrend16) && /少丢 ~/.test(cardTrend16),
     '只给当前档位的损失 ⇒ set-tier 的收益仍是抽象（评审剩项三）');
   rmSync(tmp16, { recursive: true, force: true });
+}
+
+/* R16.17（第三轮评审的「剩余轻量项」第 1 条，唯一可执行项）：
+ * 「compact-tier.json 无 TTL/无清理 ⇒ 长期累积（每个见过的会话一条）。你们已有 lastUsedBySid
+ *  保留最近 64 条的先例 ⇒ 复用即可（或按 at 老化）」。
+ * 采用**按 at 保留最近 64**（而非按时间老化）：档位是会话级长期偏好，久未压缩的老会话
+ * 不该因为「几天没动」就丢掉已声明的档位。（另两条建议是它主动确认「设计正确、不用改」。） */
+{
+  const ctMod17 = await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href);
+  ok('R16.17 常量：档位落盘有会话数上限（TIER_SID_CAP = 64，与 lastUsedBySid 同款先例）',
+    ctMod17.TIER_SID_CAP === 64, `实际 ${JSON.stringify(ctMod17.TIER_SID_CAP)}`);
+  const tmp17 = mkdtempSync(join(tmpdir(), 'dcp-tiercap-'));
+  const mk17 = (dir) => ctMod17.createCompactTool({
+    svc: (k) => (k === 'tools' ? { register: () => {} } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { compactToolDiag: { calls: 0 } } }, readCfg: () => ({ enabled: true }),
+    getDefineTool: () => (sp) => sp, getRangeApi: () => ({ TIER_NAMES: ['light', 'standard', 'heavy'] }), pluginDir: dir,
+  });
+  const api17 = mk17(tmp17);
+  /* 登记 70 个会话（远超上限）——最后一次登记之后，落盘只应保留最近 64 个 */
+  for (let i = 0; i < 70; i += 1) api17.setTier(`cap-sid-${String(i).padStart(3, '0')}`, i % 2 === 0 ? 'heavy' : 'light');
+  const file = join(tmp17, '.data', 'compact-tier.json');
+  const persisted = JSON.parse(readFileSync(file, 'utf8'));
+  const keys = Object.keys(persisted.bySid ?? {});
+  /* ⚠️ R16.17 静态契约：为什么不能只按 `at` 排序——
+   * `at` 只有毫秒精度，同一毫秒内连续登记时「保留最新」会退化成**不确定**
+   * （实测：改用 Map 位置当断链时，间歇性把旧会话留下、丢掉新会话）。
+   * ⇒ 必须存在**显式单调序号**与它的降序断链；行为级测试在正常路径下覆盖不到这个抖动。 */
+  const ctSrc17 = read('compact-tool.mjs');
+  ok('R16.17 静态：档位裁剪用**显式单调序号**做确定性断链（不依赖 at 精度 / Map 位置）',
+    /let tierSeq = 0;/.test(ctSrc17)
+      && /tierSeq \+= 1;/.test(ctSrc17)
+      && /Number\(b\.v\?\.seq\) \|\| 0\) - \(Number\(a\.v\?\.seq\) \|\| 0\)/.test(ctSrc17)
+      && /seq: v\.seq \?\? 0/.test(ctSrc17),
+    '缺单调序号/断链 ⇒ 同毫秒登记时「保留最新」不确定（间歇性丢新留旧）');
+  ok('R16.17 静态：载入与写盘都带上 seq（跨重载仍可比较新旧）',
+    /seq: Number\(v\.seq\) \|\| 0, restored: true/.test(ctSrc17) && /if \(Number\(v\.seq\) > tierSeq\) tierSeq = Number\(v\.seq\);/.test(ctSrc17),
+    '只内存带 seq ⇒ 重载后新旧不可比，裁剪再次不确定');
+  ok('R16.17 行为级：落盘被有界化（70 个会话 ⇒ 至多 64 条）',
+    keys.length <= 64 && keys.length > 0,
+    `实际落盘 ${keys.length} 条（应 ≤64）`);
+  ok('R16.17 行为级：有界化**保留最新**（最老的两个会话被淘汰，最新的仍在）',
+    !keys.includes('cap-sid-000') && !keys.includes('cap-sid-005') && keys.includes('cap-sid-069'),
+    `keys[0..2]=${keys.slice(0, 3).join(',')} 末位=${keys[keys.length - 1]}`);
+  /* 载入侧收敛：手工写一个超限文件，新实例载入后内存表也必须 ≤64 */
+  const big = { version: 1, bySid: {} };
+  for (let i = 0; i < 80; i += 1) big.bySid[`old-${String(i).padStart(3, '0')}`] = { tier: 'heavy', at: 1000 + i };
+  writeFileSync(file, JSON.stringify(big));
+  const api17b = mk17(tmp17);
+  const kept = Array.from({ length: 80 }, (_, i) => `old-${String(i).padStart(3, '0')}`).filter((k) => api17b.hasTier(k)).length;
+  ok('R16.17 行为级：载入超限文件时**内存表也收敛**到 ≤64（不会把历史全带进来）',
+    kept <= 64 && kept > 0, `实际载入 ${kept} 条`);
+  rmSync(tmp17, { recursive: true, force: true });
 }
 
 ok('投影 pending 优先显示（已选待生效提前可见）',

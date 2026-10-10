@@ -44,6 +44,13 @@ export const TOOL_NAME = 'compact_context';
 /** 意图存活期：登记后超过此时长仍未被 pre-step 消费则作废（防陈旧意图在下一次任务里突然触发）。 */
 export const INTENT_TTL_MS = 120_000;
 
+/** R16.17（第三轮评审的剩余轻量项）：档位落盘的**会话数上限**。
+ * 评审原文：「compact-tier.json 无 TTL/无清理 ⇒ 长期累积（每个见过的会话一条）。
+ * 你们已有 `lastUsedBySid` 保留最近 64 条的先例 ⇒ 复用即可。」
+ * 采用**按 at 保留最近 N 条**（而非按时间老化）——档位是会话级长期偏好，
+ * 一个久未压缩的老会话不该因为「几天没动」就丢掉已声明的档位。 */
+export const TIER_SID_CAP = 64;
+
 export function createCompactTool(deps) {
   const { svc, tryOf, pick, msg, log, schedule, state, readCfg, getDefineTool, getRangeApi, pluginDir } = deps;
 
@@ -52,6 +59,26 @@ export function createCompactTool(deps) {
    * 「standard（兜底，本会话从未登记）」；触发条件恰好是本插件的部署方式（toggle）。
    * 与 effort 的 effort-stats.json 同款（读/写吞错 + mkdirSync），键=sid，值={tier, at}。 */
   const tierPath = pluginDir ? join(pluginDir, '.data', 'compact-tier.json') : null;
+  /* ⚠️ R16.17：用**显式单调序号**而不是「Map 里的位置」判断新旧——
+   * 每次 prune 都会重排 Map，位置语义随即失效（实测：间歇性地把旧会话留下、丢掉新会话）。 */
+  let tierSeq = 0;
+  /* R16.17：**有界化**——只保留最近 TIER_SID_CAP 个会话（按 at），防长期累积。
+   * 返回被淘汰的条数（>0 时调用方决定是否立刻回写收敛文件）。 */
+  const pruneTiers = (map) => {
+    try {
+      if (map.size <= TIER_SID_CAP) return 0;
+      /* ⚠️ R16.17：`at` 只有毫秒精度，同一毫秒内连续登记（真机/测试都可能）会让「保留最新」
+       * 退化成「保留最早」（Array.sort 稳定 ⇒ 等键按插入序）。故显式加**插入序断链**：
+       * 同 at 时后插入者视为更新 ⇒ 结果确定且符合语义。 */
+      const sorted = [...map.entries()]
+        .map(([k, v]) => ({ k, v }))
+        .sort((a, b) => ((Number(b.v?.at) || 0) - (Number(a.v?.at) || 0)) || ((Number(b.v?.seq) || 0) - (Number(a.v?.seq) || 0)));
+      const keep = sorted.slice(0, TIER_SID_CAP);
+      map.clear();
+      for (const { k, v } of keep) map.set(k, v);
+      return sorted.length - keep.length;
+    } catch { return 0; }
+  };
   const loadTiers = () => {
     const out = new Map();
     try {
@@ -60,8 +87,16 @@ export function createCompactTool(deps) {
       const j = JSON.parse(raw.replace(/^\uFEFF/, ''));
       if (j && typeof j === 'object' && j.bySid && typeof j.bySid === 'object') {
         for (const [sid, v] of Object.entries(j.bySid)) {
-          if (v && typeof v.tier === 'string') out.set(sid, { tier: v.tier, at: Number(v.at) || 0, restored: true });
+          if (v && typeof v.tier === 'string') {
+            out.set(sid, { tier: v.tier, at: Number(v.at) || 0, seq: Number(v.seq) || 0, restored: true });
+            if (Number(v.seq) > tierSeq) tierSeq = Number(v.seq); // 续号，避免与历史序号撞车
+          }
         }
+      }
+      /* 载入即收敛（老文件可能已经超限）；被淘汰条数留痕供报告核查。 */
+      const dropped = pruneTiers(out);
+      if (dropped > 0) {
+        try { state.m3.tierPruned = { at: new Date().toISOString(), dropped, loaded: out.size }; } catch { /* 吞 */ }
       }
     } catch (e) {
       if (e?.code !== 'ENOENT') log('warn', `compact-tier.json 读取失败（忽略，按未登记）：${msg(e)}`);
@@ -73,7 +108,7 @@ export function createCompactTool(deps) {
       if (!tierPath) return;
       mkdirSync(dirname(tierPath), { recursive: true });
       const bySidOut = {};
-      for (const [sid, v] of tierBySid) bySidOut[sid] = { tier: v.tier, at: v.at ?? 0 };
+      for (const [sid, v] of tierBySid) bySidOut[sid] = { tier: v.tier, at: v.at ?? 0, seq: v.seq ?? 0 };
       writeFileSync(tierPath, JSON.stringify({ version: 1, savedAt: new Date().toISOString(), bySid: bySidOut }, null, 2));
     } catch (e) {
       log('warn', `compact-tier.json 写入失败（吞）：${msg(e)}`);
@@ -149,11 +184,17 @@ export function createCompactTool(deps) {
    * 未选 ⇒ standard（16%）兜底。⇒ 档位是**会话级持久选择**：登记后一直生效，
    * 直到 Agent 再次改选。与「意图」（一次性、有 TTL）分开存。 */
 
-  /** 登记/更新会话档位（入参已由 normTier 规范化）。R16.16：**同时落盘**（跨 toggle/重启有效）。 */
+  /** 登记/更新会话档位（入参已由 normTier 规范化）。R16.16：**同时落盘**（跨 toggle/重启有效）。
+   * R16.17：写入前有界化（只保留最近 TIER_SID_CAP 个会话）。 */
   function setTier(sid, tier) {
     const key = String(sid ?? '');
     if (!key) return;
-    tierBySid.set(key, { tier, at: Date.now(), restored: false });
+    tierSeq += 1;
+    tierBySid.set(key, { tier, at: Date.now(), seq: tierSeq, restored: false });
+    const dropped = pruneTiers(tierBySid);
+    if (dropped > 0) {
+      try { state.m3.tierPrunedAtSave = { at: new Date().toISOString(), dropped, size: tierBySid.size }; } catch { /* 吞 */ }
+    }
     saveTiers();
   }
 
