@@ -2046,3 +2046,42 @@ Error: tool "compact_context" returned invalid output: "value.scheduled" must be
 新增 5 条（3 行为级 + 2 静态）；**变异 3/3 CAUGHT**（去掉有界化 / 退回仅按 at / 去掉序号计数）。
 
 **部署**：compact-tool.mjs —— toggle 热换。
+
+### R16.18 「上一轮 67% 说不压，新一轮却自动压了」—— 引擎在 step 边界抢先（2026-10-10）
+
+**用户报告两件事**：① 那个会话刚触发一次压缩，但「记录里没看到」；② 上一轮 67% 决定不压，
+可是发起新一轮任务时就自动压缩了。
+
+**取证一：记录其实落了**（R16.13 的补记生效）——
+`hud-acts.json` 首条：`2026-10-10T05:15:39Z 70a55b1a | 13:15 · 引擎自动压缩 · 压后占用 29.6%`
+（用户未在当时看到，属面板 5s 轮询/刷新时机问题；记录本身在）。
+
+**取证二：压缩原因 = 引擎在 **step 边界** 抢先**（会话日志 + 引擎源码双证据）：
+```
+05:13:34 turn/start turn=47（用户发起新一轮）→ s1..s14 连续执行
+05:15:14.234 step/end s14
+05:15:14.282 compaction/start turn=47 src=engine   ← 48ms 后引擎触发
+05:15:39.911 compaction/end（压后 29.6%）
+05:15:39.935 step/start s15 → 这之后才轮到插件 pre-step
+```
+引擎源码 `resolveCompactSpec`：`thresholdTokens = min(窗口 × thresholdRatio(80%), 预算)`，
+判定发生在**每个 step 边界**且该 seam **排在插件 pre-step 之前** ⇒
+只要**单个 step 的增量**把占用从「低于我方线（引擎阈值 −5pp = 75%）」推到 ≥80%，我们必然输掉这场比赛
+（实测该会话单步可加 6pp+）。这正是用户看到的「67% 说不压、新一轮自动压」。
+
+**修（R16.18）**：
+1. **动态余量**：pre-step 每次测量都采一条比例样本（每会话 ≤12 条、会话数 ≤64，有界化），
+   用**实测单步最大增量**算余量 `margin = clamp(5pp, 20pp, maxStep)`，
+   我们的线重算为 `min(M3.criticalRatio, criticalCapOf, engineThreshold − margin)`
+   ⇒ 总在「引擎可能到线的那一步之前」触发，档位/范围由我们说了算（而非引擎兜底 standard）。
+   `engineThreshold` 由宿主注入（**阈值核心同源**，不抄常量）。
+2. **记录里标注「引擎抢先」**：补记文案追加
+   `· 引擎抢先：我方上次估计 67.2% ＜ 我方线 75%（引擎在 step 边界判定，排在插件之前）`，
+   并在 `lastEngineCompact` 留 `preempted/ourLastRatio/ourLine` 三个取证字段
+   ⇒ 这类问题下次**一眼可见**，不必再翻会话日志。
+
+**验证**：contract 442 + static 61 + report 54 + boot 21 = **578 断言**全绿；
+新增 5 条（3 静态 + 2 行为级）；**变异 4/4 CAUGHT**
+（余量写死 5pp / 不采比例样本 / 去掉抢先取证 / host 不注入 engineThreshold）。
+
+**部署**：m3.compact.mjs / host.impl.mjs —— toggle 热换。

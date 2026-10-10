@@ -29,7 +29,7 @@
 export function createM3Compaction(deps) {
   const {
     /* 只读依赖 */
-    svc, tryOf, state, M3, effEnabled, criticalCapOf, resolveCompactionFor,
+    svc, tryOf, state, M3, effEnabled, criticalCapOf, engineThreshold, resolveCompactionFor,
     /* 工具 */
     log, msg, pick, nfmt, errCodeOf, schedule,
     /* 跨域回调（R10：由宿主显式注入，不再靠闭包穿透） */
@@ -58,6 +58,30 @@ export function createM3Compaction(deps) {
     const window = pressureRec?.contextWindow ?? null;
     const ratio = window && used != null ? used / window : null;
     return { ok: true, used, surface, window, ratio, measure: m.value };
+  };
+
+  /* ═══ R16.18：比例历史（动态余量的输入） ═══
+   * 每次 pre-step 测量都记一条 ⇒ 用「单步最大增量」估计一步能涨多少（决定余量）。
+   * 有界化：每会话 ≤ RATIO_HIST_CAP 条、会话数 ≤ RATIO_SID_CAP（防长期累积，同 tierBySid 先例）。 */
+  const RATIO_HIST_CAP = 12;
+  const RATIO_SID_CAP = 64;
+  const recordRatioSample = (sid, ratio, mr) => {
+    try {
+      state.m3.ratioHist = state.m3.ratioHist ?? {};
+      const hist = state.m3.ratioHist[sid] ?? [];
+      hist.push({ at: Date.now(), ratio, used: mr?.used ?? null });
+      while (hist.length > RATIO_HIST_CAP) hist.shift();
+      state.m3.ratioHist[sid] = hist;
+      const keys = Object.keys(state.m3.ratioHist);
+      if (keys.length > RATIO_SID_CAP) {
+        const oldest = keys.reduce((a, b) => {
+          const ta = state.m3.ratioHist[a]?.[state.m3.ratioHist[a].length - 1]?.at ?? 0;
+          const tb = state.m3.ratioHist[b]?.[state.m3.ratioHist[b].length - 1]?.at ?? 0;
+          return ta <= tb ? a : b;
+        });
+        if (oldest !== sid) delete state.m3.ratioHist[oldest];
+      }
+    } catch { /* 吞 */ }
   };
 
   /* ═══ R16.13：我们自己的压缩「在飞标记」（区分事件流里的自己 vs 引擎）═══
@@ -103,9 +127,22 @@ export function createM3Compaction(deps) {
        * 这次强制压缩用的是兜底 standard，而模型很可能以为「我没选=系统会按需要选」。
        * 标出来才有动机在低占用时提前用 `action:'set-tier'` 声明档位。 */
       const declared = (() => { try { return getCompactTool()?.hasTier?.(sidE) === true; } catch { return false; } })();
+      /* R16.18：把「引擎为什么抢先」写进记录——真机问题是「上一轮 67% 说不压，新一轮却自动压了」，
+       * 根因是引擎在 **step 边界** 按自己的阈值判定、且排在插件 pre-step 之前。
+       * 附上**我方上一次估计**与**我方当时的线**，一眼可判「是不是被抢先」。 */
+      const lastSeen = (() => {
+        try {
+          const hist = state.m3.ratioHist?.[sidE];
+          const v = Array.isArray(hist) && hist.length ? hist[hist.length - 1].ratio : null;
+          return Number.isFinite(v) ? v : null;
+        } catch { return null; }
+      })();
+      const ourLine = (() => { try { const c = criticalCapOf({ session: { id: sidE } }); return Number.isFinite(c) ? c : null; } catch { return null; } })();
+      const preempted = Number.isFinite(lastSeen) && Number.isFinite(ourLine) && lastSeen < ourLine;
       const base = formatAct(kind === 'manual' ? 'engine-manual' : 'engine-auto', null);
       const text = base
         + (declared ? '' : ' · 系统代压（本会话未申报档位 ⇒ 按兜底 standard）')
+        + (preempted ? ` · 引擎抢先：我方上次估计 ${(Number(lastSeen) * 100).toFixed(1)}% ＜ 我方线 ${(Number(ourLine) * 100).toFixed(0)}%（引擎在 step 边界判定，排在插件之前）` : '')
         + (d.error ? ' · 失败' : (ratioAfter != null ? ` · 压后占用 ${(ratioAfter * 100).toFixed(1)}%` : ''));
       recordHudAct(sidE, text);
       publishHud({ hudLastAct: text });
@@ -114,7 +151,10 @@ export function createM3Compaction(deps) {
         at: new Date().toISOString(), sessionId: sidE, kind,
         sourceCommandId: src ?? null, ok: !d.error,
         error: d.error ? String(d.error).slice(0, 200) : null,
-        ratioAfter, tierDeclared: declared, recorded: text,
+        ratioAfter, tierDeclared: declared, preempted: !!preempted,
+        ourLastRatio: Number.isFinite(lastSeen) ? +(Number(lastSeen) * 100).toFixed(1) : null,
+        ourLine: Number.isFinite(ourLine) ? +(Number(ourLine) * 100).toFixed(0) : null,
+        recorded: text,
       };
       log('info', `M3.13 补记非插件压缩（${kind}${d.error ? '，失败' : ''}）：${text}`);
       return text;
@@ -266,6 +306,16 @@ export function createM3Compaction(deps) {
       const mr = measureRatio(agent.session); // B2：读取收敛
       if (!mr.ok || mr.ratio == null) return;
       const ratio = mr.ratio;
+      /* ═══ R16.18：**动态余量**——修「引擎在 step 边界抢先压缩」 ═══
+       * 真机取证（session-70a55b1a turn 47）：用户在 67% 时按卡决定不压，但新一轮里
+       * 05:15:14 `step/end s14` 之后 48ms，**引擎**就触发了压缩（`compaction/start turn=47 src=engine`），
+       * 而我们的 pre-step 要到 `step/start s15`（05:15:39）才轮到 ⇒ 我们那一步看到的仍是 <75%。
+       * 机制（引擎源码 `resolveCompactSpec`）：引擎在**每个 step 边界**按 `min(窗口×80%, 预算)` 判定，
+       * 且在同一 seam 里**排在我们的 pre-step 之前** ⇒ 只要**单个 step 的增量**把占用从「低于我方线」
+       * 推到 ≥80%，我们必然输掉这场比赛（实测该会话单步可加 6pp+）。
+       * 修法：用**实测的单步最大增量**把我们的线提前：margin = clamp(5pp, 20pp, 单步最大增量)。
+       * 这样我们总在「引擎可能到线的那一步之前」触发，档位/范围由我们说了算（而非引擎兜底 standard）。 */
+      recordRatioSample(sid, ratio, mr);
       /* ═══ R4（2026-10-08）：模型主动登记「下一步压缩」意图 ⇒ 轮内执行，本轮无缝继续 ═══
        * 这是替代「marker + 伪造恢复消息」的核心：工具调用必然产生下一步 ⇒ 下一步的 pre-step
        * 就在这里执行压缩 ⇒ 之后的步骤都在压缩后的上下文上继续，**不需要任何消息**。
@@ -285,7 +335,26 @@ export function createM3Compaction(deps) {
       }
       /* C-own：生效强制线 = min(用户配置, 引擎阈值 − 5pp)——插件线必须**确定性地先行**，
        * 引擎只是插件关闭/卸载后的安全网。 */
-      const effCritical = Math.min(M3.criticalRatio, criticalCapOf(agent));
+      /* R16.18：**动态余量**——把我们的线提前到「引擎可能到线的那一步之前」。
+       * 引擎在 step 边界按 engineThreshold(=窗口×80%) 判定且排在我们的 pre-step 之前，
+       * 单步增量一大我们就输（真机：s14→s15 之间引擎抢先压）。margin = clamp(5pp, 20pp, 单步最大增量)。 */
+      const effCritical = (() => {
+        const cap = criticalCapOf(agent);
+        try {
+          const eth = typeof engineThreshold === 'function' ? engineThreshold(agent) : null;
+          if (!Number.isFinite(eth)) return Math.min(M3.criticalRatio, cap);
+          const hist = state.m3.ratioHist?.[sid];
+          let maxStep = 0;
+          if (Array.isArray(hist)) {
+            for (let i = 1; i < hist.length; i += 1) {
+              const d = hist[i].ratio - hist[i - 1].ratio;
+              if (d > maxStep) maxStep = d;
+            }
+          }
+          const margin = Math.min(0.20, Math.max(0.05, maxStep));
+          return Math.min(M3.criticalRatio, cap, Math.max(0, eth - margin));
+        } catch { return Math.min(M3.criticalRatio, cap); }
+      })();
       if (!wanted && ratio < effCritical) return;
       const compaction = resolveCompactionFor(agent);
       if (!compaction.service) {

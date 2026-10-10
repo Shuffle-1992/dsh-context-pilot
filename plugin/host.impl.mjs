@@ -332,7 +332,7 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
   const m3Ready = import(`./m3.compact.mjs?ts=${IMPL_TS}`)
     .then((m) => {
       m3Ctl = m.createM3Compaction({
-        svc, tryOf, state, M3, effEnabled, criticalCapOf, resolveCompactionFor,
+        svc, tryOf, state, M3, effEnabled, criticalCapOf, engineThreshold, resolveCompactionFor,
         log, msg, pick, nfmt, errCodeOf, schedule,
         publishHud, recordHudAct, formatAct, clearBriefed,
         /* range 模块与压缩工具的生命周期都由宿主拥有 ⇒ 交给模块 async 取用口。 */

@@ -870,6 +870,54 @@ ok('R16.14 接线：趋势数据（增量/触线轮数）由 m2 现算并注入�
   rmSync(tmp17, { recursive: true, force: true });
 }
 
+/* R16.18（用户实测：「上一轮 67% 说不压，新一轮却自动压好了」）：
+ * 真机取证（session-70a55b1a turn 47）：05:13:34 turn/start → s1..s14；
+ * 05:15:14.234 step/end s14 → 48ms 后 **compaction/start turn=47 src=engine** → 05:15:39 end；
+ * 轮到插件 pre-step（step/start s15）已是 05:15:39.935。
+ * 机制（引擎源码 resolveCompactSpec）：引擎在**每个 step 边界**按 min(窗口×80%, 预算) 判定，
+ * 且该 seam 排在插件 pre-step 之前 ⇒ 只要**单步增量**把占用从「低于我方线」推到 ≥80%，我们必输。
+ * 修：动态余量（用实测单步最大增量把我们的线提前）+ 记录里标注「引擎抢先」。 */
+{
+  const m3Src18 = read('m3.compact.mjs');
+  ok('R16.18 静态：pre-step 采比例样本（动态余量的输入）且有界化',
+    /const recordRatioSample = \(sid, ratio, mr\) =>/.test(m3Src18)
+      && /RATIO_HIST_CAP = 12/.test(m3Src18) && /RATIO_SID_CAP = 64/.test(m3Src18)
+      && /recordRatioSample\(sid, ratio, mr\);/.test(m3Src18),
+    '缺比例历史 ⇒ 无法估计「一步能涨多少」，余量只能写死 5pp（引擎仍会抢先）');
+  ok('R16.18 静态：动态余量 = clamp(5pp, 20pp, 单步最大增量)，并用 engineThreshold 重算线',
+    /const margin = Math\.min\(0\.20, Math\.max\(0\.05, maxStep\)\);/.test(m3Src18)
+      && /Math\.max\(0, eth - margin\)/.test(m3Src18)
+      && /engineThreshold\(agent\)/.test(m3Src18),
+    '仍写死 5pp 余量 ⇒ 单步增量大于 5pp 时引擎必然抢在我们前面');
+  ok('R16.18 静态：host 向 m3 注入 engineThreshold（阈值核心同源，不抄常量）',
+    /effEnabled, criticalCapOf, engineThreshold, resolveCompactionFor,/.test(host),
+    'm3 拿不到引擎阈值 ⇒ 只能自己猜，违反「单一上限函数」纪律');
+  /* 行为级：引擎抢先时，记录文案要带「我方上次估计 ＜ 我方线」，让原因一眼可见 */
+  const m3Mod18 = await import(pathToFileURL(join(PLUGIN, 'm3.compact.mjs')).href);
+  const st18 = { m3: { ratioHist: { 'sess-18': [{ at: 1, ratio: 0.672 }] } } };
+  const acts18 = [];
+  const huds18 = [];
+  const m3x18 = m3Mod18.createM3Compaction({
+    state: st18, log: () => {}, msg: (e) => String(e?.message ?? e), pick: (...a) => a.find((x) => x != null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    nfmt: (n) => String(n), errCodeOf: (e) => String(e?.code ?? 'err'), schedule: () => {},
+    svc: () => null, M3: {}, effEnabled: () => true, criticalCapOf: () => 0.75, engineThreshold: () => 0.8,
+    resolveCompactionFor: () => ({ service: null, via: 'stub' }),
+    publishHud: (p) => huds18.push(p), recordHudAct: (sid, text) => acts18.push({ sid, text }),
+    formatAct: (reason) => 'hh:mm · ' + ({ 'engine-auto': '引擎自动压缩', 'engine-manual': '手动压缩' }[reason] ?? String(reason)),
+    clearBriefed: () => {}, awaitRange: async () => null, getCompactTool: () => null,
+    COMPACT_TIMEOUT_MS: 180000, SET_CAP: 200,
+  });
+  const sess18 = { id: 'sess-18', surface: [], eventAt: () => null };
+  const t18 = m3x18.noteEngineCompaction?.({ type: 'compaction/end', data: { compactionId: 'c18', turn: 47 } }, sess18);
+  ok('R16.18 行为级：引擎抢先时，记录里写明「我方上次估计 X% ＜ 我方线 Y%」',
+    typeof t18 === 'string' && /引擎抢先：我方上次估计 67\.2% ＜ 我方线 75%/.test(t18),
+    `实际：${JSON.stringify(t18)}`);
+  ok('R16.18 行为级：该取证也进 lastEngineCompact（preempted / ourLastRatio / ourLine）',
+    st18.m3.lastEngineCompact?.preempted === true && st18.m3.lastEngineCompact?.ourLastRatio === 67.2,
+    `实际：${JSON.stringify(st18.m3.lastEngineCompact)}`);
+}
+
 ok('投影 pending 优先显示（已选待生效提前可见）',
   /sel\.pending \|\| sel\.lastUsed/.test(client),
   '未优先取 pending ⇒ 换档后要等下一轮才显示');
@@ -1345,7 +1393,8 @@ ok('生效上限抽成单一来源 criticalCapOf（= 引擎阈值 − 余量，�
   '未抽单一上限函数 ⇒ 三处门控各写一遍必然漂移');
 /* R10：两条门控随编排层搬进 plugin/m3.compact.mjs ⇒ 断言改查模块；宿主只保留 getHud 下发点。 */
 for (const [label, re, src] of [
-  ['pre-step 门控（m3.compact.mjs）', /const effCritical = Math\.min\(M3\.criticalRatio, criticalCapOf\(agent\)\);/, m3src],
+  /* R16.18：pre-step 门控改为「criticalCapOf + 动态余量」的 IIFE（仍是同一上限函数来源）。 */
+  ['pre-step 门控（m3.compact.mjs）', /const effCritical = \(\(\) => \{[\s\S]{0,900}criticalCapOf\(agent\)[\s\S]{0,900}engineThreshold\(agent\)[\s\S]{0,900}\}\)\(\);/, m3src],
   ['idle safety-net 门控（m3.compact.mjs）', /if \(mr\.ratio < Math\.min\(M3\.criticalRatio, criticalCapOf\(agent\)\)\) return;/, m3src],
   ['getHud 下发（m5.hud.mjs）', /criticalCap: criticalCapOf\(targetAgent\),/, m5src],
 ]) {
