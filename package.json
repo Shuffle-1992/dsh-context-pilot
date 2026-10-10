@@ -23,7 +23,11 @@
     "llm-agent"
   ],
   "files": [
-    "plugin",
+    "plugin/*.mjs",
+    "plugin/*.js",
+    "plugin/*.json",
+    "plugin/*.yml",
+    "plugin/*.svg",
     "README.md",
     "LICENSE"
   ],

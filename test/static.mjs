@@ -254,6 +254,18 @@ ok('开发挂载仍完整：plugin/package.json 有 dsh.bundle.patch（缺则 no
   ok('无残留双身份文件：cordis.patch.public.yml 已删除（单身份后不需要）',
     !existsSync(join(PLUGIN, 'cordis.patch.public.yml')), '仍存在 public patch ⇒ 两套身份容易再次漂移');
 }
+/* 发布卫生：`files` 不得整目录收 `plugin`（会把 `.data/` 的工作数据——探针脚本 + 1.5MB 报告——打进包），
+ * 且必须有 plugin/.npmignore 兜底（npm 的 files 白名单内仍受嵌套 .npmignore 约束）。
+ * 真机教训：dry-run 里首次看到 `plugin/.data/m1-report.json 1.5MB` 才发现的。 */
+{
+  const filesList = Array.isArray(rootPkg.files) ? rootPkg.files : [];
+  ok('发布卫生：files 用精确 glob（不收整个 plugin/，避免把 .data 工作数据打进包）',
+    filesList.length > 0 && !filesList.includes('plugin') && !filesList.includes('plugin/')
+      && filesList.some((f) => f.startsWith('plugin/*.mjs'))
+      && existsSync(join(PLUGIN, '.npmignore'))
+      && /\.data\//.test(readFileSync(join(PLUGIN, '.npmignore'), 'utf8')),
+    `files=${JSON.stringify(filesList)}（不得含裸 plugin）`);
+}
 ok('版本一致：根与 plugin 清单的 version 相同（避免市场显示错版本）',
   rootPkg.version === plugPkg.version, `root=${rootPkg.version} plugin=${plugPkg.version}`);
 ok('README 含可直接复制的安装命令（市场要求）',
