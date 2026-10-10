@@ -647,7 +647,7 @@ ok('R16.13 文案：m5 为两种「非插件压缩」提供标签（不与「强
   /* ⑥ 趋势算术化（评审建议 2） */
   const cardTrend14 = api14.renderCard({ ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, usedTokens: 500000, deltaTokens: 50000, turnsToLine: 5 }) ?? '';
   ok('R16.14 决策卡：用实测增量给出「约几轮触线」（把预测题变算术题）',
-    /本轮上下文 \+50k token/.test(cardTrend14) && /约 \*\*5 轮\*\*触/.test(cardTrend14),
+    /本轮 \+50k token/.test(cardTrend14) && /约 \*\*5 轮\*\*触/.test(cardTrend14) && /粗估/.test(cardTrend14),
     '仍要求模型自己预测未来占用 ⇒ 该条件「从未成立」（评审实测）');
   /* ⑦ set-tier 路径要在卡片与说明里都出现（否则模型不知道有这条低成本动作） */
   ok('R16.14 教学：卡片与一次性说明都教 set-tier 这条低成本动作',
@@ -672,6 +672,52 @@ ok('R16.14 接线：趋势数据（增量/触线轮数）由 m2 现算并注入�
     && /系统代压（本会话未申报档位/.test(m3src14)
     && /getCompactTool\(\)\?\.hasTier\?\.\(sidE\)/.test(m3src14),
   '任一环缺位 ⇒ 趋势是空的、或「系统代压」不显性（评审建议 2/7 落不了地）');
+
+/* R16.15（另一会话的第二轮评审，8 条）：核心抱怨是**三重重复**——
+ * 「tool description + brief + card 各写一遍档位表/先说再调用/代压代价，每请求白烧 ≈1.5–2k token，
+ *  且『哪份是权威』不明」。处置：按「description=怎么调 / brief=固定事实 / card=本轮动作」分工。 */
+{
+  const ctMod15 = await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href);
+  let spec15 = null;
+  const api15 = ctMod15.createCompactTool({
+    svc: (k) => (k === 'tools' ? { register: () => {} } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { compactToolDiag: { calls: 0 } } }, readCfg: () => ({ enabled: true }),
+    getDefineTool: () => (sp) => { spec15 = sp; return sp; },
+    getRangeApi: () => ({ TIER_NAMES: ['light', 'standard', 'heavy'] }),
+  });
+  api15.ensure();
+  const desc15 = spec15.description;
+  const brief15 = api15.renderBrief({ criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000 }) ?? '';
+  const card15 = api15.renderCard({
+    ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000,
+    usedTokens: 500000, deltaTokens: 50000, turnsToLine: 5, tierName: 'heavy', tierDeclared: true,
+  }) ?? '';
+  ok('R16.15 分工：description 不再重复档位表，改为指向每轮决策卡',
+    !/保留窗口 × 8%/.test(desc15) && /压缩决策卡/.test(desc15) && /action/.test(desc15),
+    'description 仍写一遍档位表 ⇒ 与 brief/card 三重重复（评审实测每请求白烧 1.5–2k token）');
+  ok('R16.15 分工：代压代价只在卡片（每轮），一次性说明不再重复长策略段',
+    !/系统会代替你压缩/.test(brief15) && /系统会代替你压缩/.test(card15) && /以卡为准/.test(brief15),
+    'brief 与 card 各写一遍策略 ⇒ 重复且权威不明');
+  const total15 = desc15.length + brief15.length + card15.length;
+  ok('R16.15 预算：description ≤ 500 字符（每请求下发，必须短）',
+    desc15.length <= 500, `实际 ${desc15.length} 字符`);
+  ok('R16.15 预算：三处教学合计 ≤ 3000 字符（去重前 ≈3900）',
+    total15 <= 3000, `实际合计 ${total15}（desc ${desc15.length} + brief ${brief15.length} + card ${card15.length}）`);
+  ok('R16.15 决策行：只在「本卡出现时」要求（与提醒通道对齐）',
+    /本卡出现时，先落一行决策/.test(card15),
+    '仍写「每轮留一行决策」⇒ 卡不出现的轮次要写却无提醒，无法执行');
+  const cardDecl = api15.renderCard({ ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, tierName: 'heavy', tierDeclared: true }) ?? '';
+  const cardUnd = api15.renderCard({ ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, tierName: 'standard', tierDeclared: false }) ?? '';
+  ok('R16.15 卡给出**当前档位名**（已登记 / 兜底两态可辨）',
+    /当前档位：heavy（已登记）/.test(cardDecl) && /当前档位：standard（兜底/.test(cardUnd)
+      && /不是档位名/.test(cardDecl),
+    '决策行要求写 tier 保持 X 而 X 无处可查 ⇒ 模型只能猜（评审建议 3）');
+  ok('R16.15 措辞：明确「不传 tier = 沿用已登记档位（不是重置）」',
+    /沿用已登记档位/.test(desc15) && /不是重置/.test(card15),
+    '「不传参 = 维持现状（初始 standard）」易被读成重置（评审建议 4）');
+}
 
 ok('投影 pending 优先显示（已选待生效提前可见）',
   /sel\.pending \|\| sel\.lastUsed/.test(client),
@@ -750,7 +796,7 @@ const ct = read('compact-tool.mjs');
 /* R16.8（用户提出的时机逻辑）三源对账：压缩重置前缀缓存 + 换档使缓存失效 ⇒
  * 同轮顺带换档只付一次重建成本。回执侧断言在 m2src 处；此处对 compact/effort 两源。 */
 ok('R16.8 时机教学（compact 侧）：决策卡与 description 都含「顺带换档只付一次缓存重建」',
-  /压缩的同一条消息里顺带调用 set_reasoning_effort 换档，缓存重建只付一次/.test(ct),
+  /同一条消息里顺带调用 set_reasoning_effort 换档，缓存重建只付一次/.test(ct),
   '决策卡缺位 ⇒ Agent 压缩时不知道可以同轮换档（错过缓存最优时机）');
 ok('R16.8 时机教学（effort 侧）：换档工具 description 也写明该时机',
   /顺带换档是最优时机/.test(effort) && /只付一次重建成本/.test(effort),
@@ -805,7 +851,7 @@ ok('压缩工具自检契约说明档位**持续生效**（含强制线）',
 /* R16.3：**介入时机**必须教给模型——想影响强制线，就要在越线之前选档。
  * 行为级验证放 6.20a 块（ctApi 就绪后）；这里先钉源码级最小护栏。 */
 ok('压缩工具源码含「趁占用还在强制线之下时选定档位」的介入时机教学',
-  /趁占用还在强制线之下时选定档位|趁还在强制线之下时选定档位/.test(ct),
+  /趁占用还在 \$\{crit\} 强制线之下时选定档位|趁还在强制线之下时选定档位|强制线之下时选定档位/.test(ct),
   '只教「持续生效」不教「介入时机」 ⇒ Agent 到强制线触发时才想选档，已来不及（用户问出的场景）');
 
 const ctPreStep = /const preStepCompaction = async \(payload\) => \{([\s\S]*?)\n  \};/.exec(m3src)?.[1] ?? '';
@@ -1084,7 +1130,7 @@ ok('拿不到活值时不编**当前窗口的 token 数**（档位比例是常�
 ok('「保留多少」活值传进两个教学出口（读常量 + 按当前窗口现算，查 m2.inject.mjs）',
   /const ratio = getRangeApi\(\)\?\.RETAIN_RATIO \?\? null;/.test(m2src)
   && /Math\.floor\(w \* ratio\)/.test(m2src)
-  && /renderCard\(\{ ratio, minRatio: M3\.markerMinRatio, criticalRatio: crit, \.\.\.retentionTeach\(win\), \.\.\.\(trend \?\? \{\}\) \}\)/.test(m2src)
+  && /renderCard\(\{[\s\S]{0,300}retentionTeach\(win\)[\s\S]{0,300}\}/.test(m2src)
   && /renderBrief\(\{ criticalRatio: crit, \.\.\.retentionTeach\(win\) \}\)/.test(m2src),
   '活值没接上 ⇒ 教学与实际保留范围脱节（写死 16%/160k 会随常量与窗口漂移）');
 
@@ -1958,11 +2004,14 @@ console.log('\n== 6.20a R16 压缩档位（compact-range.mjs） ==');
   const cardBelow = ctApi.renderCard({ ratio: 0.5, minRatio: 0.2, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000 }) ?? '';
   const cardAbove = ctApi.renderCard({ ratio: 0.8, minRatio: 0.2, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000 }) ?? '';
   ok('一次性教学教了介入时机（趁还在强制线之下选档；越线后改档管不上当次）',
-    /趁占用还在 \d+% 强制线之下时选定档位/.test(brief) && /越线之后才改档，管不上正在发生的那次/.test(brief),
+    /趁占用还在 \d+% 强制线之下时(选定档位|声明档位)/.test(brief) && /越线之后才改档，管不上正在发生的那次/.test(brief),
     `实际：${brief.slice(0, 100)}…`);
   ok('决策卡教了介入时机，且**随占用状态自适应**',
     /尚在强制线之下/.test(cardBelow) && !/本次已越线/.test(cardBelow)
-      && /已越强制线/.test(cardAbove) && /本次已越线，改档下一轮起生效/.test(cardAbove),
+      && /已越强制线/.test(cardAbove)
+      /* R16.15（评审建议 5）：越线后不再只给「改档下一轮起生效」这句**无法行动**的信息，
+       * 改为可执行的补救动作（立刻 set-tier 声明档位）。 */
+      && /立刻用 `action:'set-tier'` 声明档位/.test(cardAbove),
     `未越线卡：${cardBelow.slice(0, 80)}… | 已越线卡：${cardAbove.slice(0, 80)}…`);
 }
 console.log('\n== 6.20 工具后自检回执 + 思考强度可切性 ==');

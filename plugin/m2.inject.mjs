@@ -121,7 +121,15 @@ export function createM2Injection(deps) {
       const api = getCompactToolApi();
       if (!api) { warnTeachOnce('压缩教学模块未就绪：决策卡与一次性说明本次为空（模型将看不到压缩工具的用法）'); return null; }
       const crit = Number.isFinite(effCrit) ? effCrit : M3.criticalRatio;
-      return api.renderCard({ ratio, minRatio: M3.markerMinRatio, criticalRatio: crit, ...retentionTeach(win), ...(trend ?? {}) });
+      /* R16.15（评审建议 3/8）：把**当前档位名**（含是否已登记）交给卡片——
+       * 决策行要求写 `tier 保持 X`，而 X 原先在卡上无处可查（卡只给保留 token 数）。 */
+      const tierApi = getCompactToolApi?.() ?? null;
+      const sidKey = trend?.sid ?? null;
+      return api.renderCard({
+        ratio, minRatio: M3.markerMinRatio, criticalRatio: crit, ...retentionTeach(win), ...(trend ?? {}),
+        tierName: tierApi && sidKey ? tierApi.getTier?.(sidKey) : undefined,
+        tierDeclared: tierApi && sidKey ? tierApi.hasTier?.(sidKey) : undefined,
+      });
     } catch (e) { warnTeachOnce(`决策卡渲染异常：${msg(e)}`); return null; }
   };
 
@@ -144,7 +152,7 @@ export function createM2Injection(deps) {
       const turnsToLine = Number.isFinite(delta) && delta > 0 && Number.isFinite(crit) && ratio < crit
         ? Math.ceil(((crit - ratio) * win) / delta)
         : null;
-      return { usedTokens: used, deltaTokens: Number.isFinite(delta) ? delta : null, turnsToLine };
+      return { sid, usedTokens: used, deltaTokens: Number.isFinite(delta) ? delta : null, turnsToLine };
     } catch { return {}; }
   };
 
