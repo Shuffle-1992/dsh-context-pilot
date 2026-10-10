@@ -1,0 +1,12 @@
+# dsh-context-pilot 的 bundle 层 patch（**公开分发用**）
+#
+# 与 `cordis.patch.yml` 的区别：本机开发时 profile 以
+#   "@local/dsh-context-pilot": "link:.../plugin"
+# 挂载，patch 里的 name 必须与**被安装的包名**一致，因此开发用名是 `@local/dsh-context-pilot`；
+# 而从市场/仓库安装时包名是 `dsh-context-pilot`（根 package.json 的 name）。
+# 两者指向同一份代码，只是加载器按包名解析，故分为两个 patch 文件。
+#
+# 机器专有配置（如阈值覆写）请放 ~/.dsh/profiles/<profile>/cordis.patch.yml 按 id 覆盖，不要写这里。
+- insert:
+    - id: dsh-context-pilot
+      name: dsh-context-pilot

@@ -215,6 +215,48 @@ if (done) {
 }
 ok('（软提醒，不计失败）结构债状态已输出', true);
 
+/* ═══════════ ⑦ 上架基础项（DSH Plugin Hub / 社区市场）═══════════
+ * 依据：市场要求「公开仓库 + topic dsh-plugin（Cordis 插件另加 deepseek-harness）
+ * + README 有可复制的安装命令 + package.json 的 name/version 准确、Bundle 分发需 dsh.bundle.patch」。
+ * 这里只校验**仓库内可控的部分**（仓库公开性与 topic 属 GitHub 侧，无法离线断言——
+ * 复核方式见 docs/hub-publishing.md §0 的一行命令）。 */
+console.log('\n== 7. 上架基础项（hub checklist）==');
+const rootPkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+const plugPkg = JSON.parse(readFileSync(join(PLUGIN, 'package.json'), 'utf8'));
+const readmeSrc = readFileSync(join(ROOT, 'README.md'), 'utf8');
+ok('根清单可被市场识别：name/version/license/repository 齐备且非 private',
+  rootPkg.name === 'dsh-context-pilot' && typeof rootPkg.version === 'string' && rootPkg.version.length > 0
+    && typeof rootPkg.license === 'string' && !!rootPkg.repository?.url
+    && rootPkg.private !== true,
+  `name=${rootPkg.name} version=${rootPkg.version} license=${rootPkg.license} private=${rootPkg.private}`);
+ok('Bundle 分发声明：根清单 dsh.bundle.patch 指向**公开**patch，且该文件存在',
+  typeof rootPkg.dsh?.bundle?.patch === 'string'
+    && existsSync(join(ROOT, rootPkg.dsh.bundle.patch.replace(/^\.\//, '')))
+    && /public/.test(rootPkg.dsh.bundle.patch),
+  `patch=${rootPkg.dsh?.bundle?.patch}`);
+ok('开发挂载仍完整：plugin/package.json 有 dsh.bundle.patch（缺则 not-bundle 静默跳过）',
+  typeof plugPkg.dsh?.bundle?.patch === 'string'
+    && existsSync(join(PLUGIN, plugPkg.dsh.bundle.patch.replace(/^\.\//, ''))),
+  `patch=${plugPkg.dsh?.bundle?.patch}`);
+/* 包名 ↔ patch 里 name 必须一致：加载器按包名解析，不一致 = 装上去挂不起来。 */
+{
+  const pubPatch = readFileSync(join(ROOT, 'plugin/cordis.patch.public.yml'), 'utf8');
+  const devPatch = readFileSync(join(PLUGIN, 'cordis.patch.yml'), 'utf8');
+  const nameOf = (y) => (/- insert:[\s\S]*?name:\s*'?([^'\n]+)'?/.exec(y)?.[1] ?? '').trim();
+  ok('包名 ↔ patch 一致：根包名 = 公开 patch 的 name；开发包名 = 开发 patch 的 name',
+    nameOf(pubPatch) === rootPkg.name && nameOf(devPatch) === plugPkg.name,
+    `根=${rootPkg.name}/patch=${nameOf(pubPatch)} ｜ plugin=${plugPkg.name}/patch=${nameOf(devPatch)}`);
+}
+ok('版本一致：根与 plugin 清单的 version 相同（避免市场显示错版本）',
+  rootPkg.version === plugPkg.version, `root=${rootPkg.version} plugin=${plugPkg.version}`);
+ok('README 含可直接复制的安装命令（市场要求）',
+  /dsh plugin --profile \w+ add \S+/.test(readmeSrc) && /## 安装/.test(readmeSrc),
+  'README 缺「dsh plugin --profile <p> add <包名>」形式的安装命令 ⇒ 用户无法复制使用');
+ok('LICENSE 文件存在且与清单声明一致',
+  existsSync(join(ROOT, 'LICENSE')) && /^MIT License/m.test(readFileSync(join(ROOT, 'LICENSE'), 'utf8'))
+    && rootPkg.license === 'MIT',
+  '缺 LICENSE 或与 package.json 的 license 不一致');
+
 /* ═══════════ 汇总 ═══════════ */
 console.log(`\n${'='.repeat(52)}`);
 console.log(`静态检查：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);

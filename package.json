@@ -1,8 +1,58 @@
 {
-  "name": "dsh-context-pilot-repo",
-  "private": true,
+  "name": "dsh-context-pilot",
+  "version": "0.1.0",
+  "description": "DSH 上下文智能压缩 + 智能思考：每轮注入用量、模型自主决定压缩并自动续跑；可选让模型按任务难度自主调整思考强度档位",
   "type": "module",
-  "description": "开发用根清单（插件本体在 plugin/，由 DSH profile 以 link: 挂载；此文件不参与挂载）。",
+  "license": "MIT",
+  "author": "Shuffle-1992",
+  "homepage": "https://github.com/Shuffle-1992/dsh-context-pilot#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Shuffle-1992/dsh-context-pilot.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Shuffle-1992/dsh-context-pilot/issues"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis-plugin",
+    "context-compression",
+    "context-management",
+    "reasoning-effort",
+    "llm-agent"
+  ],
+  "files": [
+    "plugin",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": "./plugin/entry.mjs",
+    "./client": "./plugin/client.js",
+    "./typert": "./plugin/wire.host.mjs",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": { "patch": "./plugin/cordis.patch.public.yml" },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-settings-plugins",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "meta": {
+    "title": "上下文智能压缩",
+    "description": "每轮读取上下文用量（上限/已用/占比）注入 prompt，占用达智能压缩线时模型可自行决定压缩并自动续跑；占用达强制压缩线时插件在 pre-step 无条件发起压缩（执行路径相同：先自算保留范围，官方 overflow 兜底/收口）。智能思考（可选）：开启后向 Agent 暴露当前模型的思考强度档位，并允许其自主换档——下一步生效、任务不中断。"
+  },
+  "icon": "./plugin/icon.svg",
   "scripts": {
     "test": "node test/run.mjs",
     "test:contract": "node test/contract.mjs",
