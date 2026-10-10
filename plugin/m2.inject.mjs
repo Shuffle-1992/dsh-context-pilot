@@ -129,6 +129,9 @@ export function createM2Injection(deps) {
         ratio, minRatio: M3.markerMinRatio, criticalRatio: crit, ...retentionTeach(win), ...(trend ?? {}),
         tierName: tierApi && sidKey ? tierApi.getTier?.(sidKey) : undefined,
         tierDeclared: tierApi && sidKey ? tierApi.hasTier?.(sidKey) : undefined,
+        /* R16.16：区分「本次登记」「热换后由落盘恢复」「从未登记」——评审实测指出后两者
+         * 在文案上都显示为「已登记/兜底」，无法判断档位是否真的还在。 */
+        tierState: tierApi && sidKey ? tierApi.tierState?.(sidKey) : undefined,
       });
     } catch (e) { warnTeachOnce(`决策卡渲染异常：${msg(e)}`); return null; }
   };

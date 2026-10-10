@@ -1976,3 +1976,50 @@ DSH 引擎在该压缩失败路径的 turn 收尾处抛出 `sid` ReferenceError�
 **部署**：compact-tool.mjs / m2.inject.mjs —— toggle 热换。
 ⚠️ 注意：**brief 是会话级一次性注入** ⇒ 旧会话要等下一次「压缩后重讲」（`clearBriefed`）或新会话
 才看到新 brief；**卡片每轮重渲染，toggle 后立即可验证**。
+
+### R16.16 第三轮评审：`set-tier` 生产事故（schema 类型）+ 档位不持久 —— 两处必修（2026-10-10）
+
+评审来自 session-70a55b1a，两条都是**实测 + 源码双证据**，且第二条直指我们的部署方式。
+
+**① `set-tier` 在生产上不可用（高）** —— 它按卡片指引调用后收到：
+```
+Error: tool "compact_context" returned invalid output: "value.scheduled" must be a string
+```
+根因：`runTool` 的 set-tier 分支返回 `scheduled: false`（**boolean**），而 `output.schema` 声明
+`type:'string'` ⇒ 宿主按 schema 校验**整条调用被拒**。讽刺的是同文件注释里就记着 R15.3 那次
+「多一个字段⇒整条失败」，这次从**类型**一侧再踩一次。
+
+**它对我们测试方式的批评（更值钱）**：
+> 「你们新增的行为级断言写的是 `scheduled:false 且 peekIntent()===null` —— **断言锁住的是实现值（false），
+>  而不是宿主校验用的 schema（string）** ⇒ 测试给了虚假信心。」
+
+⇒ 已按它的建议补：**返回值 ↔ `output.schema` 的结构校验器**（类型 / additionalProperties / required），
+对 `compact_context` 的**三条返回路径**（set-tier / compact / error）与
+`set_reasoning_effort` 的返回**逐条校验**；修复为 set-tier **省略 `scheduled`**（可选字段）。
+变异验证：把 `scheduled:false` 改回去 ⇒ **CAUGHT**（3 条失败）。
+
+**② 档位登记不持久（高）** —— 它上轮用 `tier:'heavy'` 压过（回执确认），热换后卡片却显示
+「standard（兜底，本会话从未登记）」。根因：`tierBySid` 是**纯内存 Map，无落盘**
+（而 effort 侧早已做了每 sid 落盘）⇒ **toggle 热换 = 新实例 = Map 清空 ⇒ 已声明档位静默消失**，
+之后强制压缩回落 standard —— 正是教学警告的那个失败；文案却称「会话级**持久**选择」。
+
+⇒ 修：`tierBySid` 复用 effort 同款落盘（`plugin/.data/compact-tier.json`，键=sid，值 `{tier,at}`），
+创建时恢复并标记 `restored`；新增 `tierState(sid)`（`set`/`restored`/`none`）；
+**卡片三态可辨**：`当前档位：heavy（已登记；本次由落盘恢复——跨 toggle/重启仍有效）` /
+`（已登记）` / `（兜底，本会话从未登记）`。变异：去掉 `saveTiers()` ⇒ **CAUGHT**。
+
+**③ 它上轮列的三个剩余项（本轮一并修）**：
+1. **brief 保留数字与档位脱钩** ⇒ 标注「**按默认档位 standard 计**；已登记其它档位以卡上活值为准」；
+2. **「预测题」措辞只改了一半**（趋势行与「若预计…」并存、口径不一）⇒ 趋势行存在时改为
+   「**按上方趋势行判断**」（无趋势行时保留原措辞）；
+3. **损失数字只按当前档位** ⇒ 并列「**若先声明 heavy（保留 240k）：只丢 ~X（比当前档位少丢 ~Y）**」——
+   把「先 `set-tier` 再压」的收益变成数字。变异 2/2 CAUGHT。
+
+它同时认可了 R16.15 的两处「比它建议更好」的落地（收敛权威「以卡为准」、决策行与本卡对齐），
+并说明：**它不会用「调一次压缩带 tier」绕过**（那会白压掉 ~119k 近端）——判断正确。
+
+**验证**：contract 431 + static 61 + report 54 + boot 21 = **567 断言**全绿；
+新增 7 条（含**结构校验器**与**跨实例持久化**）；**变异 4/4 CAUGHT**。
+
+**部署**：compact-tool.mjs（落盘 + schema 修复）/ m2.inject.mjs（tierState）/ host.impl.mjs（注入 pluginDir）
+—— toggle 热换。**修复后那个会话即可补登记 heavy。**

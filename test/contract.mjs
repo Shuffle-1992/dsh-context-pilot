@@ -612,9 +612,13 @@ ok('R16.13 文案：m5 为两种「非插件压缩」提供标签（不与「强
   const run14 = (args) => spec14.execute(args, { agent: agent14 });
   /* ① 最高杠杆：action='set-tier' 只登记档位、**不登记压缩意图** */
   const rSet = await run14({ action: 'set-tier', tier: 'heavy', reason: '提前锁定档位' }, { agent: agent14 });
-  ok('R16.14 行为级：action=set-tier 只登记档位（scheduled:false，且不产生压缩意图）',
-    rSet?.ok === true && rSet?.scheduled === false && rSet?.action === 'set-tier'
+  /* ⚠️ R16.16（评审实测事故）：这条断言原先写成 `scheduled === false` —— **锁的是实现值**，
+   * 而宿主按 output.schema 校验（scheduled 声明为 string）⇒ 真正的缺陷（false 被拒）逃过了断言。
+   * 现改为：① 断言行为意图（不压 + 无意图）；② **另用结构校验器对着 output.schema 验类型**。 */
+  ok('R16.14 行为级：action=set-tier 只登记档位（不产生压缩意图；scheduled 不填）',
+    rSet?.ok === true && rSet?.action === 'set-tier'
       && rSet?.tier === 'heavy' && api14.peekIntent('sess-14') === null
+      && !('scheduled' in (rSet ?? {}))
       && /本次不压缩/.test(String(rSet?.verify)),
     `实际：${JSON.stringify(rSet)} intent=${JSON.stringify(api14.peekIntent('sess-14'))}`);
   ok('R16.14 行为级：set-tier 后档位真的持久生效（hasTier/getTier 都为 heavy）',
@@ -717,6 +721,99 @@ ok('R16.14 接线：趋势数据（增量/触线轮数）由 m2 现算并注入�
   ok('R16.15 措辞：明确「不传 tier = 沿用已登记档位（不是重置）」',
     /沿用已登记档位/.test(desc15) && /不是重置/.test(card15),
     '「不传参 = 维持现状（初始 standard）」易被读成重置（评审建议 4）');
+}
+
+
+/* R16.16（第三轮评审，两条高价值发现）：
+ * ① `set-tier` 返回 `scheduled:false`（boolean）与 output.schema（string）冲突 ⇒ 宿主**整条拒绝**
+ *    ——「最大杠杆功能在生产上等于不可用」；且原断言锁实现值 ⇒ 虚假信心。
+ * ② `tierBySid` 纯内存 ⇒ toggle 热换=新实例 ⇒ 已声明档位静默消失（文案却称「持久」）。
+ * 处置：<字段按 schema 省略> + <结构校验器> + <档位落盘>。 */
+{
+  /** 按 output.schema 校验返回值：类型 + additionalProperties + required。
+   * 这类校验器正是「实现值断言」缺的那一环（评审原文：断言锁住的是实现值，而不是宿主校验用的 schema）。 */
+  const schemaErrs = (value, schema) => {
+    const errs = [];
+    const props = schema?.properties ?? {};
+    for (const [k, def] of Object.entries(props)) {
+      const v = value?.[k];
+      if (v === undefined) { if (def.required === true) errs.push(`${k} 必填但缺失`); continue; }
+      const want = def.type;
+      const got = Array.isArray(v) ? 'array' : typeof v;
+      const okType = want === 'string' ? got === 'string'
+        : want === 'boolean' ? got === 'boolean'
+          : want === 'number' ? got === 'number'
+            : want === 'array' ? got === 'array'
+              : want === 'object' ? (v !== null && got === 'object') : true;
+      if (!okType) errs.push(`${k} 应为 ${want}，实际 ${got}`);
+    }
+    const extra = Object.keys(value ?? {}).filter((k) => !(k in props));
+    if (extra.length && schema?.additionalProperties === false) errs.push('未声明字段: ' + extra.join(','));
+    return errs;
+  };
+  const ctMod16 = await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href);
+  const tmp16 = mkdtempSync(join(tmpdir(), 'dcp-tier-'));
+  let spec16 = null;
+  const mkCt16 = (dir) => ctMod16.createCompactTool({
+    svc: (k) => (k === 'tools' ? { register: () => {} } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { compactToolDiag: { calls: 0 } } }, readCfg: () => ({ enabled: true }),
+    getDefineTool: () => (sp) => { spec16 = sp; return sp; },
+    getRangeApi: () => ({ TIER_NAMES: ['light', 'standard', 'heavy'] }), pluginDir: dir,
+  });
+  const api16 = mkCt16(tmp16);
+  api16.ensure();
+  const ag16 = { session: { id: 'sess-16' }, id: 'sess-16' };
+  const run16 = (args) => spec16.execute(args, { agent: ag16 });
+  const rSet16 = await run16({ action: 'set-tier', tier: 'heavy' });
+  const rCmp16 = await run16({ tier: 'light' });
+  const rErr16 = await spec16.execute({}, { agent: null }); // 无 agent ⇒ 错误路径
+  ok('R16.16 结构校验：compact_context 三条返回路径都符合 output.schema（类型/additionalProperties/required）',
+    schemaErrs(rSet16, spec16.output.schema).length === 0
+      && schemaErrs(rCmp16, spec16.output.schema).length === 0
+      && schemaErrs(rErr16, spec16.output.schema).length === 0,
+    `set-tier: ${JSON.stringify(schemaErrs(rSet16, spec16.output.schema))} | compact: ${JSON.stringify(schemaErrs(rCmp16, spec16.output.schema))} | error: ${JSON.stringify(schemaErrs(rErr16, spec16.output.schema))}`);
+  /* 换档工具同款结构校验（同类缺陷可能在那边重演）。 */
+  const effMod16 = await import(pathToFileURL(join(PLUGIN, 'effort.mjs')).href);
+  let specE16 = null;
+  const effApi16 = effMod16.createEffort({
+    svc: (k) => (k === 'tools' ? { register: () => {} } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { effortSkips: {}, effortDiag: {}, effortSwitches: 0, effortReasserts: 0, effortHooks: 0, effortToolCalls: 0 } },
+    readCfg: () => ({ enabled: true, effortEnabled: true, effortCooldownMs: 30000 }),
+    getDefineTool: () => (sp) => { specE16 = sp; return sp; }, pluginDir: tmp16,
+  });
+  await effApi16.ensure();
+  const rE16 = await specE16.execute({ effort: 'low' }, { agent: null });
+  ok('R16.16 结构校验：set_reasoning_effort 的返回也符合其 output.schema',
+    schemaErrs(rE16, specE16.output.schema).length === 0,
+    `实际：${JSON.stringify(schemaErrs(rE16, specE16.output.schema))} value=${JSON.stringify(rE16)}`);
+  /* ② 档位落盘：新实例（= toggle 热换）必须恢复已声明档位 */
+  api16.setTier('sess-16', 'heavy');
+  const api16b = mkCt16(tmp16); // 同 pluginDir 的新实例 = 热换
+  ok('R16.16 行为级：档位跨实例（toggle 热换）仍然生效（落盘恢复）',
+    api16b.getTier('sess-16') === 'heavy' && api16b.hasTier('sess-16') === true
+      && api16b.tierState('sess-16') === 'restored',
+    `实际 tier=${api16b.getTier('sess-16')} has=${api16b.hasTier('sess-16')} state=${api16b.tierState('sess-16')}`);
+  const cardRestored = api16b.renderCard({ ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, tierName: api16b.getTier('sess-16'), tierDeclared: true, tierState: api16b.tierState('sess-16') }) ?? '';
+  ok('R16.16 卡片：热换后区分「由落盘恢复」与「本次登记/从未登记」三态',
+    /当前档位：heavy（已登记；本次由\*\*落盘恢复\*\*/.test(cardRestored),
+    '三态不可辨 ⇒ 用户/模型无法判断档位是否真的还在（评审实测点）');
+  /* ③ 评审剩余三条 */
+  const brief16 = api16.renderBrief({ criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000 }) ?? '';
+  ok('R16.16 brief：保留数字标注「按默认档位 standard 计」（不再与已登记档位矛盾）',
+    /按默认档位 standard 计/.test(brief16),
+    'brief 硬写 ×16%/160k ⇒ 声明 heavy 后与卡片活值矛盾（评审剩项一）');
+  const cardTrend16 = api16.renderCard({ ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, usedTokens: 500000, deltaTokens: 50000, turnsToLine: 5 }) ?? '';
+  ok('R16.16 卡片：趋势行存在时不再重复「若预计会推高」（口径统一）',
+    /按上方趋势行判断/.test(cardTrend16) && !/若预计任务会推高占用/.test(cardTrend16),
+    '趋势行与「若预计」并存 ⇒ 两种口径（评审剩项二）');
+  ok('R16.16 卡片：并列给出「先声明 heavy 能少丢多少」（把 set-tier 收益变数字）',
+    /若先声明 heavy（保留 240k）：只丢 ~/.test(cardTrend16) && /少丢 ~/.test(cardTrend16),
+    '只给当前档位的损失 ⇒ set-tier 的收益仍是抽象（评审剩项三）');
+  rmSync(tmp16, { recursive: true, force: true });
 }
 
 ok('投影 pending 优先显示（已选待生效提前可见）',

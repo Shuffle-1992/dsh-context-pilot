@@ -134,6 +134,9 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
         /* R16：档位名集合与解析函数都在 compact-range.mjs（依赖图叶子不 import 内部模块）。
          * ⚠️ 箭头包装：rangeApi 是异步就绪的 const，直接取引用会在建对象时抓到 null。 */
         getRangeApi: () => rangeApi ?? null,
+        /* R16.16：档位落盘需要 pluginDir（评审实测：toggle 热换=新实例 ⇒ Map 清空 ⇒ 已声明档位
+         * 静默消失，之后强制压缩回落 standard——正是教学警告的那个失败）。 */
+        pluginDir,
       });
       return compactToolApi;
     })

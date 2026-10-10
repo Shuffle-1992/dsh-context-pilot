@@ -36,18 +36,55 @@
  */
 
 /** 工具名（模型可见；与注入教学文本必须同源，见 contract §6.15）。 */
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+
 export const TOOL_NAME = 'compact_context';
 
 /** 意图存活期：登记后超过此时长仍未被 pre-step 消费则作废（防陈旧意图在下一次任务里突然触发）。 */
 export const INTENT_TTL_MS = 120_000;
 
 export function createCompactTool(deps) {
-  const { svc, tryOf, pick, msg, log, schedule, state, readCfg, getDefineTool, getRangeApi } = deps;
+  const { svc, tryOf, pick, msg, log, schedule, state, readCfg, getDefineTool, getRangeApi, pluginDir } = deps;
+
+  /* ═══ R16.16：档位**落盘**（评审实测：toggle 热换=新实例 ⇒ Map 清空 ⇒ 已声明档位静默消失）═══
+   * 另一会话实测：它明明用 tier:'heavy' 压过（回执确认），但热换后卡片显示
+   * 「standard（兜底，本会话从未登记）」；触发条件恰好是本插件的部署方式（toggle）。
+   * 与 effort 的 effort-stats.json 同款（读/写吞错 + mkdirSync），键=sid，值={tier, at}。 */
+  const tierPath = pluginDir ? join(pluginDir, '.data', 'compact-tier.json') : null;
+  const loadTiers = () => {
+    const out = new Map();
+    try {
+      if (!tierPath) return out;
+      const raw = readFileSync(tierPath, 'utf8');
+      const j = JSON.parse(raw.replace(/^\uFEFF/, ''));
+      if (j && typeof j === 'object' && j.bySid && typeof j.bySid === 'object') {
+        for (const [sid, v] of Object.entries(j.bySid)) {
+          if (v && typeof v.tier === 'string') out.set(sid, { tier: v.tier, at: Number(v.at) || 0, restored: true });
+        }
+      }
+    } catch (e) {
+      if (e?.code !== 'ENOENT') log('warn', `compact-tier.json 读取失败（忽略，按未登记）：${msg(e)}`);
+    }
+    return out;
+  };
+  const saveTiers = () => {
+    try {
+      if (!tierPath) return;
+      mkdirSync(dirname(tierPath), { recursive: true });
+      const bySidOut = {};
+      for (const [sid, v] of tierBySid) bySidOut[sid] = { tier: v.tier, at: v.at ?? 0 };
+      writeFileSync(tierPath, JSON.stringify({ version: 1, savedAt: new Date().toISOString(), bySid: bySidOut }, null, 2));
+    } catch (e) {
+      log('warn', `compact-tier.json 写入失败（吞）：${msg(e)}`);
+    }
+  };
 
   /** sid -> { at, reason }。单一状态表：登记点与消费点同键，只有一个删除点（消费/过期）。 */
   const bySid = new Map();
-  /** R16：sid -> { tier, at }。**会话级档位偏好**（无 TTL——它是长期选择，不是一次性意图）。 */
-  const tierBySid = new Map();
+  /** sid -> { tier, at, restored? }。**会话级档位偏好**（无 TTL——它是长期选择，不是一次性意图）。
+   * R16.16：创建时由落盘恢复（`restored:true`），setTier 时覆盖并回写。 */
+  const tierBySid = loadTiers();
   let toolRegistered = false;
 
   const cfgNow = () => {
@@ -112,11 +149,12 @@ export function createCompactTool(deps) {
    * 未选 ⇒ standard（16%）兜底。⇒ 档位是**会话级持久选择**：登记后一直生效，
    * 直到 Agent 再次改选。与「意图」（一次性、有 TTL）分开存。 */
 
-  /** 登记/更新会话档位（入参已由 normTier 规范化）。 */
+  /** 登记/更新会话档位（入参已由 normTier 规范化）。R16.16：**同时落盘**（跨 toggle/重启有效）。 */
   function setTier(sid, tier) {
     const key = String(sid ?? '');
     if (!key) return;
-    tierBySid.set(key, { tier, at: Date.now() });
+    tierBySid.set(key, { tier, at: Date.now(), restored: false });
+    saveTiers();
   }
 
   /** 读会话档位（未登记 ⇒ standard）。宿主的强制线/idle/工具触发统一走这里。 */
@@ -130,6 +168,16 @@ export function createCompactTool(deps) {
   /** R16.14：本会话**是否申报过**档位（未申报=强制压缩走兜底 standard，UI/记录要标「系统代压」）。 */
   function hasTier(sid) {
     try { return tierBySid.has(String(sid ?? '')); } catch { return false; }
+  }
+
+  /** R16.16：档位来源（评审实测：热换后 Map 清空 ⇒ 已声明档位静默消失，文案却称「持久」）。
+   * 返回 'set'（本次登记）/ 'restored'（本次实例由落盘恢复）/ 'none'（从未登记）。 */
+  function tierState(sid) {
+    try {
+      const it = tierBySid.get(String(sid ?? ''));
+      if (!it) return 'none';
+      return it.restored === true ? 'restored' : 'set';
+    } catch { return 'none'; }
   }
 
   /**
@@ -209,10 +257,16 @@ export function createCompactTool(deps) {
        * 工具一直回 ok/scheduled，压缩一次都没发生）。回执由插件在下一步开头注入。 */
       const pctOf = (t2) => (t2 === 'light' ? 8 : t2 === 'heavy' ? 24 : 16);
       if (action === 'set-tier') {
+        /* ⚠️ R16.16（另一会话实测事故，高）：这里曾写 `scheduled: false`（**boolean**），
+         * 而 `output.schema` 声明 `type:'string'` ⇒ 宿主按 schema 校验**整条调用被拒**：
+         *   `tool "compact_context" returned invalid output: "value.scheduled" must be a string`
+         * ——新加的最大杠杆功能在生产上等于不可用。
+         * 契约正解：set-tier **省略** `scheduled`（可选字段）；`compact` 仍回 'next-step'。
+         * 教训（已入测试）：断言必须校验**返回值 ↔ output.schema 的类型契约**，
+         * 只断言实现值（false）会给出虚假信心。 */
         return {
           ok: true,
           action: 'set-tier',
-          scheduled: false, // 明确：**没有**安排压缩
           tier,
           verify: `档位已登记为 ${tier}（保留窗口 × ${pctOf(tier)}%）——**本次不压缩**。`
             + '该档位此后对本会话的压缩（包括系统在强制线代替你执行的那次）持续生效，直到再次改选。'
@@ -246,7 +300,8 @@ export function createCompactTool(deps) {
     const r = Number(retainRatio);
     const t = Number(retainTokens);
     if (Number.isFinite(r) && r > 0 && Number.isFinite(t) && t > 0) {
-      return `**保留多少**：压缩按「上下文窗口 × ${Math.round(r * 100)}%」自选保留范围，当前窗口下**近端约 ${kfmt(t)} token 原样保留**，`
+      return `**保留多少**（**按默认档位 standard 计**——若你已登记其它档位，以每轮决策卡上的活值为准）：`
+        + `压缩按「上下文窗口 × ${Math.round(r * 100)}%」自选保留范围，当前窗口下**近端约 ${kfmt(t)} token 原样保留**，`
         + '更早的内容才转成摘要（摘要里仍含文件路径与结论要点）；若整段对话还没超出这个预算，则**什么都不会压**。';
     }
     return '**保留多少**：压缩按「上下文窗口的固定比例」自选保留范围——**近端内容原样保留**，只有更早的内容转为摘要；'
@@ -301,7 +356,7 @@ export function createCompactTool(deps) {
    * 压缩会在下一步开始前落地。教学若没写清这点，模型会退回「停下等压缩」的旧习惯。
    * ⚠️ 卡片每轮（占用达标时）都出现 ⇒ 比一次性说明更该承担「先说再调用」的提醒职责。
    */
-  function renderCard({ ratio, minRatio, criticalRatio, retainRatio, retainTokens, usedTokens, deltaTokens, turnsToLine, tierName, tierDeclared } = {}) {
+  function renderCard({ ratio, minRatio, criticalRatio, retainRatio, retainTokens, usedTokens, deltaTokens, turnsToLine, tierName, tierDeclared, tierState } = {}) {
     try {
       if (ratio == null || ratio < minRatio) return null;
       const pct = `${(ratio * 100).toFixed(0)}%`;
@@ -339,12 +394,24 @@ export function createCompactTool(deps) {
        * ⇒ 明确渲染**当前档位名**（含是否已登记），并把「现行生效」的语义限定为保留预算。 */
       const cur = typeof tierName === 'string' && tierName ? tierName : null;
       const tierNow = cur
-        ? `**当前档位：${cur}${tierDeclared === true ? '（已登记）' : '（兜底，本会话从未登记）'}`
+        ? `**当前档位：${cur}`
+          + (tierState === 'restored' ? '（已登记；本次由**落盘恢复**——跨 toggle/重启仍有效）'
+            : tierState === 'set' ? '（已登记）'
+              : tierDeclared === true ? '（已登记）' : '（兜底，本会话从未登记）')
           + `——目录里的「现行生效」说的是**保留 token 数**，不是档位名。**`
+        : '';
+      /* R16.16（评审三条剩余项之一/二）：① 趋势行存在时，「若预计…」这句改为指向趋势行
+       * （两处口径不一致）；② 损失数字并列「若先声明 heavy 会少丢多少」，把 set-tier 的收益变数字。 */
+      const trendExists = trend !== '';
+      const gainLine = (used != null && Number.isFinite(t) && t > 0 && used > t)
+        ? `**若先声明 heavy（保留 ${kfmt(t * 1.5)}）：只丢 ~${kfmt(Math.max(0, used - Math.round(t * 1.5)))}**`
+          + `（比当前档位少丢 ~${kfmt(Math.round(t * 1.5) - t)}）——这就是「先 \`set-tier\` 再压」的量化收益。`
         : '';
       const overLine = ratio >= (Number(criticalRatio) || 0.8)
         ? `**当前占用 ${pct} 已越强制线 ⇒ 立刻用 \`action:'set-tier'\` 声明档位**，避免下一次强制压缩仍按兜底档执行。`
-        : `**当前占用 ${pct} 尚在强制线之下**——若预计任务会推高占用，趁还在 ${crit} 强制线之下时选定档位，越线那一刻的自动压缩就按它执行。`;
+        : (trendExists
+          ? `**当前占用 ${pct} 尚在强制线之下**——**按上方趋势行判断**是否需要现在声明档位（越线那一刻的自动压缩就按它执行）。`
+          : `**当前占用 ${pct} 尚在强制线之下**——若预计任务会推高占用，趁还在 ${crit} 强制线之下时选定档位，越线那一刻的自动压缩就按它执行。`);
       return [
         `压缩决策卡（context-pilot，当前占用 ${pct}）：先判断接下来的任务是否还依赖本轮之前的对话细节——`,
         /* R16.15（评审建议 2）：决策行只在**本卡出现时**要求——卡不出现的轮次没有提醒位，
@@ -361,6 +428,7 @@ export function createCompactTool(deps) {
           + `**不传 tier = 沿用已登记档位**（不是重置）。${overLine}`
           + `（现行生效：${keep}。）`,
         loss,
+        gainLine,
         trend,
         /* R16.14/15（评审建议 4）：讲清代压代价，替代原先那句替不作为背书的「无需操作」。 */
         `• 依赖（要引用之前的路径/结论/报错现场/长推理链）：不要调用（或改用 heavy）。`
@@ -500,5 +568,5 @@ export function createCompactTool(deps) {
     };
   }
 
-  return { TOOL_NAME, ensure, peekIntent, takeIntent, pending, getTier, hasTier, setTier, renderBrief, renderCard, diag };
+  return { TOOL_NAME, ensure, peekIntent, takeIntent, pending, getTier, hasTier, setTier, tierState, renderBrief, renderCard, diag };
 }
