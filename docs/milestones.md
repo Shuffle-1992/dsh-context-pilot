@@ -2085,3 +2085,34 @@ Error: tool "compact_context" returned invalid output: "value.scheduled" must be
 （余量写死 5pp / 不采比例样本 / 去掉抢先取证 / host 不注入 engineThreshold）。
 
 **部署**：m3.compact.mjs / host.impl.mjs —— toggle 热换。
+
+### R16.19 压缩记录仍跨会话（第三次）—— 权威会话 id = 槽位 props（2026-10-10）
+
+**用户截图取证（关键）**：新开的 keysion-dac-vue 会话面板里，
+指纹行显示 `—— dcp: gen=… sid=session-16616 n=8` —— **它查的是 16616c07（另一个会话）**，
+所以列出的全是别人的记录，而它自己刚压的那次当然看不到。
+
+**根因**：R16.11 的解析优先级是「**URL 优先**」——而**同一窗口内切换会话时 URL 不会更新**
+（会话切换是 SPA 内部状态，不是导航）⇒ 拿到过期 id；first-wins 的 fetch 捕获同样过期。
+两次修复各修了一半（last-wins 被别的会话抢 / URL 优先在切换后过期），**都没拿到权威来源**。
+
+**权威来源（本次找到）**：插件的 chip 挂在 `conversation.input.right`，
+该槽位 **scope=session**，其 `standardProps` **明确包含 `sessionId: SessionId`**
+（`cordis_inspect_query` Slots → `listSubTree` 实测输出）。它与 URL / 请求都无关，
+**就是当前这个对话的会话 id**。
+
+**修（R16.19）**：
+1. **chip 渲染期从 `props.sessionId` 写入 `NS.sidActive`**（权威值；变化时顺带触发一次重问）；
+2. `resolveSid()` 优先级改为 **① `NS.sidActive`（权威）→ ② URL（仅 chip 未挂载前的兜底）→ ③ fetch 捕获**；
+3. 指纹增加**来源标注**：`src=slot|url|fetch`——本次正是靠指纹里的 `sid=` 一眼定位，
+   以后还能直接看出「用哪一路解析的」。
+
+**验证**：contract 445 + static 61 + report 54 + boot 21 = **581 断言**全绿；
+新增 3 条静态（props 取值 / 优先级顺序 / 指纹来源）；**变异 3/3 CAUGHT**
+（chip 不读 props / 去掉 sidActive 优先 / 指纹丢来源）。
+
+**部署**：`client.js` —— toggle 热换 **+ 必须刷新页面**（client 半）。
+
+**教训**：连续三次同类问题（last-wins 抢 / URL 过期 / 权威值缺失）说明——
+**「猜当前会话」这个方向本身就是错的**；应该在**会话作用域的槽位**里取现成的权威 id。
+另：指纹行要从第一版就带 `sid + 来源`，本次排查几乎全靠它。

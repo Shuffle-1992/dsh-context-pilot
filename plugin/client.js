@@ -20,17 +20,29 @@ window.__ModuleLoader__.load({
 		 * 控制台取证路径变更：__DSH_CONTEXT_PILOT__.sid / .hudDebug / .gen 一次可读全貌。 */
 		const NS = (window.__DSH_CONTEXT_PILOT__ = window.__DSH_CONTEXT_PILOT__ || {});
 
-		/* R16.11：**唯一的「当前会话 id」解析口**（所有按会话过滤的查询都必须走它）。
-		 * 优先级：① 窗口自身 URL 里的 session id（本窗口路由，每次现读 ⇒ 切换会话即变）；
-		 * ② `NS.sid`（fetch first-wins 捕获的兜底，见 mount 处的钩子）。
-		 * 起因（用户实测）：原实现只认「最后一个带 sessionId 的请求」，会被别的会话抢走 ⇒
-		 * 面板/弹窗列出别的会话的压缩记录（「新会话只压了一次却显示很多条」）。 */
+		/* R16.11 / R16.19：**唯一的「当前会话 id」解析口**（所有按会话过滤的查询都必须走它）。
+		 * 优先级（R16.19 修正——真机截图取证：新会话窗口里 `sid=session-16616…`，即拿到了**别的会话**）：
+		 *   ① **`NS.sidActive`**：由 chip 从**槽位标准 props 的 `sessionId`** 写入（Slots 检视面确认
+		 *      `conversation.input.right` 的 standardProps 含 `sessionId: SessionId`，scope=session）
+		 *      —— 这是**权威值**：它就是当前这个对话的会话 id，与 URL/请求都无关；
+		 *   ② 窗口 URL 里的 session id（**仅作 chip 未挂载前的兜底**；同一窗口内切换会话时 URL 不会变
+		 *      ⇒ 单独依赖它会拿到过期值，这正是本次串会话的直因）；
+		 *   ③ `NS.sid`（fetch first-wins 捕获；同样只是兜底）。
+		 * 起因：原实现只认「最后一个带 sessionId 的请求」（会被别的会话抢走）；R16.11 改成 URL 优先后，
+		 * 又栽在「同窗口切换会话 URL 不更新」上 ⇒ 现在以槽位 props 为权威，其余两者降级为兜底。 */
 		const resolveSid = () => {
+			if (NS.sidActive) return String(NS.sidActive);
 			try {
 				const m = /(session-[A-Za-z0-9-]{8,})/.exec(String(location.href || ""));
 				if (m) return m[1];
 			} catch { /* 忽略 */ }
 			return NS.sid || "";
+		};
+		/** 取证：本次 sid 来自哪一路（slot=权威 / url / fetch=兜底）——排障时一眼可见。 */
+		const sidSource = () => {
+			if (NS.sidActive) return "slot";
+			try { if (/(session-[A-Za-z0-9-]{8,})/.test(String(location.href || ""))) return "url"; } catch { /* 忽略 */ }
+			return NS.sid ? "fetch" : "none";
 		};
 
 		/** 卡片 key = bundle 包名（plugins.bundle.config slot 契约）。 */
@@ -669,6 +681,18 @@ window.__ModuleLoader__.load({
 		function EffortChip(props) {
 			const ref = react.useRef(null);
 			ensureChipStyle();
+			/* R16.19：**权威会话 id 来源**——本 chip 挂在 `conversation.input.right`（scope=session），
+			 * 该槽位的 standardProps 明确带 `sessionId: SessionId`（Slots 检视面确认）。
+			 * 真机教训：同一窗口内切换会话时 URL 不更新、fetch 捕获也会过期 ⇒ 只有这里能拿到**当前**会话。
+			 * 渲染期同步写入（幂等全局赋值）：保证本轮及后续所有按会话过滤的查询立刻用上正确 id。 */
+			try {
+				const sidProp = props && props.sessionId ? String(props.sessionId) : "";
+				if (sidProp && NS.sidActive !== sidProp) {
+					NS.sidActive = sidProp;
+					/* 会话变了 ⇒ 丢弃上一个会话的 HUD 缓存，避免「拿旧会话记录顶替」。 */
+					try { NS.pullHud?.(); } catch { /* 忽略 */ }
+				}
+			} catch { /* 忽略 */ }
 			/* ② 档位：响应式投影（事件驱动，零轮询）。useProjection 由 slot 标准 props 提供。 */
 			let sel = null;
 			try {
@@ -1212,7 +1236,7 @@ window.__ModuleLoader__.load({
 							const actLines = detail && detail.length
 								? detail.map((x) => `${fmtFullTime(x && x.at)} · ${stripHhmm(x && x.text)}`)
 								: (act ? [act] : []);
-							row.title = `${actLines.length ? actLines.join("\n") : "（暂无压缩记录）"}\n—— dcp: gen=${v.gen || "?"} sid=${(resolveSid() || "?").slice(0, 13)} n=${Array.isArray(v.actsDetail) ? v.actsDetail.length : 0}`;
+							row.title = `${actLines.length ? actLines.join("\n") : "（暂无压缩记录）"}\n—— dcp: gen=${v.gen || "?"} sid=${(resolveSid() || "?").slice(0, 13)} src=${sidSource()} n=${Array.isArray(v.actsDetail) ? v.actsDetail.length : 0}`;
 							/* R7：原「武装中」(`v.hudArmed === "armed"`) 与「待执行」(解析 `v.hudPending`)
 							 * 两个徽章随 marker 通道退役删除——压缩已改由工具在轮内触发，
 							 * **不存在**任何「压缩后自动恢复执行」的动作，徽章文案本身已失真。 */

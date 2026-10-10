@@ -918,6 +918,28 @@ ok('R16.14 接线：趋势数据（增量/触线轮数）由 m2 现算并注入�
     `实际：${JSON.stringify(st18.m3.lastEngineCompact)}`);
 }
 
+/* R16.19（用户截图取证：新会话窗口里面板指纹显示 `sid=session-16616…` —— 拿到的是**别的会话**）：
+ * R16.11 的「URL 优先」在**同一窗口内切换会话**时失效（URL 不更新），first-wins 的 fetch 捕获同样过期。
+ * 权威来源已找到：插件的 chip 挂在 `conversation.input.right`（scope=session），
+ * 其 standardProps **明确包含 `sessionId: SessionId`**（Slots 检视面），与 URL/请求无关。 */
+{
+  ok('R16.19 静态：chip 从槽位 props.sessionId 取**权威**会话 id（不靠 URL/请求猜）',
+    client.includes('const sidProp = props && props.sessionId ? String(props.sessionId) : "";')
+      && client.includes('NS.sidActive = sidProp;'),
+    'chip 仍不读 props.sessionId ⇒ 同窗口切换会话后又会拿到别的会话（本次串会话的直因）');
+  ok('R16.19 静态：resolveSid 以 sidActive 为**第一优先**（URL/fetch 降级为兜底）',
+    (() => {
+      const iBody = client.indexOf('const resolveSid = () => {');
+      const iActive = client.indexOf('if (NS.sidActive) return String(NS.sidActive);', iBody);
+      const iUrl = client.indexOf('location.href', iBody);
+      return iBody >= 0 && iActive > iBody && iUrl > iActive; // 顺序：先查 sidActive，再读 URL
+    })(),
+    '优先级仍以 URL 打头 ⇒ 同窗口切换会话时会继续拿过期值');
+  ok('R16.19 取证：指纹标注 sid 来源（slot/url/fetch），排障一眼可见',
+    client.includes('const sidSource = () => {') && client.includes('src=${sidSource()}'),
+    '指纹不标来源 ⇒ 下次串会话仍只能靠猜（本次正是靠指纹的 sid= 才定位到）');
+}
+
 ok('投影 pending 优先显示（已选待生效提前可见）',
   /sel\.pending \|\| sel\.lastUsed/.test(client),
   '未优先取 pending ⇒ 换档后要等下一轮才显示');
