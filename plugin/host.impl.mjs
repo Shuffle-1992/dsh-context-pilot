@@ -1,5 +1,5 @@
 /**
- * @local/dsh-context-pilot —— M1+M2 实现：用量读取验证 + 每轮注入。
+ * dsh-context-pilot —— M1+M2 实现：用量读取验证 + 每轮注入。
  *
  * M1（已验证 2026-10-06）：sessions/agents 双句柄枚举 + tokenMeter.measure() 实测 + 事件监听 + 报告落盘。
  *  - 实测：Agent.session 持有 Session；measure(agent.session) 可用；投影 contextPressure 自带 contextWindow。
@@ -43,7 +43,7 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
     getCreateUserMessage, attachSnapshot, loadDefineTool, loadReportBase,
   } = core;
 /**
- * @local/dsh-context-pilot —— M1+M2 实现：用量读取验证 + 每轮注入。
+ * dsh-context-pilot —— M1+M2 实现：用量读取验证 + 每轮注入。
  *
  * M1（已验证 2026-10-06）：sessions/agents 双句柄枚举 + tokenMeter.measure() 实测 + 事件监听 + 报告落盘。
  *  - 实测：Agent.session 持有 Session；measure(agent.session) 可用；投影 contextPressure 自带 contextWindow。

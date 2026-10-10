@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
-  <!-- @local/dsh-context-pilot 插件图标（家族风格：与 dsh-connect-zcode 同规范）
+  <!-- dsh-context-pilot 插件图标（家族风格：与 dsh-connect-zcode 同规范）
        语义：三条内容行 + 收拢箭头 = 上下文压缩（把长的上下文收进一点）；
              绿色收拢箭头 = 压缩动作（占用降档）；底部三点 = 生态家族视觉记忆。
        约定：64x64 / rx14 / 深底 #1e293b / 扁平无渐变，16px 下主形状仍可辨认。

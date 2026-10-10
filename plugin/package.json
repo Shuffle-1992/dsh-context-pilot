@@ -1,6 +1,6 @@
 {
-  "name": "@local/dsh-context-pilot",
-  "version": "0.1.0",
+  "name": "dsh-context-pilot",
+  "version": "0.1.1",
   "icon": "./icon.svg",
   "private": true,
   "type": "module",
@@ -12,7 +12,9 @@
     "./package.json": "./package.json"
   },
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "inject": [
@@ -29,5 +31,20 @@
   "meta": {
     "title": "上下文智能压缩",
     "description": "每轮读取上下文用量（上限/已用/占比）注入 prompt，占用达智能压缩线时模型可自行决定压缩并自动续跑；占用达强制压缩线时插件在 pre-step 无条件发起压缩（执行路径相同：先自算保留范围，官方 overflow 兜底/收口）。智能思考（可选）：开启后向 Agent 暴露当前模型的思考强度档位，并允许其写标记自主换档——下一步生效、任务不中断。"
-  }
+  },
+  "license": "MIT",
+  "author": "Shuffle-1992",
+  "homepage": "https://github.com/Shuffle-1992/dsh-context-pilot#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Shuffle-1992/dsh-context-pilot.git"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis-plugin",
+    "context-compression",
+    "context-management",
+    "reasoning-effort"
+  ]
 }

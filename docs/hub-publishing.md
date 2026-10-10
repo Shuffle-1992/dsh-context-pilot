@@ -25,20 +25,21 @@ $j = (Invoke-WebRequest https://api.github.com/repos/Shuffle-1992/dsh-context-pi
 $j | Select-Object full_name, private, visibility, license, homepage, topics
 ```
 
-## 1. 关键结构决策：**仓库根 = 可分发包，`plugin/` = 代码 + 本地开发身份**
+## 1. 结构：**单一身份** `dsh-context-pilot`
 
-市场爬虫按**仓库根**的 `package.json` 识别插件；而本机开发时 profile 以
-`"@local/dsh-context-pilot": "link:.../plugin"` 挂载（包根是 `plugin/`）。
-两个身份都必须存在，且**包名必须与各自 patch 里 `name` 一致**（加载器按包名解析）：
+2026-10-10 起包名统一为 `dsh-context-pilot`（去掉 `@local/` 前缀），三处必须一致：
 
-| 场景 | 包名 | manifest | bundle patch |
-| --- | --- | --- | --- |
-| 市场 / npm / GitHub 安装 | `dsh-context-pilot` | 根 `package.json` | `plugin/cordis.patch.public.yml` |
-| 本机开发（`link:` 挂载） | `@local/dsh-context-pilot` | `plugin/package.json` | `plugin/cordis.patch.yml` |
+| 位置 | 值 |
+| --- | --- |
+| 根 `package.json` → `name` | `dsh-context-pilot` |
+| `plugin/package.json` → `name` | `dsh-context-pilot`（`private: true`，仅作本地挂载目标，不发布） |
+| `plugin/cordis.patch.yml` → `insert[0].name` | `dsh-context-pilot`（加载器按**包名**解析） |
 
-> 为什么不在根沿用 `@local/`：**npm 的 `@local` 作用域不可发布**（非本人 scope），
-> 市场安装会失败。故公开包名取无作用域的 `dsh-context-pilot`。
-> 本机 profile **无需任何改动**——它仍然 link `plugin/`（那次改造 0 风险）。
+- 仓库根 = **可分发包**（市场爬虫按仓库根识别）；`plugin/` = 代码 + 本地挂载目标。
+- 本机 `node_modules` 下**两个 junction 指向同一目录**：
+  `dsh-context-pilot`（新，正式）与 `@local/dsh-context-pilot`（旧，兼容别名，勿删以免打断运行中的挂载）。
+- `plugin/cordis.patch.local.yml` 是**兼容补丁**（name = 旧别名），仅供回滚/旧挂载使用；
+  生产与新装一律走 `plugin/cordis.patch.yml`。
 
 ## 2. 上架前最后三步（人工，需 GitHub 权限）
 

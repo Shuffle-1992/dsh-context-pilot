@@ -30,7 +30,7 @@
 本机部署已于 2026-10-05 完成（两轮，第二轮补齐 bundle 资格）：
 
 ```powershell
-# 已做：profile package.json dependencies/bundles 均加 @local/dsh-context-pilot
+# 已做：profile package.json dependencies/bundles 均加 dsh-context-pilot
 #       （改前备份：package.json.bak-20261005-m1-context-pilot）
 # 已做：node_modules\@local\dsh-context-pilot Junction → F:\My Code\dsh-context-pilot\plugin
 #       （与 browser-kit 同款手工 Junction，未跑 pnpm install）

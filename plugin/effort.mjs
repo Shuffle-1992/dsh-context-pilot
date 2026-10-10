@@ -1,5 +1,5 @@
 /**
- * @local/dsh-context-pilot —— 智能思考（reasoning effort）功能域（R3 解耦，2026-10-08）。
+ * dsh-context-pilot —— 智能思考（reasoning effort）功能域（R3 解耦，2026-10-08）。
  *
  * 为什么独立成模块（docs/r3-effort-review.md §3.1）：
  *   本功能域自带配置、状态、读取、钩子、工具、注入文本、HUD 载荷，是一个**内聚的功能域**；

@@ -1,5 +1,5 @@
 /**
- * @local/dsh-context-pilot —— 宿主 face 描述符（exports["./typert"]）。
+ * dsh-context-pilot —— 宿主 face 描述符（exports["./typert"]）。
  *
  * 背景（2026-10-06 实证）：host→configEditor.edit 在插件上下文里恒被
  * 「HMR transactions cannot be nested」拒绝（面板能成是因为 client→remote 不经插件 apply scope）
@@ -64,13 +64,13 @@ export function createRemoteFace({ onGetHud }) {
 
 /** 宿主 face 模型描述符（dsh-typert-loader 自动发现并 ctx.typert.register）。 */
 export const TYPERT = {
-  package: '@local/dsh-context-pilot',
+  package: 'dsh-context-pilot',
   face: 'host',
   generator: 'hand-written：无 zod/schemastery 依赖；strict codec 用透传校验器',
   service: FACE_NAME,
   schemas: [],
   invocations: FACE_METHOD_TABLE.map(([method, parameters, , optionals]) => ({
-    id: `@local/dsh-context-pilot#${FACE_NAME}/${method}`,
+    id: `dsh-context-pilot#${FACE_NAME}/${method}`,
     service: FACE_NAME,
     namespace: FACE_NAME,
     method,
@@ -82,13 +82,13 @@ export const TYPERT = {
       ...(optionals.includes(name) ? { acceptsUndefined: true } : {}),
       codec: {
         mode: 'strict',
-        typeSymbol: `@local/dsh-context-pilot#${FACE_NAME}/${method}:${name}`,
+        typeSymbol: `dsh-context-pilot#${FACE_NAME}/${method}:${name}`,
         create: () => JSON_ANY,
       },
     })),
     result: {
       mode: 'strict',
-      typeSymbol: `@local/dsh-context-pilot#${FACE_NAME}/${method}:result`,
+      typeSymbol: `dsh-context-pilot#${FACE_NAME}/${method}:result`,
       create: () => JSON_ANY,
     },
   })),

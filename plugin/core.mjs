@@ -1,5 +1,5 @@
 /**
- * @local/dsh-context-pilot —— **core**（R14 解耦第六刀）：配置 / 状态 / 报告管线 / 工具函数。
+ * dsh-context-pilot —— **core**（R14 解耦第六刀）：配置 / 状态 / 报告管线 / 工具函数。
  *
  * ## 为什么它必须由 entry 预加载后传进来（而不是像其它域那样在 apply 里动态 import）
  * `state` / `log` / `svc` / `schedule` / `addListener` 都在 `apply()` 期**同步**使用；
@@ -583,7 +583,7 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
         if (!data) data = reportBase;
       }
       data = data ?? {
-        plugin: '@local/dsh-context-pilot',
+        plugin: 'dsh-context-pilot',
         purpose: 'M1 用量读取验证 + M2 注入报告',
         updated: entry.at,
         history: [],

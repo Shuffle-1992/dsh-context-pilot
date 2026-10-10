@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-	id: "@local/dsh-context-pilot",
+	id: "dsh-context-pilot",
 	factory: (require) => {
 		var module = { exports: {} };
 		var exports = module.exports;
@@ -46,7 +46,7 @@ window.__ModuleLoader__.load({
 		};
 
 		/** 卡片 key = bundle 包名（plugins.bundle.config slot 契约）。 */
-		const BUNDLE_KEY = "@local/dsh-context-pilot";
+		const BUNDLE_KEY = "dsh-context-pilot";
 		/** 设置命名空间匹配（host 的 settingsNs = Loader entry id，本插件）。 */
 		const NS_PATTERN = /context-pilot/i;
 		const LOG = "[dsh-context-pilot/client]";
@@ -54,10 +54,10 @@ window.__ModuleLoader__.load({
 		const HUD_FACE = "dshContextPilot";
 		/** remote 贡献声明（与 wire.host.mjs FACE_METHOD_TABLE 逐字对账——漂移=调用静默失败）。 */
 		const REMOTE_CONTRIBUTION = {
-			package: "@local/dsh-context-pilot",
+			package: "dsh-context-pilot",
 			descriptors: [
 				{
-					id: `@local/dsh-context-pilot#${HUD_FACE}/getHud`,
+					id: `dsh-context-pilot#${HUD_FACE}/getHud`,
 					service: HUD_FACE,
 					namespace: HUD_FACE,
 					method: "getHud",
@@ -68,12 +68,12 @@ window.__ModuleLoader__.load({
 							wire: "sid",
 							source: "json",
 							acceptsUndefined: true,
-							codec: { mode: "strict", typeSymbol: `@local/dsh-context-pilot#${HUD_FACE}/getHud:sid`, create: () => ({ parse: (value) => value }) },
+							codec: { mode: "strict", typeSymbol: `dsh-context-pilot#${HUD_FACE}/getHud:sid`, create: () => ({ parse: (value) => value }) },
 						},
 					],
 					result: {
 						mode: "strict",
-						typeSymbol: `@local/dsh-context-pilot#${HUD_FACE}/getHud:result`,
+						typeSymbol: `dsh-context-pilot#${HUD_FACE}/getHud:result`,
 						create: () => ({ parse: (value) => value }),
 					},
 				},

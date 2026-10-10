@@ -1,5 +1,5 @@
 /**
- * @local/dsh-context-pilot —— Host 入口薄壳（业务逻辑全在 host.impl.mjs，勿在此放逻辑）。
+ * dsh-context-pilot —— Host 入口薄壳（业务逻辑全在 host.impl.mjs，勿在此放逻辑）。
  *
  * 双层缓存规避（继承 dsh-browser-kit 实测结论 2026-10-04）：
  *  1. cordis loader 经 Node ESM 缓存加载入口——插件 disable/enable 重跑 apply() 但模块实例不换新，

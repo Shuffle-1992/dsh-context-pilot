@@ -1,0 +1,10 @@
+# 兼容补丁：仅用于**旧的**本地挂载名 `@local/dsh-context-pilot`（迁移期保留）。
+#
+# 背景：2026-10-10 统一包名为 `dsh-context-pilot` 之前，profile 以
+#   "@local/dsh-context-pilot": "link:.../plugin"
+# 挂载，node_modules 里是 `@local/dsh-context-pilot` 这个 junction；Node 按**目录名**解析，
+# 所以那条老路径仍能加载本包——但此时插入语句必须用老名字，否则解析不到。
+# 生产/新装一律用 `cordis.patch.yml`（name = dsh-context-pilot）；本文件只作回滚/兼容。
+- insert:
+    - id: dsh-context-pilot
+      name: '@local/dsh-context-pilot'

@@ -229,23 +229,30 @@ ok('根清单可被市场识别：name/version/license/repository 齐备且非 p
     && typeof rootPkg.license === 'string' && !!rootPkg.repository?.url
     && rootPkg.private !== true,
   `name=${rootPkg.name} version=${rootPkg.version} license=${rootPkg.license} private=${rootPkg.private}`);
-ok('Bundle 分发声明：根清单 dsh.bundle.patch 指向**公开**patch，且该文件存在',
+ok('Bundle 分发声明：根清单 dsh.bundle.patch 指向存在的生产 patch',
   typeof rootPkg.dsh?.bundle?.patch === 'string'
     && existsSync(join(ROOT, rootPkg.dsh.bundle.patch.replace(/^\.\//, '')))
-    && /public/.test(rootPkg.dsh.bundle.patch),
+    && !/public/.test(rootPkg.dsh.bundle.patch), // 单身份后不再需要 *public* 双 patch
   `patch=${rootPkg.dsh?.bundle?.patch}`);
 ok('开发挂载仍完整：plugin/package.json 有 dsh.bundle.patch（缺则 not-bundle 静默跳过）',
   typeof plugPkg.dsh?.bundle?.patch === 'string'
     && existsSync(join(PLUGIN, plugPkg.dsh.bundle.patch.replace(/^\.\//, ''))),
   `patch=${plugPkg.dsh?.bundle?.patch}`);
-/* 包名 ↔ patch 里 name 必须一致：加载器按包名解析，不一致 = 装上去挂不起来。 */
+/* 单一身份（2026-10-10 用户要求去掉 `@local/` 前缀）：
+ * 根清单 name = plugin 清单 name = 生产 patch 的 insert[0].name —— 加载器按**包名**解析，
+ * 三处不一致就会出现「装上去挂不起来」或「旧名残留」。 */
 {
-  const pubPatch = readFileSync(join(ROOT, 'plugin/cordis.patch.public.yml'), 'utf8');
-  const devPatch = readFileSync(join(PLUGIN, 'cordis.patch.yml'), 'utf8');
+  const prodPatch = readFileSync(join(PLUGIN, 'cordis.patch.yml'), 'utf8');
   const nameOf = (y) => (/- insert:[\s\S]*?name:\s*'?([^'\n]+)'?/.exec(y)?.[1] ?? '').trim();
-  ok('包名 ↔ patch 一致：根包名 = 公开 patch 的 name；开发包名 = 开发 patch 的 name',
-    nameOf(pubPatch) === rootPkg.name && nameOf(devPatch) === plugPkg.name,
-    `根=${rootPkg.name}/patch=${nameOf(pubPatch)} ｜ plugin=${plugPkg.name}/patch=${nameOf(devPatch)}`);
+  ok('单一身份：根 name = plugin name = 生产 patch 的 name，且**不含 @local/** 前缀',
+    rootPkg.name === plugPkg.name && nameOf(prodPatch) === rootPkg.name && !rootPkg.name.includes('@'),
+    `根=${rootPkg.name} plugin=${plugPkg.name} patch=${nameOf(prodPatch)}`);
+  ok('兼容别名保留：旧名 patch 仍在（供运行中的 @local junction 回滚/兼容，勿误删）',
+    existsSync(join(PLUGIN, 'cordis.patch.local.yml'))
+      && nameOf(readFileSync(join(PLUGIN, 'cordis.patch.local.yml'), 'utf8')) === '@local/dsh-context-pilot',
+    '删掉兼容 patch ⇒ 旧 junction 挂载在下次重启时会挂不起来');
+  ok('无残留双身份文件：cordis.patch.public.yml 已删除（单身份后不需要）',
+    !existsSync(join(PLUGIN, 'cordis.patch.public.yml')), '仍存在 public patch ⇒ 两套身份容易再次漂移');
 }
 ok('版本一致：根与 plugin 清单的 version 相同（避免市场显示错版本）',
   rootPkg.version === plugPkg.version, `root=${rootPkg.version} plugin=${plugPkg.version}`);
