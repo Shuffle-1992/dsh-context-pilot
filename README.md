@@ -51,12 +51,13 @@ profile `package.json` 两处要改（以本机 `desktop` profile 为例）：
 > **交接说明**：本文是入口，读完 §1–§3 即可上手；深入内容在 [`docs/`](docs/)。
 > 创建 2026-10-05 · 最后更新 2026-10-12
 
-> **版本 v0.1.1**（2026-10-10）：**包名统一为 `dsh-context-pilot`**（去掉 `@local/` 前缀，符合 DSH Plugin Hub 上架基础项：
-> 根清单可被市场识别、`dsh.bundle.patch` 声明、README 含安装命令、MIT LICENSE）。
-> 本版另含 R16.13–R16.19 的修复：引擎压缩补记、教学分工去重、`set-tier` schema 类型事故、档位跨热换持久化、
-> 档位落盘有界化、引擎 step 边界抢先（动态余量 + 取证）、**压缩记录跨会话根治**（权威会话 id 取自槽位 props）；
-> 以及 **R17**：**用户手动改档后，本轮轮首注入即报新档并点明「用户刚改档」**（原先报的是上一次请求的旧档）。
-> 历史：v0.1.0（2026-10-08）首个 GitHub 发布。`plugin/package.json` 与根 `package.json` 的 `version` 即版本号。
+> **版本 v0.1.2**（2026-10-12）：**R17 —— 用户手动改档后，本轮轮首注入即报新档并点明「用户刚改档」**
+> （原先报的是上一次请求的旧档，详见 [`docs/milestones.md`](docs/milestones.md) R17 段）。
+> 历史：**v0.1.1**（2026-10-10）**包名统一为 `dsh-context-pilot`**（去掉 `@local/` 前缀，符合 DSH Plugin Hub 上架基础项：
+> 根清单可被市场识别、`dsh.bundle.patch` 声明、README 含安装命令、MIT LICENSE），另含 R16.13–R16.19 的修复：
+> 引擎压缩补记、教学分工去重、`set-tier` schema 类型事故、档位跨热换持久化、档位落盘有界化、
+> 引擎 step 边界抢先（动态余量 + 取证）、**压缩记录跨会话根治**（权威会话 id 取自槽位 props）；
+> v0.1.0（2026-10-08）首个 GitHub 发布。`plugin/package.json` 与根 `package.json` 的 `version` 即版本号。
 
 ---
 
