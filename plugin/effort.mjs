@@ -33,6 +33,12 @@
  *   ⑨  sid **现读**优先、安装期值兜底：本项目实测 session id 会轮转（压缩后 / 多会话交错）
  *       ⇒ 只在安装期捕获会查不到 pending（换档静默失效）。
  *   ⑩  应用时 `delete maxTokens`：不把上个 adapter 的输出上限钉到新档（router-laya applyRoute 同款）。
+ *   ⑪ **轮首读档必须读 `modelSelection` 投影的 `pending`，不能只读 `requestHeader()`**（R17，2026-10-12
+ *      用户实测「我手动从 high 改成 max，模型本轮读到的还是 high」）：用户改档（UI `selectModel` /
+ *      `/model` 命令）只追加 `model/selection` 事件 ⇒ 它只是**投影 pending**；官方 `installModelSelection`
+ *      要到**本步骤**的 `system-prompt/assemble` + `agent/request` 才把它落到请求上，
+ *      而我们的注入在 `agent/pre-step`（**更早**）⇒ 那一刻 header 仍是**上一次请求**的旧值。
+ *      只读 header 的旧实现 ⇒ 模型在轮首被喂一个「本轮根本不会用」的档位（还据此做决策）。
  *
  * 另：档位属于**影响计费**的参数（换档会使前缀缓存失效，见 dsh-llm call-config.js 注释），
  *     故冷却默认 30s 且可由面板配置（R3-S7）。
@@ -172,7 +178,10 @@ export function createEffort(deps) {
   /**
    * 读当前会话的思考强度信息（全路径 async；任何异常都降级为 { ok:false }，绝不抛出）。
    * @returns {Promise<{ok: boolean, error?: string, provider?: string, model?: string,
-   *   current?: string|null, adapterDefault?: boolean, efforts?: string[]|null, defaultEffort?: string|null}>}
+   *   current?: string|null, adapterDefault?: boolean, efforts?: string[]|null, defaultEffort?: string|null,
+   *   pending?: boolean, pendingFrom?: string|null, pendingChanged?: boolean}>}
+   *   ⚠️ R17：`current` 是**本步骤请求实际会用的档**——有用户待生效选择（投影 pending）时取它，
+   *   而不是 header 里那次请求的旧值；`pendingChanged` 表示「用户刚改过、与旧值不同」。
    */
   async function read(agent) {
     try {
@@ -180,25 +189,60 @@ export function createEffort(deps) {
       const c = hdr?.config ?? null;
       if (!c?.provider || !c?.model) return { ok: false, error: 'no-route' };
       /** adapterDefault=true 表示该档位来自 adapter 默认，而非会话显式选择（UI 据此标注「(默认)」）。 */
+      const headerEffort = typeof c.reasoningEffort === 'string' && c.reasoningEffort ? c.reasoningEffort : null;
+      /* ═══ R17（2026-10-12 用户实测）：「手动改成 max，模型本轮读到的还是 high」 ═══
+       * 时序（源码 + 真机双证，见文件头结论⑪）：
+       *   ① 用户改档 ⇒ client `sessionController.selectModel` ⇒ `selectForNextRequest`
+       *      ⇒ 追加 **model/selection** 事件（`api-session-controller` L319-322 / 投影 L2072-2088）
+       *      ⇒ 落在 **modelSelection 投影的 `pending`**（只有 UI `/model` 命令两处会写，都是用户主动）；
+       *   ② 官方 `installModelSelection` 要到**本步骤**的 `system-prompt/assemble` → `agent/request`
+       *      才把 `selection.current` 落进请求配置（`dsh-agent/lib/types/model-selection.js` L45-75）；
+       *   ③ 我们的注入在 `agent/pre-step` step 1 —— **排在上面两者之前**
+       *      ⇒ 此刻 `requestHeader()` 还是**上一次请求**的档（旧值），新选择只在投影 `pending` 里；
+       *   ④ 本步骤的请求随后就用了新档（pending 被消费、header 更新）。
+       * ⇒ 只读 header 的旧实现会在轮首喂给模型「思考强度 high」，而本轮实际跑 max：
+       *    模型既不知道用户调过档（错过「加大思考量」的意图），还会据错误读数做决策。
+       * client 侧 chip 早就是同款口径（`sel.pending || sel.lastUsed`，见 client.js EffortChip）
+       * ⇒ 宿主侧对齐为 **pending 优先**。
+       * 投影未注册 / 服务缺失 / 形状异常一律退回 header 值（绝不因新读数影响主流程）。 */
+      const sel = tryOf(() => svc('sessionProjections')?.stateOf?.(agent?.session, 'modelSelection')).value ?? null;
+      const pending = sel && typeof sel.pending === 'object' && sel.pending !== null ? sel.pending : null;
+      const pendEffort = typeof pending?.reasoningEffort === 'string' && pending.reasoningEffort
+        ? pending.reasoningEffort : null;
+      /** 本轮**实际会用到**的路由：有 pending 就是它（本步骤请求即按它走），否则是 header。 */
+      const route = pending ?? c;
       const base = {
         ok: true,
-        provider: c.provider,
-        model: c.model,
-        current: typeof c.reasoningEffort === 'string' && c.reasoningEffort ? c.reasoningEffort : null,
-        adapterDefault: hdr?.adapterDefaults?.reasoningEffort === true,
+        provider: route.provider,
+        model: route.model,
+        /* pending 未指定档（只换模型 / 选了「默认」）⇒ 先留 null，由 settle 用 adapter 默认兜底。 */
+        current: pending ? pendEffort : headerEffort,
+        adapterDefault: pending ? pendEffort === null : hdr?.adapterDefaults?.reasoningEffort === true,
+        /* R17：供渲染层判别「有用户刚做、本步骤才生效的选择」——下面这三个字段是新增语义。 */
+        pending: !!pending,
+        pendingFrom: headerEffort,
+        pendingChanged: false,
         efforts: null,
         defaultEffort: null,
       };
+      /* pending 且未指定档 ⇒ 实际生效的是新模型的 adapter 默认（官方 hook 会删掉继承档）。
+       * 默认值取不到就退回 header 旧值：**宁可少报「用户改了」，也不能让后缀整个消失**。 */
+      const settle = (info, defEffort = null) => {
+        if (info.pending && info.current === null) info.current = defEffort ?? info.pendingFrom;
+        info.pendingChanged = info.pending && info.current !== info.pendingFrom;
+        return info;
+      };
       const llm = svc('llm');
-      const p = tryOf(() => llm?.resolveModelInfo?.(c.provider, c.model));
-      if (p.error || !p.value) return base;
+      const p = tryOf(() => llm?.resolveModelInfo?.(route.provider, route.model));
+      if (p.error || !p.value) return settle(base);
       const mi = await Promise.resolve(p.value).catch(() => null);
-      if (!mi) return base;
-      return {
+      if (!mi) return settle(base);
+      const defaultEffort = mi?.reasoning?.defaultEffort ?? null;
+      return settle({
         ...base,
         efforts: mi?.reasoning ? (mi.reasoning.efforts ?? []).map((e) => e.id) : null,
-        defaultEffort: mi?.reasoning?.defaultEffort ?? null,
-      };
+        defaultEffort,
+      }, defaultEffort);
     } catch (e) {
       return { ok: false, error: msg(e) };
     }
@@ -556,6 +600,8 @@ export function createEffort(deps) {
   /**
    * 每轮用量行后缀 —— 让模型知道**当前实际生效**档位（它只知道自己请求过什么，
    * 不知道插件是否应用成功，例如档位非法被忽略时）。短后缀 ≈7 token/轮。
+   * R17：用户手动改档（或 `/model` 命令）时追加「用户刚把档位从 X 调到 Y，本步骤即生效」——
+   * 这类变化发生在两轮之间，模型没有任何其它通道能知道。
    */
   function renderSuffix(eff) {
     try {
@@ -567,8 +613,18 @@ export function createEffort(deps) {
        * 成本：约 +8 token/轮；换来的是「每一轮都能当场决定要不要切」。
        * 取不到可选集时不编造（保持纯档位后缀）。 */
       const opts = Array.isArray(eff.efforts) && eff.efforts.length ? eff.efforts.join('/') : null;
+      /* R17（2026-10-12 用户实测「手动改档后模型本轮读到的还是旧档」）：用户改档发生在**上一轮结束之后**，
+       * 模型无从得知；只把新值报出来还不够——它会把新档当成「一直如此」，从而错过用户
+       * 「这轮要更用力」的意图。故 pendingChanged 时**紧跟在档位值后面**点明「用户刚调过 + 本步骤即生效」。
+       * 位置必须紧跟档位值（而不是塞在句尾）：这是模型本轮唯一的知情点，越前越不会被略读。 */
+      const parts = [];
+      if (eff.pendingChanged) {
+        parts.push('**用户刚把档位从 ' + (eff.pendingFrom ?? '(默认)') + ' 调到 ' + eff.current
+          + '**，本步骤的请求即用它');
+      }
+      if (opts) parts.push('可选 ' + opts + '，需要时先说再调用 ' + TOOL_NAME);
       return '思考强度 ' + eff.current + (eff.adapterDefault ? '(默认)' : '')
-        + (opts ? '（可选 ' + opts + '，需要时先说再调用 ' + TOOL_NAME + '）' : '');
+        + (parts.length ? '（' + parts.join('；') + '）' : '');
     } catch {
       return null;
     }

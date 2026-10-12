@@ -2116,3 +2116,48 @@ Error: tool "compact_context" returned invalid output: "value.scheduled" must be
 **教训**：连续三次同类问题（last-wins 抢 / URL 过期 / 权威值缺失）说明——
 **「猜当前会话」这个方向本身就是错的**；应该在**会话作用域的槽位**里取现成的权威 id。
 另：指纹行要从第一版就带 `sid + 来源`，本次排查几乎全靠它。
+
+### R17 「我手动改成 Max，新一轮模型读到的还是 high」—— 轮首读档错在「只读上一次请求的 header」（2026-10-12）
+
+**用户报告（原话）**：「上一轮结束时的思考强度是 high，然后我手动改成 Max，发起新的一轮，
+模型开始读取到的思考强度好像还是 high，注入的时机不够前。应该能让模型知道用户调整了思考强度。」
+
+**取证（源码 + 时序，两处写入点全库可数）**：
+
+| 事实 | 证据 |
+| --- | --- |
+| 用户改档**只**产生一个会话事件 + 一个投影 pending | UI `selectModel` / `/model` 命令 → `selectForNextRequest`：`agent.session.append('model/selection', …)` + 置 `selection.current`（`api-session-controller` L319-322 / L735）；全库 `selectForNextRequest` 只有这两个调用者 |
+| 官方把选择落到**请求**上要到**本步骤**的 assemble/request | `installModelSelection`：`system-prompt/assemble` 快照 `selection.current` → `agent/request` 写进配置（`dsh-agent/lib/types/model-selection.js` L45-75） |
+| 插件的注入排在它们**之前** | 注入在 `agent/pre-step` step 1 ⇒ 那一刻 `requestHeader()` 仍是**上一次请求**的档位（旧值），用户的新选择只在 **modelSelection 投影的 `pending`**（投影 `apply` 见 L2072-2088；`stateOf(session,'modelSelection') = {lastUsed,pending}` 的语义经 `cordis_inspect_query` 的 `sessionProjections` 契约复核） |
+| 旁证：client chip 早就是同款口径 | `sel.pending \|\| sel.lastUsed`（`client.js` EffortChip）⇒ 只有**宿主侧读档**这一处漏了 pending |
+
+⇒ 旧实现轮首报「思考强度 high」，而本轮请求实际跑 max：模型既不知道用户调过档（错过「这轮要更用力」的意图），
+还据错误读数做决策（例如顺手切回去）。
+
+**修（R17，全在 `plugin/effort.mjs`）**：
+
+1. `read()` **pending 优先**：`agent.session` 的 modelSelection 投影有 `pending` 时，provider/model/current 全取它
+   （本步骤的请求就会用它）；投影缺失 / 形状异常 / 服务缺失一律退回 header 值（降级不炸）。
+2. `pending` 未指定档（只换模型 / 选了「默认」）⇒ 用**新模型的 adapter 默认**兜底；默认取不到则退回旧值
+   ——**宁可少报「用户改了」，也不能让后缀整个消失**。
+3. `renderSuffix()` 在 `pendingChanged` 时**紧跟档位值**写明「**用户刚把档位从 high 调到 max**，本步骤的请求即用它」；
+   无 pending 时文案与旧版**逐字一致**（零 token 增长、零回归）。
+
+**验证**：contract 445→**456** + static 72 + report 54 + boot 21 = **603 断言**全绿；
+新增 11 条（3 静态 + 8 行为级：改档 / 无 pending 逐字一致 / 投影缺失降级 / 只换模型兜底 / 重复同档不打扰 /
+「无 adapter 默认」与「llm 不可用」两条兜底路径）；**变异 4/4 CAUGHT**
+（只读 header / 完全不理 pending / 去掉 current 兜底 / 去掉「刚改档」标注），还原后文件哈希一致。
+
+**部署**：`plugin/effort.mjs` —— **toggle 热换**（entry 未改，无需重启、无需刷新页面）。
+
+**如实记录的覆盖边界**：用户在**一轮进行中**改档时，该变化当步就被官方消费（header 立刻更新、pending 清空），
+⇒ 下一轮只报新档位值、不标「用户刚改」。要连这种情形也标注，得按会话记住「上次报过的档」，
+本轮**刻意不做**：那是低频场景，而新的有状态机制会带来 toggle 重置后的误报面（本项目在 chip 统计那轮已踩过同类）。
+
+**教训**：
+
+- 「用户刚改的设置」在 DSH 里是**投影 `pending`**，不是 `requestHeader`。凡「在请求之前注入」的读取都要自问：
+  **此刻 header 是不是还是上一次请求的值**。（同类第二次：R16.19 错在「猜当前会话」，这次错在「读上一请求的档位」。）
+- 该功能本已有正确的一半：`applyTo` 的「他人显式指定 ⇒ 让位」护栏（用户手动改档后不会被插件覆盖）。
+  但**轮首注入的读数**来自另一个源 ⇒ 护栏对了、读数错了，用户看到的就是「你明明知道，却报旧档」。
+  **行为正确 ≠ 知情正确**：与用户动作相关的读数必须与护栏同源。

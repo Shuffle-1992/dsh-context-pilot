@@ -2458,6 +2458,106 @@ ok('compact_context 返回值 ⊆ output.schema（失败分支）',
     `未声明字段：${undeclared(eSpec, rCd).join(', ')}（返回值 ${JSON.stringify(rCd)}）`);
 }
 
+/* ═══════════ 6.22 R17：用户手动改档必须在**本轮轮首**就告诉模型 ═══════════
+ * 用户实测（2026-10-12）：「上一轮结束时思考强度是 high，我手动改成 Max 发起新一轮，
+ * 模型开始读取到的好像还是 high——注入的时机不够前。应该能让模型知道用户调整了思考强度。」
+ * 根因（源码 + 时序双证，详见 effort.mjs 文件头结论⑪）：
+ *   ① 用户改档（UI `selectModel` / `/model` 命令，全库只有这两处会写）**只**追加
+ *      `model/selection` 事件 ⇒ 落在 **modelSelection 投影的 `pending`**；
+ *   ② 官方 `installModelSelection` 要到**本步骤**的 `system-prompt/assemble` → `agent/request`
+ *      才把它落进请求配置；
+ *   ③ 插件的注入在 `agent/pre-step` step 1 —— **排在上面两者之前** ⇒ 那一刻 `requestHeader()`
+ *      仍是**上一次请求**的旧档。只读 header 的旧实现 ⇒ 轮首喂给模型一个「本轮根本不会用」的档位。
+ * 断言分两层：静态（读的是 pending 而非只读 header）+ 行为（真跑 read/renderSuffix 五条路径）。 */
+console.log('\n== 6.22 R17：用户手动改档 ⇒ 本轮轮首即知情 ==');
+const effortR17 = read('effort.mjs');
+ok('R17 静态：轮首读档必须查 modelSelection 投影的 pending（只读 header 就是旧档）',
+  /svc\('sessionProjections'\)\?\.stateOf\?\.\(agent\?\.session, 'modelSelection'\)/.test(effortR17)
+  && /const pending = sel && typeof sel\.pending === 'object' && sel\.pending !== null/.test(effortR17)
+  && /const route = pending \?\? c;/.test(effortR17),
+  '未读投影 pending ⇒ 用户刚改的档位在轮首不可见（模型只看到上一轮旧档，还据此做决策）');
+ok('R17 静态：pending 未指定档（只换模型）必须有兜底 ⇒ 前缀不得消失',
+  /info\.current = defEffort \?\? info\.pendingFrom;/.test(effortR17),
+  'pending 无档且 adapter 默认取不到时不兜底 ⇒ current=null ⇒ 后缀整个消失（比报旧档更糟）');
+ok('R17 静态：后缀必须紧跟档位值说明「用户刚改档」',
+  /eff\.pendingChanged/.test(effortR17) && /用户刚把档位从/.test(effortR17),
+  '只报新值 ⇒ 模型以为「一直就是这档」，错过用户「这轮要更用力／可以省点」的意图');
+
+/* 行为级：真跑 effort 域（桩 sessionProjections/llm），覆盖 ①改档 ②无 pending ③投影缺失 ④只换模型 ⑤重复同档 */
+{
+  const eMod17 = await import(pathToFileURL(join(PLUGIN, 'effort.mjs')).href);
+  /* mi 三态：undefined=正常模型信息；null=**llm 服务不可用**；对象=自定义（用于「无 adapter 默认档」）。 */
+  const MI17 = { reasoning: { efforts: [{ id: 'off' }, { id: 'low' }, { id: 'high' }, { id: 'max' }], defaultEffort: 'high' } };
+  const mkApi17 = (projState, mi = MI17) => eMod17.createEffort({
+    svc: (k) => (k === 'sessionProjections'
+      ? (projState === 'absent' ? undefined : { stateOf: () => projState })
+      : k === 'llm'
+        ? (mi === null ? undefined : { resolveModelInfo: async () => mi })
+        : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e?.message ?? e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { effortSkips: {}, effortDiag: {}, effortSwitches: 0, effortReasserts: 0, effortHooks: 0, effortToolCalls: 0 } },
+    readCfg: () => ({ enabled: true, effortEnabled: true, effortCooldownMs: 30000 }),
+    getDefineTool: () => (sp) => sp,
+  });
+  const ag17 = (he) => ({
+    id: 'r17',
+    session: { id: 'r17', requestHeader: () => ({ config: { provider: 'deepseek-account', model: 'deepseek-flash', reasoningEffort: he } }) },
+  });
+  const sel17 = (pe, model) => ({ provider: 'deepseek-account', model: model ?? 'deepseek-flash', ...(pe ? { reasoningEffort: pe } : {}) });
+
+  const apiA = mkApi17({ lastUsed: sel17('high'), pending: sel17('max') });
+  const effA = await apiA.read(ag17('high'));
+  ok('R17 行为级：用户手动改档（header=high / pending=max）⇒ 本轮读数即 max 并标记「刚改过」',
+    effA?.current === 'max' && effA?.pending === true && effA?.pendingFrom === 'high' && effA?.pendingChanged === true,
+    `实际 current=${JSON.stringify(effA?.current)} pending=${JSON.stringify(effA?.pending)} pendingChanged=${JSON.stringify(effA?.pendingChanged)}`
+    + ' —— 变异：改回只读 header 时这里给出 high（模型以为用户没动档）');
+  const sufA = apiA.renderSuffix(effA) ?? '';
+  ok('R17 行为级：后缀点明「用户刚把档位从 high 调到 max」并写清本步骤即生效',
+    /用户刚把档位从 high 调到 max/.test(sufA) && /本步骤的请求即用它/.test(sufA),
+    `实际后缀：${JSON.stringify(sufA)}`);
+
+  const apiB = mkApi17({ lastUsed: sel17('high'), pending: null });
+  const effB = await apiB.read(ag17('high'));
+  ok('R17 行为级：无 pending 时后缀与旧版**逐字一致**（零回归，token 不涨）',
+    (apiB.renderSuffix(effB) ?? '') === '思考强度 high（可选 off/low/high/max，需要时先说再调用 set_reasoning_effort）',
+    `实际：${JSON.stringify(apiB.renderSuffix(effB))}`);
+
+  const apiC = mkApi17('absent');
+  const effC = await apiC.read(ag17('high'));
+  ok('R17 行为级：投影缺失/形状异常 ⇒ 退回 header 值（降级不炸、不掉档）',
+    effC?.ok === true && effC?.current === 'high' && effC?.pending === false,
+    `实际：${JSON.stringify(effC)}`);
+
+  const apiD = mkApi17({ lastUsed: sel17('max'), pending: { provider: 'deepseek-account', model: 'deepseek-v4-pro' } });
+  const effD = await apiD.read(ag17('max'));
+  ok('R17 行为级：pending 未指定档（只换模型）⇒ 用新模型 adapter 默认兜底，后缀不消失',
+    effD?.current === 'high' && effD?.adapterDefault === true && typeof apiD.renderSuffix(effD) === 'string',
+    `实际 read=${JSON.stringify(effD)} suffix=${JSON.stringify(apiD.renderSuffix(effD))}`);
+
+  const apiE = mkApi17({ lastUsed: sel17('high'), pending: sel17('high') });
+  const effE = await apiE.read(ag17('high'));
+  ok('R17 行为级：pending 与旧值相同（重复选同档）⇒ 不加「刚改档」噪声',
+    effE?.pendingChanged === false && !/用户刚把档位从/.test(apiE.renderSuffix(effE) ?? ''),
+    `实际：${JSON.stringify(apiE.renderSuffix(effE))}`);
+
+  /* 兜底那一行的**行为覆盖**（静态断言只证明写法在，不证明它真的保住了后缀）：
+   * 用户选了「默认档」（pending 无 reasoningEffort）且 adapter 默认取不到时，
+   * current 必须退回上一档的旧值 —— 否则 renderSuffix 返回 null、后缀整条消失。 */
+  const apiF = mkApi17({ lastUsed: sel17('max'), pending: sel17(null) }, { reasoning: { efforts: [{ id: 'low' }, { id: 'high' }], defaultEffort: null } });
+  const effF = await apiF.read(ag17('max'));
+  const sufF = apiF.renderSuffix(effF);
+  ok('R17 行为级：pending 无档且**取不到 adapter 默认** ⇒ 退回旧值，后缀不得变 null',
+    effF?.current === 'max' && typeof sufF === 'string' && /思考强度/.test(sufF),
+    `实际 read=${JSON.stringify(effF)} suffix=${JSON.stringify(sufF)} —— 变异：去掉兜底⇒current=null⇒后缀消失（模型连档位都看不到）`);
+
+  const apiG = mkApi17({ lastUsed: sel17('max'), pending: sel17(null) }, null);
+  const effG = await apiG.read(ag17('max'));
+  ok('R17 行为级：llm 服务不可用（读不到可选集）时同样不丢后缀、不报错',
+    effG?.ok === true && typeof apiG.renderSuffix(effG) === 'string',
+    `实际 read=${JSON.stringify(effG)} suffix=${JSON.stringify(apiG.renderSuffix(effG))}`);
+}
+
 /* ═══════════ 汇总 ═══════════ */
 console.log(`\n${'='.repeat(52)}`);
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);

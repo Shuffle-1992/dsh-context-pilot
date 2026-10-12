@@ -49,12 +49,13 @@ profile `package.json` 两处要改（以本机 `desktop` profile 为例）：
 | `docs/` | 设计与交接文档（含 `docs/setup.md` 部署矩阵、`docs/hub-publishing.md` 上架清单） |
 
 > **交接说明**：本文是入口，读完 §1–§3 即可上手；深入内容在 [`docs/`](docs/)。
-> 创建 2026-10-05 · 最后更新 2026-10-10
+> 创建 2026-10-05 · 最后更新 2026-10-12
 
 > **版本 v0.1.1**（2026-10-10）：**包名统一为 `dsh-context-pilot`**（去掉 `@local/` 前缀，符合 DSH Plugin Hub 上架基础项：
 > 根清单可被市场识别、`dsh.bundle.patch` 声明、README 含安装命令、MIT LICENSE）。
 > 本版另含 R16.13–R16.19 的修复：引擎压缩补记、教学分工去重、`set-tier` schema 类型事故、档位跨热换持久化、
-> 档位落盘有界化、引擎 step 边界抢先（动态余量 + 取证）、**压缩记录跨会话根治**（权威会话 id 取自槽位 props）。
+> 档位落盘有界化、引擎 step 边界抢先（动态余量 + 取证）、**压缩记录跨会话根治**（权威会话 id 取自槽位 props）；
+> 以及 **R17**：**用户手动改档后，本轮轮首注入即报新档并点明「用户刚改档」**（原先报的是上一次请求的旧档）。
 > 历史：v0.1.0（2026-10-08）首个 GitHub 发布。`plugin/package.json` 与根 `package.json` 的 `version` 即版本号。
 
 ---
@@ -161,7 +162,7 @@ profile `package.json` 两处要改（以本机 `desktop` profile 为例）：
 
 | 项 | 内容 |
 | --- | --- |
-| **注入** | 一次性教学（教工具用法）+ 每轮用量行后缀「｜ 思考强度 high」 |
+| **注入** | 一次性教学（教工具用法）+ 每轮用量行后缀「｜ 思考强度 high」；**用户手动改档时后缀直接点明「用户刚把档位从 high 调到 max，本步骤即生效」**（R17，见下） |
 | **触发** | **工具 `set_reasoning_effort`**（参数 `effort=<档位>`）—— 见下「为什么是工具不是标记」 |
 | **执行 seam** | `agent/request` waterfall + **`prepend: true`**（见下「为什么必须 prepend」） |
 | **不中断** | 只改请求头一个字段：会话历史不动、不插消息、工具链不断 |
@@ -202,6 +203,16 @@ Agent 自改档不应改掉新会话的默认档。
 
 **让位他人选择**：若当前请求的档位既不是本插件上次写的、也不是本次想写的
 （用户手动选档 / subagent 自带 `reasoning_effort`）⇒ 不覆盖。
+
+**用户手动改档，模型怎么知道（R17，2026-10-12 用户实测反馈）**：
+用户改档（UI 选择器 / `/model` 命令）在 DSH 里**只**落成 `model/selection` 事件 ⇒
+**`modelSelection` 投影的 `pending`**；官方要到**本步骤**的 `system-prompt/assemble` → `agent/request`
+才把它落到请求上，而插件的注入在 `agent/pre-step`（**更早**）⇒
+那一刻 `requestHeader()` 还是**上一次请求**的档位。
+故 `read()` 改为 **pending 优先**（与 client chip 的 `sel.pending || sel.lastUsed` 同源），
+后缀随之变成：
+`思考强度 max（**用户刚把档位从 high 调到 max**，本步骤的请求即用它；可选 …）`——
+模型不用等下一轮就知道用户调了档、调到了哪一档。无 pending 时文案与旧版**逐字一致**（零额外 token）。
 
 **成本**：一次性教学 ≈120 token + 每轮后缀 ≈7 token。
 ⚠️ 换档可能使前缀缓存失效（`call-config.js` 注明 effort 属 cache-affecting 状态）——
@@ -247,10 +258,10 @@ Agent 自改档不应改掉新会话的默认档。
 
 ## 3. 当前状态
 
-**已完成**：M1–M5（用量读取 / 每轮注入 / 会话自说明 / HUD 弹窗 / 历史持久化）、R1–R16.1
+**已完成**：M1–M5（用量读取 / 每轮注入 / 会话自说明 / HUD 弹窗 / 历史持久化）、R1–R17
 （智能思考 + 换档工具、压缩改工具触发、保留范围自算、全面审查加固、**压缩档位三选一**、
-工具后自检回执、回执按会话隔离）。**9 个域模块 + core**，`host.impl.mjs` **1836 → 518 行**。
-**测试**：contract 369 + static 61 + report 59 + boot 21 = **510 断言**全绿；关键回归均有变异验证。
+工具后自检回执、回执按会话隔离、**用户手动改档的轮首知情**）。**9 个域模块 + core**，`host.impl.mjs` **1836 → 518 行**。
+**测试**：contract 456 + static 72 + report 54 + boot 21 = **603 断言**全绿；关键回归均有变异验证。
 逐里程碑台账（含踩坑与实测数值）：[`docs/milestones.md`](docs/milestones.md)；
 早期进度历史存档：[`docs/status-archive.md`](docs/status-archive.md)。
 
@@ -259,7 +270,7 @@ Agent 自改档不应改掉新会话的默认档。
 ### 4.1 测试（`npm test`，<1 秒）
 
 ```bash
-npm test              # 跑全部三个套件
+npm test              # 跑全部四个套件
 npm run test:contract # 只跑契约对账
 npm run test:static   # 只跑静态约束
 npm run test:report   # 只跑报告形状
@@ -267,12 +278,12 @@ npm run test:report   # 只跑报告形状
 
 | 套件 | 断言数 | 查什么 | 能抓到什么 |
 | --- | --- | --- | --- |
-| `contract.mjs` | 445 | face 方法表 ↔ client 描述符 ↔ TYPERT 三端对账；Config 字段在 FIELDS/schema/M3_DEFAULTS 三处齐全**且默认值值级一致**；退役字段未复活；`mergeConfig` 读取集 ↔ schema；**getHud 作用域契约**（防 ReferenceError 回归）；**弹窗/阈值行排版契约**（**状态提示独立成行**，防窄弹窗逐字断开）；**智能思考 UI 契约**（开关尺寸/右对齐/字段三端/chip 两态色 token）；**压缩工具化契约**（工具注册/意图 TTL/消费顺序/伪造恢复零残留）；**阈值余量契约**（引擎阈值 −5pp 三处同源 / **阈值核心已抽为叶子模块且 host 不再重复定义** / 未就绪时空值降级 / 面板自取上限 / 输入即时钳制 / 已存超限自动钳回保存 / 教学传生效值）；**组件作用域对账**（防跨组件引用面板 state ⇒ 整卡崩掉，`node --check` 的盲区）；**R5 保留范围契约**（`RETAIN_RATIO` 与引擎 `DEFAULT_RETAIN_RATIO` 同源 / 起点跳过 `system/message` / 走 `session.eventAt` 而非猜 / **真跑纯函数**验证预算-范围-影子量-一致性拒绝-回退上限 / 引擎错误文案逐字对账 + 边界错误分类 / 官方兜底与强制线收口接线 / 留痕）；**R6 教学契约**（**实例化两个模块真跑 `renderBrief`/`renderCard`**：先说再调用的「显著标注」与「具体做法」**分两半钉死** / 两个工具 description 也要求 / 参数说明也要求 / 「自己算范围」按活值渲染 / **拿不到活值时不编数字** / host 活值接线）；**R7 加固契约**（退役零残留 4 类 × 4 文件剥注释判定 / 保留项 `markerMinRatio` 未被误删 / 随会话增长的 Set 已**有界化** / 意图表**真跑 `runTool`**：登记→`pending()`→跨 sid 隔离→消费 / 全表 TTL 清扫 / 空可选集**不否决档位** / **顺序契约**（F1 冷却在成功分支 / F5 消费在服务确认之后 / F2 可抛语句前移）/ **真错误边界** / occupancy 搬运 / alive 守卫**计数**）；**R8/R9/R10 解耦契约**（阈值核心与 M3 压缩域（执行核心 + 编排层）已抽为叶子模块 / **宿主不得把 `api.RETAIN_RATIO`、`api.selectRange(`、`state.m3.lastPreStep`、`sweepInFlight` 抄回来**（查独有产物而非函数名，防改名躲过）/ 跨域回调（`publishHud`/`recordHudAct`/`formatAct`/`clearBriefed`/`schedule`）必须显式注入 / 未就绪时空值降级并留痕 / 模块对宿主内部件零 import）；**智能思考 8 条实证结论**（prepend 最外层 / pending 持久 / 冷却基准 / 计数语义 / 两侧校验 / agent.ctx / sid 现读 / 删 maxTokens） | **调用静默失败**（P29：三端漂移不报错、只是拿不到数据）；已实测抓过 7 个真 bug |
+| `contract.mjs` | 456 | face 方法表 ↔ client 描述符 ↔ TYPERT 三端对账；Config 字段在 FIELDS/schema/M3_DEFAULTS 三处齐全**且默认值值级一致**；退役字段未复活；`mergeConfig` 读取集 ↔ schema；**getHud 作用域契约**（防 ReferenceError 回归）；**弹窗/阈值行排版契约**（**状态提示独立成行**，防窄弹窗逐字断开）；**智能思考 UI 契约**（开关尺寸/右对齐/字段三端/chip 两态色 token）；**压缩工具化契约**（工具注册/意图 TTL/消费顺序/伪造恢复零残留）；**阈值余量契约**（引擎阈值 −5pp 三处同源 / **阈值核心已抽为叶子模块且 host 不再重复定义** / 未就绪时空值降级 / 面板自取上限 / 输入即时钳制 / 已存超限自动钳回保存 / 教学传生效值）；**组件作用域对账**（防跨组件引用面板 state ⇒ 整卡崩掉，`node --check` 的盲区）；**R5 保留范围契约**（`RETAIN_RATIO` 与引擎 `DEFAULT_RETAIN_RATIO` 同源 / 起点跳过 `system/message` / 走 `session.eventAt` 而非猜 / **真跑纯函数**验证预算-范围-影子量-一致性拒绝-回退上限 / 引擎错误文案逐字对账 + 边界错误分类 / 官方兜底与强制线收口接线 / 留痕）；**R6 教学契约**（**实例化两个模块真跑 `renderBrief`/`renderCard`**：先说再调用的「显著标注」与「具体做法」**分两半钉死** / 两个工具 description 也要求 / 参数说明也要求 / 「自己算范围」按活值渲染 / **拿不到活值时不编数字** / host 活值接线）；**R7 加固契约**（退役零残留 4 类 × 4 文件剥注释判定 / 保留项 `markerMinRatio` 未被误删 / 随会话增长的 Set 已**有界化** / 意图表**真跑 `runTool`**：登记→`pending()`→跨 sid 隔离→消费 / 全表 TTL 清扫 / 空可选集**不否决档位** / **顺序契约**（F1 冷却在成功分支 / F5 消费在服务确认之后 / F2 可抛语句前移）/ **真错误边界** / occupancy 搬运 / alive 守卫**计数**）；**R8/R9/R10 解耦契约**（阈值核心与 M3 压缩域（执行核心 + 编排层）已抽为叶子模块 / **宿主不得把 `api.RETAIN_RATIO`、`api.selectRange(`、`state.m3.lastPreStep`、`sweepInFlight` 抄回来**（查独有产物而非函数名，防改名躲过）/ 跨域回调（`publishHud`/`recordHudAct`/`formatAct`/`clearBriefed`/`schedule`）必须显式注入 / 未就绪时空值降级并留痕 / 模块对宿主内部件零 import）；**智能思考 8 条实证结论**（prepend 最外层 / pending 持久 / 冷却基准 / 计数语义 / 两侧校验 / agent.ctx / sid 现读 / 删 maxTokens）；**R17 用户手动改档的「轮首知情」**（读 `modelSelection` 投影的 pending，而非上一次请求的 header；行为级覆盖改档/降级/兜底五条路径） | **调用静默失败**（P29：三端漂移不报错、只是拿不到数据）；已实测抓过 7 个真 bug |
 | `static.mjs` | 72 | 真实 `node --check`（含 `docs/reference/tools/*.cjs`）；client 自足（无外部 import，require 仅 react）；entry 薄壳（<40 行、有静态 Config、动态 import 带 `?ts=`）；模块依赖方向无环；热换纪律；**功能域叶子模块清单**（effort / compact-tool / compact-range / threshold / m3.compact / m5.hud / m2.inject）；调试残留扫描（tools 下的 `console.log` 属 CLI 正常输出，豁免）；**上架基础项**（根清单可被市场识别 / Bundle patch 指向存在的公开 patch / 包名↔patch name 一致 / 版本一致 / README 有安装命令 / LICENSE 与 license 字段一致） | 语法错误、破坏热换、client 引入依赖、循环依赖、`TODO`/`XXX`/`console.log` 残留、**上架基础项漂移**（改了清单名/schema 而 patch 或 README 没跟上） |
-| `report.mjs` | 59 | 产出侧字段契约；`republishFromReport`（原 `bfOnce`）回填链依赖；C3② 关键事件必须走 full 档（含**满环优先淘汰 slim**，防 FULL 取证被高频事件挤出）；**getHud 作用域与 criticalCap 实参契约**；**调查结论留档**（探针退役后结论不得丢）；真实报告结构自洽（**无嵌套条件断言** ⇒ 断言数不得随数据漂移）；`hud-acts.json` 去重；dump 工具可跑 | 报告形状无声破坏（踩过 2 次：顶层读 m3/m5、脚本读已删字段）；**证据静默丢失**（120 条全 slim、FULL 被挤光而断言全绿） |
-| `boot.mjs` | 17 | **宿主启动冒烟**：真跑 `apply(ctx, {}, {pluginDir, reportPath})`（桩 ctx）→ HUD 面注册 → **真调 `getHud(null)` 必须 `ok:true`** → `criticalCap`/occupancy/`effortEnabled` 三线 → 四个监听器 → **真调 pre-step handler**（abort 与 step=1 两次）→ **M2 注入路径留下记账**（`m2.skips` 有键或 injections>0）→ 有历史时 `m5.lastPublish==='ok'` → 报告落盘。副作用边界：报告写临时目录、`hud-acts.json` 只读不写 | **接线不可达**（R11 真事故：接线块被嵌进 `schedule()` 函数体、语法合法、423 条源断言全绿，**压缩与弹窗全链路静默失效**）——`node --check` 与源断言都看不见「代码在不在正确的函数里」 |
+| `report.mjs` | 54 | 产出侧字段契约；`republishFromReport`（原 `bfOnce`）回填链依赖；C3② 关键事件必须走 full 档（含**满环优先淘汰 slim**，防 FULL 取证被高频事件挤出）；**getHud 作用域与 criticalCap 实参契约**；**调查结论留档**（探针退役后结论不得丢）；真实报告结构自洽（**无嵌套条件断言** ⇒ 断言数不得随数据漂移）；`hud-acts.json` 去重；dump 工具可跑 | 报告形状无声破坏（踩过 2 次：顶层读 m3/m5、脚本读已删字段）；**证据静默丢失**（120 条全 slim、FULL 被挤光而断言全绿） |
+| `boot.mjs` | 21 | **宿主启动冒烟**：真跑 `apply(ctx, {}, {pluginDir, reportPath})`（桩 ctx）→ HUD 面注册 → **真调 `getHud(null)` 必须 `ok:true`** → `criticalCap`/occupancy/`effortEnabled` 三线 → 四个监听器 → **真调 pre-step handler**（abort 与 step=1 两次）→ **M2 注入路径留下记账**（`m2.skips` 有键或 injections>0）→ 有历史时 `m5.lastPublish==='ok'` → 报告落盘。副作用边界：报告写临时目录、`hud-acts.json` 只读不写 | **接线不可达**（R11 真事故：接线块被嵌进 `schedule()` 函数体、语法合法、423 条源断言全绿，**压缩与弹窗全链路静默失效**）——`node --check` 与源断言都看不见「代码在不在正确的函数里」 |
 
-合计 **592 条断言**（四套：contract / static / report / **boot**）。
+合计 **603 条断言**（四套：contract / static / report / **boot**）。
 
 **已验证有效**：注入 3 个人为 bug（`m3-act` 误入精简档 / client face 改名 / host 引用 client.js），
 三套件全部抓到且定位精准。**新增断言均实测验证过「对回归确实失败」**（两边都通过的测试等于没测）：
