@@ -1037,9 +1037,10 @@ ok('工具名 compact_context 单一来源（模块导出，host 不重复字面
 ok('工具走官方 defineTool + tools.register',
   /defineTool\(toolSpec\(\)\)/.test(ct) && /tools\.register\(defineTool/.test(ct),
   '未走官方注册路径 ⇒ 模型看不到该工具');
-ok('工具门控接总开关 enabled（不是 effortEnabled）',
-  /readCfg: \(\) => \(\{ enabled: M3\.enabled === true \}\)/.test(host) && /if \(!d\.enabled\) return false;/.test(ct),
-  '门控接错开关 ⇒ 压缩工具的存在性跟随智能思考开关');
+ok('工具门控接总开关 enabled（不是 effortEnabled）——R18 起关闭时还必须撤回注册',
+  /readCfg: \(\) => \(\{ enabled: M3\.enabled === true \}\)/.test(host) &&
+  /const on = enabled\(\);/.test(ct) && /if \(!on\) \{\s*retractTool\('switch-off'\);/.test(ct),
+  '门控接错开关 ⇒ 压缩工具的存在性跟随智能思考开关；关闭不撤回 ⇒ 每请求白付 schema');
 ok('工具执行体绝不抛错（异常吞成结构化结果）',
   /catch \(e\) \{\s*log\('warn', `智能压缩 工具执行异常（吞）[\s\S]{0,160}?return \{ ok: false, error: `内部错误/.test(ct),
   '工具会抛错 ⇒ 中断本轮（智能思考同款教训：抛错对模型是可见失败）');
@@ -1847,10 +1848,11 @@ ok('走官方 ctx.tools.register 注册',
 ok('defineTool 走候选链加载（bare→env→resourcesPath→硬编码）',
   /async function loadDefineTool\(\)/.test(hostOrCore) && /dshToolsCandidates/.test(hostOrCore),
   '未走候选链 ⇒ 第三方目录下 bare import 必失败（本项目已有教训）');
-ok('effortEnabled 关闭时不注册工具（完全不介入）',
+ok('effortEnabled 关闭时不注册工具（完全不介入）——R18 起还必须**撤回**已注册的',
   /if \(M3\.effortEnabled === true\) effortReady\.then\(\(api\) => api\?\.ensure\(\)\)/.test(host) &&
-  /if \(!d\.enabled\) return false;/.test(effort),
-  '关闭时仍注册 ⇒ 与「关=完全不介入」的用户定义矛盾');
+  /if \(!on\) \{\s*retractTool\('switch-off'\);/.test(effort) &&
+  /function retractTool\(reason\) \{/.test(effort),
+  '关闭时仍注册/不撤回 ⇒ 与「关=完全不介入」的用户定义矛盾（旧实现只停注入 ⇒ 每请求白付 schema）');
 ok('会话中途打开开关会补注册（懒注册）',
   /registerTool\(\);\s*\n\s*return true;/.test(effort),
   '只在加载时注册一次 ⇒ 中途打开开关后工具不可用');
@@ -2556,6 +2558,172 @@ ok('R17 静态：后缀必须紧跟档位值说明「用户刚改档」',
   ok('R17 行为级：llm 服务不可用（读不到可选集）时同样不丢后缀、不报错',
     effG?.ok === true && typeof apiG.renderSuffix(effG) === 'string',
     `实际 read=${JSON.stringify(effG)} suffix=${JSON.stringify(apiG.renderSuffix(effG))}`);
+}
+
+/* ═══════════ 6.23 R18：单档模型的「零注入 + 工具静默」+ 开关联动 ═══════════
+ * 用户要求（2026-10-13）：「如果所选模式没有多个档位可行，并排除 Default 这个项目，
+ * 比如只有一档 High，就不往提示词内注入切换档位的相关内容，尽量少 token，
+ * 并随时切换到有多个档位的模型时，又能第一时间注入。」
+ * 判据 = canSwitch(eff)：去掉 default/默认 后剩余 distinct ≥ 2 才叫「可切」；
+ * **未知一律不抑制**（R7 结论：取不到 ≠ 没有）。工具可见性走 agent 作用域 restrict。 */
+console.log('\n== 6.23 R18：单档静默 + 工具可见性 + 开关撤回 ==');
+{
+  const effortR18 = read('effort.mjs');
+  const gateUses = (effortR18.match(/if \(!canSwitch\(eff\)\.canSwitch\) return null;/g) ?? []).length;
+  ok('R18 静态：三个文本出口全部接判据（后缀 / 教学 / 提醒）', gateUses >= 3,
+    `实际命中 ${gateUses} 处 —— 少一处就会出现「工具没了、文本还在教你调用」的自相矛盾`);
+  ok('R18 静态：压缩自检回执里的换档提示也接判据（最易漏的一处，在 m2 不在 effort 域）',
+    /const renderCompactReceipt = \(v, allowSwitch = true\) => \{/.test(m2src)
+    && /const switchHint = allowSwitch/.test(m2src)
+    && /renderCompactReceipt\(takeCompactReceipt\(sidEarly\), allowSwitchTalk\)/.test(m2src)
+    && /const effGate = eff \? \(effortApi\?\.canSwitch\?\.\(eff\) \?\? null\) : null;/.test(m2src),
+    '回执仍在劝模型调用一个已隐藏的工具');
+  ok('R18 静态：工具注册持有**可撤销句柄**，开关关闭时撤回',
+    /const d = tools\.register\(defineTool\(toolSpec\(\)\)\);/.test(effortR18)
+    && /function retractTool\(reason\) \{/.test(effortR18)
+    && /if \(!on\) \{\s*retractTool\('switch-off'\);/.test(effortR18),
+    '丢弃 register() 的 disposer ⇒ 关闭开关后工具永远留在模型清单里（每请求白付 schema）');
+  ok('R18 静态：per-agent 隐藏用 agent.ctx 的 restrict + **进程级注册表** + 清扫',
+    /agent\?\.ctx\?\.get\?\.\('tools'\)/.test(effortR18)
+    && /Symbol\.for\('dsh-context-pilot\/effort-restrict'\)/.test(effortR18)
+    && /tools\.restrict\(\{ deny: \[TOOL_NAME\] \}\)/.test(effortR18)
+    && /function sweepRestricts\(why\) \{/.test(effortR18),
+    '无持久句柄/清扫 ⇒ 热换后工具永久隐藏（静默能力丢失，本项目最怕的形态）');
+  ok('R18 静态：拿不到回滚句柄就**不隐藏**（失败极性铁律）',
+    /if \(typeof d !== 'function'\) \{[\s\S]{0,220}return false;/.test(effortR18)
+    && /else hideToolFor\(agent, gate\);/.test(effortR18),
+    '拿不到句柄仍隐藏 ⇒ 不可逆的能力丢失');
+  ok('R18 静态：宿主 pre-step **await** 收敛（早于 assemble ⇒ 当步生效）',
+    /await reconcileEffort\(payload\?\.agent\);/.test(host) && /const reconcileEffort = async \(agent\)/.test(host),
+    '不 await ⇒ 工具可见性晚一步（目标③「当轮恢复」失守）');
+  ok('R18 静态：宿主不再按开关早退（否则关闭时进不到模块、撤不掉工具）',
+    !/if \(M3\.effortEnabled !== true\) return false;/.test(host) && !/if \(M3\.enabled !== true\) return false;/.test(host),
+    '宿主早退 ⇒ R18 的撤回/清扫永远不执行');
+  ok('R18 静态：pre-step 最前面补 mergeConfig（开关翻转当步生效）',
+    /try \{ mergeConfig\(\); \} catch/.test(host),
+    '配置合并晚于 ensure ⇒ 开关翻转第一步读到旧值');
+
+  /* ---- 行为级：真跑模块（桩 tools/llm/agents）---- */
+  const eMod18 = await import(pathToFileURL(join(PLUGIN, 'effort.mjs')).href);
+  const MODELS = {
+    'm-single': ['high'],
+    'm-multi': ['off', 'low', 'high', 'max'],
+    'm-default-only': ['default', 'high'],
+    'm-default-plus': ['default', 'low', 'high'],
+    'm-unknown': null,
+  };
+  const mk18 = ({ model = 'm-multi', enabled = true, calls, throwRestrict = false, agents = [] } = {}) => {
+    let on = enabled;
+    const tools = {
+      register: () => { calls.register += 1; return () => { calls.dispose += 1; }; },
+      restrict: () => {
+        if (throwRestrict) throw new Error('restrict boom');
+        calls.restrict += 1;
+        return () => { calls.dispose += 1; };
+      },
+    };
+    const api = eMod18.createEffort({
+      svc: (k) => (k === 'tools' ? tools
+        : k === 'agents' ? { list: () => agents }
+          : k === 'llm' ? { resolveModelInfo: async () => ({ reasoning: MODELS[model] === null ? undefined : { efforts: MODELS[model].map((id) => ({ id })), defaultEffort: null } }) }
+            : k === 'sessionProjections' ? { stateOf: () => null } : null),
+      tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e?.message ?? e) }; } },
+      pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+      state: { m3: { effortSkips: {}, effortDiag: {}, effortSwitches: 0, effortReasserts: 0, effortHooks: 0, effortToolCalls: 0 } },
+      readCfg: () => ({ enabled: on, cooldownMs: 30000 }), getDefineTool: () => (spec) => spec,
+    });
+    return { api, setEnabled: (v) => { on = v; }, tools };
+  };
+  const mkAgent18 = (tools, sid) => ({
+    id: sid,
+    session: { id: sid, requestHeader: () => ({ config: { provider: 'p', model: 'cur' } }) },
+    ctx: { get: (k) => (k === 'tools' ? tools : undefined) },
+  });
+  const eff18 = (efforts) => ({ ok: true, current: efforts && efforts[0] ? efforts[0] : 'high', efforts, defaultEffort: null });
+
+  /* 判据表（含「排除 Default」与「未知不抑制」两条铁律） */
+  const gateApi = mk18({ calls: { register: 0, restrict: 0, dispose: 0 } }).api;
+  const gateOf = (efforts) => gateApi.canSwitch(eff18(efforts));
+  ok('R18 判据：只有一档（High）⇒ 无可切档', gateOf(['high']).canSwitch === false && gateOf(['high']).why === 'single',
+    `实际 ${JSON.stringify(gateOf(['high']))}`);
+  ok('R18 判据：排除 Default —— [default,high] 视作单档', gateOf(['default', 'high']).canSwitch === false && gateOf(['default', 'high']).real.length === 1,
+    `实际 ${JSON.stringify(gateOf(['default', 'high']))}`);
+  ok('R18 判据：只剩 Default ⇒ 无可切档', gateOf(['default']).canSwitch === false && gateOf(['default']).why === 'only-default',
+    `实际 ${JSON.stringify(gateOf(['default']))}`);
+  ok('R18 判据：排除 Default 后仍有 ≥2 档 ⇒ 可切', gateOf(['default', 'low', 'high']).canSwitch === true,
+    `实际 ${JSON.stringify(gateOf(['default', 'low', 'high']))}`);
+  ok('R18 判据：四档模型照常可切', gateOf(['off', 'low', 'high', 'max']).canSwitch === true, '');
+  ok('R18 判据：**未知 ≠ 没有**（null / [] / 空）⇒ 一律不抑制',
+    gateOf(null).canSwitch === true && gateOf([]).canSwitch === true && gateOf(undefined).canSwitch === true
+    && gateOf(null).known === false,
+    '取不到可选项就抑制 ⇒ 会把多档模型的能力锁死（R7 血泪结论）');
+
+  /* 四个文本出口在两种模型下的表现 */
+  const one = eff18(['high']);
+  const four = eff18(['off', 'low', 'high', 'max']);
+  const ag18 = mkAgent18({}, 'sid-r18');
+  ok('R18 行为级：单档 ⇒ 后缀/教学/提醒**三处全静默**',
+    gateApi.renderSuffix(one) === null && gateApi.renderBrief(one) === null
+    && gateApi.renderNudge(one, { agent: ag18, turn: 3, userText: '帮我排查根因' }) === null,
+    `suffix=${JSON.stringify(gateApi.renderSuffix(one))} brief=${JSON.stringify(gateApi.renderBrief(one))}`);
+  ok('R18 行为级：多档 ⇒ 三处与今天**逐字一致**（零回归）',
+    gateApi.renderSuffix(four) === '思考强度 off（可选 off/low/high/max，需要时先说再调用 set_reasoning_effort）'
+    && typeof gateApi.renderBrief(four) === 'string'
+    && typeof gateApi.renderNudge(four, { agent: ag18, turn: 3, userText: '帮我排查根因' }) === 'string',
+    `suffix=${JSON.stringify(gateApi.renderSuffix(four))}`);
+
+  /* 工具可见性：隐藏 → 幂等 → 恢复 */
+  const callsA = { register: 0, restrict: 0, dispose: 0 };
+  const agentsA = [];
+  const A = mk18({ model: 'm-single', calls: callsA, agents: agentsA });
+  await A.api.ensure();
+  const agA = mkAgent18(A.tools, 'sid-A');
+  agentsA.push(agA);
+  await A.api.reconcile(agA);
+  ok('R18 行为级：单档 ⇒ 对该 agent 施加 restrict（隐藏工具）', callsA.restrict === 1,
+    `restrict 调用 ${callsA.restrict} 次（应为 1）`);
+  await A.api.reconcile(agA);
+  ok('R18 行为级：同一路由重复收敛**不重复 restrict**（幂等，不产生 disposer 抖动）', callsA.restrict === 1,
+    `restrict 调用 ${callsA.restrict} 次（应为 1）`);
+  const callsB = { register: 0, restrict: 0, dispose: 0 };
+  const agentsB = [];
+  const B = mk18({ model: 'm-multi', calls: callsB, agents: agentsB });
+  agentsB.push(agA);                       // 同一个 agent 对象（模拟「同一会话换了模型」）
+  await B.api.ensure();                    // 激活期清扫：释放上个实例留下的隐藏
+  ok('R18 行为级：**跨实例自愈**——新实例激活时清扫上个实例留下的限制',
+    callsA.dispose >= 1 && callsA.restrict === 1,
+    `dispose=${callsA.dispose}（应 ≥1，否则热换后工具永久隐藏）`);
+
+  /* 开关关闭 ⇒ 撤回注册 + 释放限制 */
+  const callsC = { register: 0, restrict: 0, dispose: 0 };
+  const agentsC = [];
+  const C = mk18({ model: 'm-single', calls: callsC, agents: agentsC });
+  const agC = mkAgent18(C.tools, 'sid-C');
+  agentsC.push(agC);
+  await C.api.ensure();
+  await C.api.reconcile(agC);
+  const registeredBefore = C.api.toolState().registered;
+  C.setEnabled(false);
+  await C.api.reconcile(agC);   // 先走 reconcile 的 switch-off 分支（不依赖 ensure 的清扫）
+  ok('R18 行为级：关闭开关 ⇒ 释放该 agent 的限制（关=完全不介入）', callsC.dispose >= 1,
+    `dispose=${callsC.dispose}（应 ≥1：限制被解除）`);
+  await C.api.ensure();
+  ok('R18 行为级：关闭开关 ⇒ 撤回工具注册（旧实现只停注入、白付 schema）',
+    registeredBefore === true && C.api.toolState().registered === false && callsC.dispose >= 2,
+    `registered: ${registeredBefore} → ${C.api.toolState().registered}；dispose=${callsC.dispose}`);
+
+  /* restrict 抛错 ⇒ 不隐藏、不崩（失败极性） */
+  const callsD = { register: 0, restrict: 0, dispose: 0 };
+  const agentsD = [];
+  const D = mk18({ model: 'm-single', calls: callsD, throwRestrict: true, agents: agentsD });
+  await D.api.ensure();
+  const agD = mkAgent18(D.tools, 'sid-D');
+  agentsD.push(agD);
+  let threw = false;
+  try { await D.api.reconcile(agD); } catch { threw = true; }
+  ok('R18 行为级：restrict 抛错 ⇒ 吞掉、工具保持可见、留痕（绝不锁死能力）',
+    threw === false && callsD.restrict === 0,
+    `reconcile 抛错=${threw}；restrict 成功=${callsD.restrict}`);
 }
 
 /* ═══════════ 汇总 ═══════════ */

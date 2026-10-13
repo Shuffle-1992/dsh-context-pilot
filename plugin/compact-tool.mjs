@@ -553,6 +553,10 @@ export function createCompactTool(deps) {
     };
   }
 
+  /** R18：注册的**可撤销句柄**（与 effort 同款）——开关关闭时必须撤回，
+   * 否则「关闭智能压缩」只是停了行为，工具仍每请求下发、白付 schema。 */
+  let toolDisposer = null;
+
   function registerTool() {
     try {
       if (toolRegistered) return true;
@@ -563,10 +567,14 @@ export function createCompactTool(deps) {
         state.m3.compactTool = { at: new Date().toISOString(), ok: false, error: 'tools.register 不可用' };
         return false;
       }
-      tools.register(defineTool(toolSpec()));
+      const d = tools.register(defineTool(toolSpec()));
+      toolDisposer = typeof d === 'function' ? d : null;
       toolRegistered = true;
-      state.m3.compactTool = { at: new Date().toISOString(), ok: true, name: TOOL_NAME, via: 'tools.register' };
-      log('info', `智能压缩 工具已注册：${TOOL_NAME}`);
+      state.m3.compactTool = {
+        at: new Date().toISOString(), ok: true, name: TOOL_NAME, via: 'tools.register',
+        revocable: !!toolDisposer,
+      };
+      log('info', `智能压缩 工具已注册：${TOOL_NAME}（可撤回=${!!toolDisposer}）`);
       return true;
     } catch (e) {
       state.m3.compactTool = { at: new Date().toISOString(), ok: false, error: msg(e) };
@@ -575,15 +583,42 @@ export function createCompactTool(deps) {
     }
   }
 
-  /** 懒安装入口：宿主由 pre-step **最前面**调用（幂等、无副作用）。 */
+  /** R18：撤回全局注册（开关关闭时）。拿不到 disposer 时不假装成功，留痕。 */
+  function retractTool(reason) {
+    try {
+      if (!toolRegistered) return false;
+      toolRegistered = false;
+      const d = toolDisposer;
+      toolDisposer = null;
+      if (typeof d === 'function') {
+        try { d(); } catch (e) { log('warn', `智能压缩 工具撤回失败（吞）：${msg(e)}`); }
+        state.m3.compactTool = {
+          at: new Date().toISOString(), ok: true, name: TOOL_NAME, via: 'tools.register',
+          retracted: reason ?? 'switch-off',
+        };
+        log('info', `智能压缩 工具已撤回（${reason ?? 'switch-off'}）`);
+        return true;
+      }
+      state.m3.compactRevokeGap = { at: new Date().toISOString(), why: 'no-disposer', reason: reason ?? 'switch-off' };
+      log('warn', '智能压缩 工具撤回：register() 未返回 disposer（本 DSH 版本不支持），保持现状');
+      return false;
+    } catch { return false; }
+  }
+
+  /** 懒安装入口：宿主由 pre-step **最前面**调用（幂等、无副作用）。
+   * ⚠️ R18：宿主不再按开关早退 ⇒ 关闭时也会进来（要撤回工具）。 */
   function ensure() {
     try {
       const d = state.m3.compactToolDiag;
       d.calls += 1;
       d.at = new Date().toISOString();
-      d.enabled = enabled();
+      const on = enabled();
+      d.enabled = on;
       d.intents = bySid.size;
-      if (!d.enabled) return false;
+      if (!on) {
+        retractTool('switch-off');
+        return false;
+      }
       const ok = registerTool();
       d.installed = ok;
       return ok;

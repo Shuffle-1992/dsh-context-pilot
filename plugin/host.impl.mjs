@@ -162,11 +162,12 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
       return null;
     });
 
-  /** 智能压缩工具懒安装入口（由 pre-step 最前面调用；幂等；总开关关闭时内部直接返回）。 */
+  /** 智能压缩工具懒安装入口（由 pre-step 最前面调用；幂等）。
+   * ⚠️ R18：宿主**不再按开关早退**——关闭时也必须进模块（那里要撤回已注册的工具，
+   * 否则「关 = 完全恢复原生 DSH」做不到：工具仍每请求下发、白付 schema）。模块内自我门控。 */
   const ensureCompactTool = async () => {
     try {
       mergeConfig();
-      if (M3.enabled !== true) return false;
       const api = await compactToolReady;
       return api ? api.ensure() : false;
     } catch (e) {
@@ -186,12 +187,25 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
   const ensureEffort = async () => {
     try {
       mergeConfig();
-      if (M3.effortEnabled !== true) return false;
+      /* R18：同 ensureCompactTool——**宿主的开关早退删掉**：关时要进模块做
+       * 「撤回工具 + 清扫跨实例残留限制」。模块内部已自我门控（关时 retract + sweep 后返回 false）。 */
       const api = await effortReady;
       return api ? api.ensure() : false;
     } catch (e) {
       log('warn', `智能思考懒安装异常（吞）：${msg(e)}`);
       return false;
+    }
+  };
+
+  /** R18：让**本步这个 agent** 的工具可见性与「本模型有没有可切档」一致。
+   * 必须 `await` 且早于 `next()`：模型可见的工具清单在 `system-prompt/assemble` 阶段读取
+   * ⇒ 只有在这一步之前完成，隐藏/恢复才**当步生效**（这是目标③「切到多档模型当轮恢复」的关键）。 */
+  const reconcileEffort = async (agent) => {
+    try {
+      const api = await effortReady;
+      if (api) await api.reconcile(agent);
+    } catch (e) {
+      log('warn', `R18 工具可见性收敛异常（吞）：${msg(e)}`);
     }
   };
 
@@ -385,9 +399,16 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
   state.listeners['agent/pre-step'] = addListener(
     'agent/pre-step',
     async (payload, next) => {
+      /* R18：**配置先于一切**。原先 mergeConfig() 只被 effEnabled()/preStepCompaction 间接调用，
+       * 而 ensureEffort() 排在它们之前 ⇒ 开关翻转后的**第一步**，模块读到的是旧值
+       * （工具注册/撤回晚一步）。这里显式合并一次，让「面板改开关 ⇒ 当步生效」确定性成立。 */
+      try { mergeConfig(); } catch { /* 吞 */ }
       /* 智能思考：懒安装**先于一切**（R3-S4：与 M2 注入分支彻底解耦，任何早退都影响不到它）。
        * 幂等 + 开关关闭时内部直接返回 ⇒ 放在最前面零成本。 */
       await ensureEffort();
+      /* R18：本步这个 agent 的工具可见性收敛（无可切档 ⇒ 隐藏工具；可切/开关关 ⇒ 恢复）。
+       * ⚠️ 必须早于 next()：工具清单在 system-prompt/assemble 里读取 ⇒ 当步生效。 */
+      await reconcileEffort(payload?.agent);
       /* 智能压缩工具（R4）：同款懒安装——同样必须在早退之前，否则「工具接受了却没有人消费意图」
        * 会重演 R3 那个真 bug（工具成功、永不生效）。 */
       await ensureCompactTool();

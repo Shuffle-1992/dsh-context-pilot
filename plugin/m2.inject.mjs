@@ -196,8 +196,10 @@ export function createM2Injection(deps) {
   };
 
   /** 把回执渲染成一行给模型看的话（含「要不要重试」的明确指引）。
-   * R16：带档位与保留预算 ⇒ 模型能确认「自己选的档位真的生效了」。 */
-  const renderCompactReceipt = (v) => {
+   * R16：带档位与保留预算 ⇒ 模型能确认「自己选的档位真的生效了」。
+   * R18：`allowSwitch=false`（本模型无可切档）时**去掉换档那两句**——工具已被隐藏，
+   * 再劝它调用就是自相矛盾（这是四处换档文本里最容易漏的一处：它在 m2 而不在 effort 域）。 */
+  const renderCompactReceipt = (v, allowSwitch = true) => {
     try {
       if (!v) return null;
       const parts = [];
@@ -208,9 +210,12 @@ export function createM2Injection(deps) {
         const k = Number.isFinite(v.shadowedTokens) ? `省 ~${(v.shadowedTokens / 1000).toFixed(1)}K token` : '已执行';
         /* R16.8（用户提出的时机逻辑）：压缩已重置前缀缓存 ⇒ 同一轮里顺带换档，
          * 缓存重建只付一次——这是换档的**最佳时机**（提升给更难的任务 / 降低省额度）。 */
+        const switchHint = allowSwitch
+          ? `**压缩已重置前缀缓存——这正是换档的最佳时机**（换档同样会使缓存失效，现在换只付一次重建成本）：`
+            + `若接下来的任务更难可顺带升档、进入机械阶段可降档省额度——调用 set_reasoning_effort 即可（可选，不需要则忽略本句）。`
+          : '';
         return `【压缩自检】你上次请求的压缩**已执行**${head}：${k}（保留策略 ${v.rangeSource ?? '?'}，${v.ms ?? '?'}ms）。`
-          + `**压缩已重置前缀缓存——这正是换档的最佳时机**（换档同样会使缓存失效，现在换只付一次重建成本）：`
-          + `若接下来的任务更难可顺带升档、进入机械阶段可降档省额度——调用 set_reasoning_effort 即可（可选，不需要则忽略本句）。`;
+          + switchHint;
       }
       if (v.state === 'no-need') {
         return `【压缩自检】你上次请求的压缩**已执行但判定无需压缩**${head}（${v.skipWhy ?? 'nothing-to-compact'}）`
@@ -240,7 +245,16 @@ export function createM2Injection(deps) {
          * 安全性：非首步插入 user 消息时，上一步的 tool/result 已落在 surface 里
          * ⇒ 不会把 tool_use 与它的 tool_result 分开（那才是 `INVALID_REQUEST` 的成因）。
          * 回执一次性 ⇒ 最多多注入一步，不会刷屏。 */
-        const receiptMid = renderCompactReceipt(takeCompactReceipt(sidEarly));
+        /* R18：中步回执同样要按判据门控（否则单档模型会被劝去调用一个**已隐藏**的工具）。 */
+        let allowMid = true;
+        try {
+          const apiMid = getEffortApi();
+          if (M3.effortEnabled === true && apiMid?.canSwitch) {
+            const gMid = apiMid.canSwitch(await apiMid.read(agent));
+            allowMid = !gMid || gMid.canSwitch;
+          }
+        } catch { /* 判据不可用 ⇒ 保守允许提及（宁多一句话，也不误删教学） */ }
+        const receiptMid = renderCompactReceipt(takeCompactReceipt(sidEarly), allowMid);
         if (!receiptMid) return { skip: 'not-step-1' };
         const msgMid = getCreateUserMessage()({
           content: [{ type: 'text', text: receiptMid }],
@@ -300,6 +314,10 @@ export function createM2Injection(deps) {
         if (M3.effortEnabled === true && effortApi) eff = await effortApi.read(agent);
       } catch { /* 读档失败 ⇒ 不注入（绝不因新功能影响主流程） */ }
       const effSuffix = effortApi?.renderSuffix(eff) ?? null;
+      /* R18：判据**算一次**，供后缀/教学/回执共用 —— 保证同一轮内「工具可见性」与「文本」同源，
+       * 绝不出现「工具已隐藏、文本却还在教你调用它」。判据不可用（无 eff）⇒ 保守允许提及。 */
+      const effGate = eff ? (effortApi?.canSwitch?.(eff) ?? null) : null;
+      const allowSwitchTalk = !effGate || effGate.canSwitch;
       const baseText = effSuffix ? `${r.text} ｜ ${effSuffix}` : r.text;
       if (effSuffix) state.m2.effortSuffixes = (state.m2.effortSuffixes ?? 0) + 1;
       /* R16.12：换档提醒——**只在真有信号时出现**（用户意图关键词 / 本会话从未换档），
@@ -323,7 +341,7 @@ export function createM2Injection(deps) {
         remember(briefedBySid, sid); // C 类审查：有界化（原先无上限）
         state.m2.briefings = (state.m2.briefings ?? 0) + 1;
       }
-      const fullText = [baseText, effNudge, card, brief, effBrief, renderCompactReceipt(takeCompactReceipt(sidEarly))].filter(Boolean).join('\n\n');
+      const fullText = [baseText, effNudge, card, brief, effBrief, renderCompactReceipt(takeCompactReceipt(sidEarly), allowSwitchTalk)].filter(Boolean).join('\n\n');
       const message = createUserMessage({
         content: [{ type: 'text', text: fullText }],
         source: { kind: SOURCE_KIND, form: 'snapshot', sections: [{ name: SOURCE_KIND, text: fullText }] },

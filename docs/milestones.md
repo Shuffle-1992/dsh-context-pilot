@@ -2161,3 +2161,72 @@ Error: tool "compact_context" returned invalid output: "value.scheduled" must be
 - 该功能本已有正确的一半：`applyTo` 的「他人显式指定 ⇒ 让位」护栏（用户手动改档后不会被插件覆盖）。
   但**轮首注入的读数**来自另一个源 ⇒ 护栏对了、读数错了，用户看到的就是「你明明知道，却报旧档」。
   **行为正确 ≠ 知情正确**：与用户动作相关的读数必须与护栏同源。
+
+### R18 单档模型「零注入 + 工具静默」+ 两个开关的缺口（2026-10-13）
+
+**用户要求（原话）**：「如果所选模式没有多个档位可行，并排除 Default 这个项目，比如只有一档 High，
+就不往提示词内注入切换档位的相关内容，尽量少 token，并随时切换到有多个档位的模型时，又能第一时间注入。」
+随后追加：「开工前，先检查下这个面板中，2 个本插件的开关是否有效，逻辑是否正确。」
+
+#### 一、成本结构（实测字符数，决定优先级）
+
+| 层 | 成本 | 时机 |
+| --- | --- | --- |
+| **工具 schema** | description **366** + 参数说明 **51** 字符 | **每请求**（无 adapter 声明 `toolUpdate` ⇒ 全量重发） |
+| 每轮后缀 | 60 字符 | 每轮 step 1 |
+| 一次性教学 | 754 字符 | 会话首次 |
+| 换档提醒 | 99 字符 | 有信号时 |
+
+⇒ 只压文本收益有限，**必须连工具一起收**。
+
+#### 二、调查（两个探针，均已按纪律清理，取证留在 `plugin/.data/r18-*.json`）
+
+| 事实 | 证据 |
+| --- | --- |
+| `agent.ctx.get('tools')` 可取到工具服务；与 apply 上下文的 tools **不是同一实例**（`sameInstance:false`） | 只读探针 `r18-probe.json` |
+| 全局视图仍含我们的工具 ⇒ 对 agent 而言属**继承面**（restrict 的命中目标） | 同上（`viewGlobal.hasOurTool:true`） |
+| `restrict({deny})` 生效：`wireSchemas` **70→69**、`visible:false`、`resolveExecution→undefined`（调用被判 `UNKNOWN_TOOL`） | 写探针 `r18-restrict.json` |
+| **只影响该 agent**；`disposer()` 后 **69→70** 完全恢复；限制不动 `restrictableNames`（重复 restrict 不抛错） | 同上 |
+| 模型可见工具清单 = `wireSchemas(scope).schemas`（`systemPrompt.tools(ctx => wireSchemas(ctx.scope))`） | `dsh-tools` L2707 |
+| `register()` **返回精确 disposer**（旧代码把返回值丢了） | `dsh-tools` L2876-2887 |
+
+#### 三、设计（详见 [`docs/r18-single-tier-suppression-design.md`](r18-single-tier-suppression-design.md)）
+
+判据 **`canSwitch(eff)`** 是唯一真相（文本四处 + 工具可见性共用）：
+去掉 `default`/`默认` 后 distinct ≥ 2 才叫「可切」；**未知一律不抑制**（R7 结论：取不到 ≠ 没有）。
+
+- 文本四处静默：`renderSuffix` / `renderBrief` / `renderNudge` / **`m2.renderCompactReceipt` 的换档提示**
+  （最后一处最容易漏——它在 m2 不在 effort 域，漏了就是「工具已隐藏、文本仍劝你调用」）。
+- 工具可见性：`agent.ctx.get('tools').restrict({deny})` 隐藏、`disposer()` 恢复；
+  快路径按「开关态 + 路由」键同步返回，**只有换模型才走异步判定**。
+- **热换残留陷阱**（本方案最关键）：restrict 的 effect 挂在 **agent fiber**，插件 toggle 不会清它
+  ⇒ 新实例若拿不到旧 disposer，工具**永久隐藏**（静默能力丢失）。对策三层：
+  ① disposer 存**进程级注册表**（`globalThis[Symbol.for(...)]`，跨 toggle 存活、随 agent GC）；
+  ② 激活期/开关翻转时**清扫**；③ **失败极性铁律**——拿不到可回滚句柄就**不隐藏**。
+- **当轮恢复**（目标③）：判据读投影 `pending`（R17 同源）+ 宿主 pre-step `await reconcile`
+  （早于 `system-prompt/assemble`）；教学因「只有真注入才标记已讲」而自动重讲一次。
+
+#### 四、查开关时发现的**两个真实缺口**（用户要求「开工前先检查」，当场修掉）
+
+| # | 缺口 | 证据 | 修法 |
+| --- | --- | --- | --- |
+| 1 | **开关关闭后工具仍在下发**：`registerTool()` 丢弃了 `tools.register()` 的 disposer，全插件无任何撤回路径 ⇒ 关掉智能压缩/智能思考后，`compact_context` / `set_reasoning_effort` 仍留在模型清单里（每请求白付 schema，调用只拿到「未开启」错误） | 代码路径 + `grep dispose\|unregister` 只命中 host 的 timer | 捕获 disposer；关闭时 `retractTool`；**宿主不再按开关早退**（否则进不到模块、撤不掉） |
+| 2 | **开关翻转晚一步生效**：`mergeConfig()` 由 `effEnabled()`/`preStepCompaction` 间接调用，而 `ensureEffort()` 排在它们之前 ⇒ 第一步读到旧值 | 宿主 pre-step 调用顺序 | pre-step **最前面**显式 `mergeConfig()` |
+
+#### 五、验证
+
+- **625 断言全绿**（contract 478 / static 72 / report 54 / boot 21）；R18 新增 22 条
+  （8 静态 + 14 行为级：判据表含「排除 Default」与「未知不抑制」、四处文本、工具隐藏幂等、
+  **跨实例自愈**、开关撤回、restrict 抛错不锁死）。
+- **变异 7/7 CAUGHT**：判据边界 `>=2`→`>=1`（8 条红）／未知也抑制（3）／回执提示不门控（4）／
+  注册表退回模块内（2，其中一条正是「跨实例自愈」）／关闭不撤回工具（4）／去掉快路径（1）／宿主不 await 收敛（2）。
+  还原后三文件哈希一致（逐文件比对 `True`）。
+- 两条**既有静态断言被更新**（不是绕过）：`if (!d.enabled) return false;`（effort 与 compact 各一条）——
+  旧文本钉的是旧实现，R18 的语义已变成「关闭 ⇒ 撤回 + 清扫」，断言随之改为钉新语义（保留「不注册」原意）。
+
+#### 六、部署与边界
+
+- 改动：`effort.mjs`、`m2.inject.mjs`、`host.impl.mjs`、`compact-tool.mjs`、`client.js`（弹窗提示行）、`wire.host.mjs`（签名文档）。
+- 生效：**toggle 热换**；`client.js` 改动需**刷新页面**。
+- 判据不可用（provider 不暴露 `efforts`）时**保守不抑制**；`restrict` 不可用时**不隐藏**但留痕。
+- 真机 E2E 待做：四档模型应**零变化**；切单档模型应「后缀消失 + 工具退出清单」；切回应**当轮恢复**；单档下 toggle 应自愈。

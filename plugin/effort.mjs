@@ -183,34 +183,36 @@ export function createEffort(deps) {
    *   ⚠️ R17：`current` 是**本步骤请求实际会用的档**——有用户待生效选择（投影 pending）时取它，
    *   而不是 header 里那次请求的旧值；`pendingChanged` 表示「用户刚改过、与旧值不同」。
    */
+  /* ═══ R18：路由读取抽成**同步单一真相**（read 与 reconcile 快路径共用）═══
+   * 优先级沿用 R17 口径：**投影 pending 优先**（用户刚改的模型/档位，本步骤才生效），
+   * 否则用 requestHeader（上一次请求的已生效值）。两处必须永远同源——否则会出现
+   * 「判据说单档、读数说多档」这类自相矛盾（本项目最怕的静默不一致）。 */
+  const routeOf = (agent) => {
+    const hdr = tryOf(() => agent?.session?.requestHeader?.()).value ?? null;
+    const c = hdr?.config ?? null;
+    if (!c?.provider || !c?.model) return { ok: false, error: 'no-route' };
+    /** adapterDefault=true 表示该档位来自 adapter 默认，而非会话显式选择（UI 据此标注「(默认)」）。 */
+    const headerEffort = typeof c.reasoningEffort === 'string' && c.reasoningEffort ? c.reasoningEffort : null;
+    /* R17（2026-10-12 用户实测）：「手动改成 max，模型本轮读到的还是 high」——
+     * 用户改档（UI selectModel / `/model` 命令）只追加 model/selection 事件 ⇒ 落在
+     * **modelSelection 投影的 `pending`**；官方 installModelSelection 要到**本步骤**的
+     * system-prompt/assemble → agent/request 才把它落到请求上，而我们的注入在 pre-step（更早）
+     * ⇒ 只读 header 会报「本轮根本不会用」的旧档。故 **pending 优先**（与 client chip 同源）。 */
+    const sel = tryOf(() => svc('sessionProjections')?.stateOf?.(agent?.session, 'modelSelection')).value ?? null;
+    const pending = sel && typeof sel.pending === 'object' && sel.pending !== null ? sel.pending : null;
+    const pendEffort = typeof pending?.reasoningEffort === 'string' && pending.reasoningEffort
+      ? pending.reasoningEffort : null;
+    /** 本轮**实际会用到**的路由：有 pending 就是它（本步骤请求即按它走），否则是 header。 */
+    const route = pending ?? c;
+    return { ok: true, hdr, c, headerEffort, pending, pendEffort, route };
+  };
+
   async function read(agent) {
     try {
-      const hdr = tryOf(() => agent?.session?.requestHeader?.()).value ?? null;
-      const c = hdr?.config ?? null;
-      if (!c?.provider || !c?.model) return { ok: false, error: 'no-route' };
-      /** adapterDefault=true 表示该档位来自 adapter 默认，而非会话显式选择（UI 据此标注「(默认)」）。 */
-      const headerEffort = typeof c.reasoningEffort === 'string' && c.reasoningEffort ? c.reasoningEffort : null;
-      /* ═══ R17（2026-10-12 用户实测）：「手动改成 max，模型本轮读到的还是 high」 ═══
-       * 时序（源码 + 真机双证，见文件头结论⑪）：
-       *   ① 用户改档 ⇒ client `sessionController.selectModel` ⇒ `selectForNextRequest`
-       *      ⇒ 追加 **model/selection** 事件（`api-session-controller` L319-322 / 投影 L2072-2088）
-       *      ⇒ 落在 **modelSelection 投影的 `pending`**（只有 UI `/model` 命令两处会写，都是用户主动）；
-       *   ② 官方 `installModelSelection` 要到**本步骤**的 `system-prompt/assemble` → `agent/request`
-       *      才把 `selection.current` 落进请求配置（`dsh-agent/lib/types/model-selection.js` L45-75）；
-       *   ③ 我们的注入在 `agent/pre-step` step 1 —— **排在上面两者之前**
-       *      ⇒ 此刻 `requestHeader()` 还是**上一次请求**的档（旧值），新选择只在投影 `pending` 里；
-       *   ④ 本步骤的请求随后就用了新档（pending 被消费、header 更新）。
-       * ⇒ 只读 header 的旧实现会在轮首喂给模型「思考强度 high」，而本轮实际跑 max：
-       *    模型既不知道用户调过档（错过「加大思考量」的意图），还会据错误读数做决策。
-       * client 侧 chip 早就是同款口径（`sel.pending || sel.lastUsed`，见 client.js EffortChip）
-       * ⇒ 宿主侧对齐为 **pending 优先**。
-       * 投影未注册 / 服务缺失 / 形状异常一律退回 header 值（绝不因新读数影响主流程）。 */
-      const sel = tryOf(() => svc('sessionProjections')?.stateOf?.(agent?.session, 'modelSelection')).value ?? null;
-      const pending = sel && typeof sel.pending === 'object' && sel.pending !== null ? sel.pending : null;
-      const pendEffort = typeof pending?.reasoningEffort === 'string' && pending.reasoningEffort
-        ? pending.reasoningEffort : null;
-      /** 本轮**实际会用到**的路由：有 pending 就是它（本步骤请求即按它走），否则是 header。 */
-      const route = pending ?? c;
+      const r0 = routeOf(agent);
+      if (!r0.ok) return { ok: false, error: 'no-route' };
+      const { hdr, headerEffort, pending, pendEffort, route } = r0;
+      /* R18：R17 的「pending 优先」口径已抽进上面的 routeOf，这里不再重复实现。 */
       const base = {
         ok: true,
         provider: route.provider,
@@ -245,6 +247,41 @@ export function createEffort(deps) {
       }, defaultEffort);
     } catch (e) {
       return { ok: false, error: msg(e) };
+    }
+  }
+
+  /* ═══════════ R18 判据：本模型有没有「可切换的档位」 ═══════════
+   * 用户要求（2026-10-13）：「如果所选模式没有多个档位可行，并排除 Default 这个项目，
+   * 比如只有一档 High，就不往提示词内注入切换档位的相关内容，尽量少 token。」
+   *
+   * **单一真相**：文本四个出口（每轮后缀 / 一次性教学 / 换档提醒 / 压缩自检回执里的换档提示）
+   * 与**工具可见性**都只读这一个判据——否则会出现「工具已隐藏、后缀却还在教你调用它」的自相矛盾。
+   *
+   * 口径（两条铁律）：
+   *   ① 排除 `default` / `默认` 这类**伪档位**后再数：剩余 distinct ≤ 1 ⇒ 无可切档。
+   *   ② **未知 ≠ 没有**（R7 血泪结论）：`efforts` 取不到 / 空数组 / 形状异常 ⇒ 一律**不抑制**。
+   *      最坏多花 token；绝不因「读不到」把能力锁死。
+   * 只剥这两个词，不剥 `auto` 之类——误剥会把真档位算没，代价是能力丢失（不可接受的极性）。
+   * @returns {{known: boolean, canSwitch: boolean, real: string[], why: string}} */
+  const DEFAULT_EFFORT_IDS = new Set(['default', '默认']);
+  function canSwitch(eff) {
+    try {
+      const opts = eff?.efforts;
+      if (!Array.isArray(opts) || opts.length === 0) {
+        return { known: false, canSwitch: true, real: [], why: 'efforts-unknown' };
+      }
+      const real = [...new Set(opts
+        .filter((x) => typeof x === 'string' && x)
+        .filter((x) => !DEFAULT_EFFORT_IDS.has(x.toLowerCase())))];
+      return {
+        known: true,
+        canSwitch: real.length >= 2,
+        real,
+        why: real.length >= 2 ? 'multiple' : (real.length === 0 ? 'only-default' : 'single'),
+      };
+    } catch {
+      /* 判据自身异常 ⇒ 保守不抑制（新逻辑绝不影响主流程） */
+      return { known: false, canSwitch: true, real: [], why: 'gate-error' };
     }
   }
 
@@ -497,6 +534,11 @@ export function createEffort(deps) {
     };
   }
 
+  /** R18：工具注册的**可撤销句柄**（`tools.register()` 明确「@returns the exact disposer」）。
+   * ⚠️ 旧实现把返回值丢了 ⇒ **开关关闭后工具仍留在模型清单里**（每请求白付 417 字符，
+   * 且模型还能调用它、拿到「未开启」的错误）——与开关承诺「关 = 两者都不做」冲突。 */
+  let toolDisposer = null;
+
   function registerTool() {
     try {
       if (toolRegistered) return true;
@@ -507,10 +549,14 @@ export function createEffort(deps) {
         state.m3.effortTool = { at: new Date().toISOString(), ok: false, error: 'tools.register 不可用' };
         return false;
       }
-      tools.register(defineTool(toolSpec()));
+      const d = tools.register(defineTool(toolSpec()));
+      toolDisposer = typeof d === 'function' ? d : null;
       toolRegistered = true;
-      state.m3.effortTool = { at: new Date().toISOString(), ok: true, name: TOOL_NAME, via: 'tools.register' };
-      log('info', `智能思考 工具已注册：${TOOL_NAME}`);
+      state.m3.effortTool = {
+        at: new Date().toISOString(), ok: true, name: TOOL_NAME, via: 'tools.register',
+        revocable: !!toolDisposer,
+      };
+      log('info', `智能思考 工具已注册：${TOOL_NAME}（可撤回=${!!toolDisposer}）`);
       return true;
     } catch (e) {
       state.m3.effortTool = { at: new Date().toISOString(), ok: false, error: msg(e) };
@@ -519,19 +565,167 @@ export function createEffort(deps) {
     }
   }
 
+  /** R18：撤回全局注册（开关关闭时必须做）。
+   * ⚠️ 拿不到 disposer（老 DSH 结构不同）时**不假装成功**：留痕，交给 per-agent restrict 兜底。 */
+  function retractTool(reason) {
+    try {
+      if (!toolRegistered) return false;
+      toolRegistered = false;
+      const d = toolDisposer;
+      toolDisposer = null;
+      if (typeof d === 'function') {
+        try { d(); } catch (e) { log('warn', `智能思考 工具撤回失败（吞）：${msg(e)}`); }
+        state.m3.effortTool = {
+          at: new Date().toISOString(), ok: true, name: TOOL_NAME, via: 'tools.register',
+          retracted: reason ?? 'switch-off',
+        };
+        log('info', `智能思考 工具已撤回（${reason ?? 'switch-off'}）`);
+        return true;
+      }
+      state.m3.effortRevokeGap = { at: new Date().toISOString(), why: 'no-disposer', reason: reason ?? 'switch-off' };
+      log('warn', '智能思考 工具撤回：register() 未返回 disposer，改由 per-agent 限制兜底');
+      return false;
+    } catch { return false; }
+  }
+
+  /* ═══════════ R18 工具可见性：按 agent 隐藏（tools.restrict）═══════════
+   * 判据（canSwitch）说「无可切档」时对该 agent 隐藏工具；恢复时释放限制。
+   *
+   * ⚠️ **热换残留陷阱**（必须正面处理）：`tools.restrict()` 的 effect 挂在 **agent fiber** 上，
+   * **插件 toggle 不会清掉它**。若新实例想恢复却拿不到旧 disposer ⇒ 工具永久隐藏
+   * = 静默能力丢失（本项目最怕的形态）。三层对策：
+   *   ① disposer 存进**进程级注册表**（globalThis + Symbol.for）⇒ 跨 toggle 存活、随 agent 被 GC；
+   *   ② **清扫**：激活期与开关翻转时释放残留（以 agents 列表为入口——WeakMap 不可遍历）；
+   *   ③ **失败极性铁律**：拿不到可持久化的回滚句柄 ⇒ **不隐藏**（宁可多花 token，绝不锁死能力）。 */
+  const REGISTRY_KEY = Symbol.for('dsh-context-pilot/effort-restrict');
+  const restrictRegistry = (() => {
+    try {
+      const g = globalThis;
+      if (!(g[REGISTRY_KEY] instanceof WeakMap)) g[REGISTRY_KEY] = new WeakMap();
+      return g[REGISTRY_KEY];
+    } catch { return new WeakMap(); } // 极端环境：退化为实例内（只损失「跨热换自愈」）
+  })();
+  /** 每 agent 的「上次判定键」（开关态 + 路由）：未变即同步返回，**零异步开销**。 */
+  const reconcileKey = new WeakMap();
+
+  const agentToolsOf = (agent) => tryOf(() => agent?.ctx?.get?.('tools')).value ?? null;
+
+  /** 隐藏工具（幂等；任何一步拿不到句柄就放弃隐藏 + 留痕）。 */
+  function hideToolFor(agent, gate) {
+    try {
+      if (restrictRegistry.has(agent)) return false;              // 已隐藏
+      const tools = agentToolsOf(agent);
+      if (!tools || typeof tools.restrict !== 'function') {
+        state.m3.effortRestrictSkips = (state.m3.effortRestrictSkips ?? 0) + 1;
+        return false;                                             // 能力不可用 ⇒ 不隐藏
+      }
+      const d = tryOf(() => tools.restrict({ deny: [TOOL_NAME] })).value;
+      if (typeof d !== 'function') {
+        state.m3.effortRestrictSkips = (state.m3.effortRestrictSkips ?? 0) + 1;
+        return false;                                             // 拿不到回滚句柄 ⇒ 不隐藏
+      }
+      restrictRegistry.set(agent, { dispose: d, at: Date.now(), why: gate?.why ?? 'single' });
+      state.m3.effortRestricts = (state.m3.effortRestricts ?? 0) + 1;
+      log('info', `R18 工具已对本会话隐藏（无可切档：${gate?.why ?? 'single'}）`);
+      return true;
+    } catch (e) {
+      log('warn', `R18 工具隐藏异常（吞，保持可见）：${msg(e)}`);
+      return false;
+    }
+  }
+
+  /** 恢复可见（幂等；无限制时是 no-op）。 */
+  function liftToolFor(agent, why) {
+    try {
+      const rec = restrictRegistry.get(agent);
+      if (!rec) return false;
+      restrictRegistry.delete(agent);
+      try { rec.dispose(); } catch (e) { log('warn', `R18 限制释放失败（吞，下次清扫重试）：${msg(e)}`); }
+      state.m3.effortRestores = (state.m3.effortRestores ?? 0) + 1;
+      log('info', `R18 工具已恢复可见（${why}）`);
+      return true;
+    } catch { return false; }
+  }
+
+  /** 清扫（激活 / 开关翻转）：释放全部残留限制——跨实例残留的唯一出口。 */
+  function sweepRestricts(why) {
+    try {
+      const arr = svc('agents')?.list?.() ?? [];
+      let n = 0;
+      for (const a of (Array.isArray(arr) ? arr : [])) {
+        if (liftToolFor(a, why)) n += 1;
+        reconcileKey.delete(a); // 键失效 ⇒ 下一步重新判定（否则快路径会跳过重评）
+      }
+      state.m3.effortSweeps = (state.m3.effortSweeps ?? 0) + 1;
+      state.m3.effortLastSweep = { at: new Date().toISOString(), why, released: n, agents: Array.isArray(arr) ? arr.length : -1 };
+      return n;
+    } catch { return 0; }
+  }
+
+  /**
+   * R18 收敛：让**该 agent** 的工具可见性与「本模型有没有可切档」一致。
+   * 由宿主 pre-step 显式 await（必须早于 system-prompt/assemble，工具清单才当步生效）。
+   * 快路径：开关态 + 路由未变 ⇒ 同步返回（零异步）。
+   */
+  async function reconcile(agent) {
+    try {
+      if (!agent) return;
+      const on = enabled();
+      const r = routeOf(agent);
+      const key = `${on ? '1' : '0'}|${r.ok ? `${r.route.provider}|${r.route.model}` : 'no-route'}`;
+      if (reconcileKey.get(agent) === key) return;
+      if (!on) {
+        reconcileKey.set(agent, key);
+        liftToolFor(agent, 'switch-off');
+        return;
+      }
+      /* 工具还没注册（defineTool 未就绪）⇒ 无处可隐藏，且**不记键**，下一步重试。 */
+      if (!toolRegistered) { reconcileKey.delete(agent); return; }
+      const eff = await read(agent);
+      if (!eff?.ok) { reconcileKey.delete(agent); return; }   // 读不到路由 ⇒ 保守不隐藏、下一步重试
+      const gate = canSwitch(eff);
+      state.m3.effortGate = {
+        at: new Date().toISOString(), sid: sidOf(agent), model: r.route?.model ?? null,
+        efforts: Array.isArray(eff.efforts) ? eff.efforts : null, real: gate.real,
+        canSwitch: gate.canSwitch, why: gate.why,
+      };
+      if (gate.canSwitch) liftToolFor(agent, gate.why);
+      else hideToolFor(agent, gate);
+      reconcileKey.set(agent, key);
+    } catch (e) {
+      state.m3.effortReconcileError = { at: new Date().toISOString(), error: msg(e) };
+      reconcileKey.delete(agent);
+    }
+  }
+
   /* ═══════════ 懒安装入口（R3-S4：**与 M2 注入分支彻底解耦**） ═══════════
    * 曾是注入分支里的一行 ⇒ 该分支的 `step !== 1` 早退让钩子永不安装（真 bug）。
    * 现在由宿主的 pre-step **最前面**调用（也在激活期/会话创建时兜底），幂等、无副作用。 */
+  /** R18：上次的开关状态（undefined = 本实例首次）——翻转时清扫；另在「首次拿到 agents 列表」时清扫一次。 */
+  let lastEnabledState;
+  let sweptOnActivate = false;
+
   function ensure() {
     try {
       const d = state.m3.effortDiag;
       d.calls += 1;
       d.at = new Date().toISOString();
-      d.enabled = enabled();
-      if (!d.enabled) return false;
+      const on = enabled();
+      d.enabled = on;
       const list = svc('agents')?.list?.() ?? [];
       const arr = Array.isArray(list) ? list : [];
       d.agents = Array.isArray(list) ? arr.length : 'not-array';
+      /* R18 清扫（两条入口，覆盖「跨 toggle 残留」与「开关翻转」两种静默失效）：
+       *   ① 本实例首次**拿到 agents 列表**时 → 清掉上个实例留下的隐藏；
+       *   ② 开关状态翻转时 → 清掉上一状态留下的隐藏。
+       * 残留后果：开关关了工具还在（白付 token）／切到多档模型工具却永远不见（能力丢失）。 */
+      if (!sweptOnActivate && arr.length > 0) { sweptOnActivate = true; sweepRestricts('activate'); }
+      if (lastEnabledState !== undefined && lastEnabledState !== on) sweepRestricts(on ? 'switch-on' : 'switch-off');
+      lastEnabledState = on;
+      if (!on) {
+        retractTool('switch-off'); // 关 = 模型清单里也不该有它（旧实现只停注入 ⇒ 白付 schema）
+        return false;
+      }
       let ok = 0;
       let failed = 0;
       for (const a of arr) {
@@ -562,6 +756,10 @@ export function createEffort(deps) {
   function renderBrief(eff) {
     try {
       if (!eff?.ok || !eff.current) return null;
+      /* R18：本模型无可切档 ⇒ 整段教学不注入（省 754 字符）。
+       * ⚠️ 这里返回 null **不等于**「讲过了」——宿主只在真注入时才 `remember(effBriefedBySid)`
+       * ⇒ 切到多档模型的那一轮，教学会**当轮**重新出现（目标③的另一半靠这条现成语义）。 */
+      if (!canSwitch(eff).canSwitch) return null;
       const opts = Array.isArray(eff.efforts) && eff.efforts.length ? eff.efforts.join('/') : null;
       /* R16.12（用户反馈「Agent 切换档位的意愿不高」）：原教学只有**自指式**判据
        * （「需要更深推理时升档」）——「需不需要」交给模型自己判 ⇒ 等于没有触发条件；
@@ -606,6 +804,8 @@ export function createEffort(deps) {
   function renderSuffix(eff) {
     try {
       if (!eff?.ok || !eff.current) return null;
+      /* R18：无可切档 ⇒ 整条后缀静默（每轮省 60 字符，且避免与「工具已隐藏」自相矛盾）。 */
+      if (!canSwitch(eff).canSwitch) return null;
       /* R15（用户要求「时刻可以进行思考强度切换」）：后缀必须**带上可选项**。
        * 实证：2026-10-08 用户问「整个过程没切换过档位，是暴露信息不够吗」——查下来确实不够：
        * 可选项只出现在**会话最早那段一次性教学**里（以及工具 description），
@@ -658,6 +858,9 @@ export function createEffort(deps) {
   function renderNudge(eff, ctx) {
     try {
       if (!eff?.ok || !eff.current) return null;
+      /* R18：无可切档 ⇒ 不提醒（否则是「让你切、但根本没有别的档可切」的无效提示，
+       * 与既有「冷却中不提示」同一条设计理由）。 */
+      if (!canSwitch(eff).canSwitch) return null;
       const sid = sidOf(ctx?.agent) || '';
       if (!sid) return null;
       const s = slot(sid);
@@ -732,8 +935,11 @@ export function createEffort(deps) {
       } : null,
       switchCount: s?.switchCount ?? 0,
     };
-    if (!eff?.ok) return { ...(eff ?? {}), ...stats };
-    return { ...eff, ...stats };
+    /* R18：把判据也交给面板——单档模型下插件会**静默**（不注入文本、隐藏工具），
+     * 用户看到「开关开着却不提档位」会疑惑，必须给一个可解释的读数。 */
+    const gate = eff?.ok ? canSwitch(eff) : null;
+    if (!eff?.ok) return { ...(eff ?? {}), ...stats, gate: null };
+    return { ...eff, ...stats, gate };
   }
 
   /** 取证快照（宿主报告用；只读，不暴露内部 Map）。 */
@@ -741,7 +947,16 @@ export function createEffort(deps) {
     const sids = [...bySid.entries()].map(([sid, s]) => ({
       sid: String(sid).slice(0, 24), want: s.want, applied: s.applied ?? null, switchedAt: s.switchedAt || null,
     }));
-    return { sids: sids.slice(0, 8), tracked: bySid.size, toolRegistered };
+    return {
+      sids: sids.slice(0, 8), tracked: bySid.size, toolRegistered,
+      /* R18：工具撤回能力与判据取证（WeakMap 不可遍历 ⇒ 只能暴露计数与最近一次判定）。 */
+      toolRevocable: !!toolDisposer,
+      gate: state.m3.effortGate ?? null,
+      restricts: state.m3.effortRestricts ?? 0,
+      restores: state.m3.effortRestores ?? 0,
+      sweeps: state.m3.effortSweeps ?? 0,
+      restrictSkips: state.m3.effortRestrictSkips ?? 0,
+    };
   }
 
   /** R16.7b：**仅测试用**注入口——向落盘写一条换档记录（构造「重启后恢复」场景，
@@ -753,5 +968,11 @@ export function createEffort(deps) {
     saveStats();
   }
 
-  return { TOOL_NAME, read, ensure, renderBrief, renderSuffix, renderNudge, hudPayload, diag, setPersistForTest };
+  return {
+    TOOL_NAME, read, ensure, renderBrief, renderSuffix, renderNudge, hudPayload, diag, setPersistForTest,
+    /* R18 新增出口：判据（文本出口与工具可见性共用）、收敛入口（宿主 pre-step 调）、
+     * 清扫（测试与应急用）、工具注册态（测试断言用）。 */
+    canSwitch, reconcile, sweepRestricts,
+    toolState: () => ({ registered: toolRegistered, revocable: !!toolDisposer }),
+  };
 }

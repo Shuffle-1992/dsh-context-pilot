@@ -1280,6 +1280,15 @@ window.__ModuleLoader__.load({
 								hintLine.style.cssText = "margin-top:1px;";
 								thr.appendChild(hintLine);
 							}
+							/* R18：智能思考在**本模型**下会静默（无可切档 ⇒ 不注入文本、隐藏工具）。
+							 * 不给提示的话，用户看到「开关开着、却不提档位」会以为功能坏了——
+							 * 静默失效是本项目大忌，所以这里把判据摆到明面上（独立成行，见上方折行教训）。 */
+							if (v.effortEnabled === true && v.effortGate && v.effortGate.canSwitch === false) {
+								const gateLine = document.createElement("div");
+								gateLine.textContent = "智能思考：当前模型无可切换档位（已静默）";
+								gateLine.style.cssText = "margin-top:1px;opacity:.62;";
+								thr.appendChild(gateLine);
+							}
 						} catch { /* 快照失败保持现状 */ }
 					};
 					if (typeof settingsScope.subscribe === "function") liveRows.push({ row, off: settingsScope.subscribe(renderHud) }); // C4：off 在册
@@ -1348,6 +1357,15 @@ window.__ModuleLoader__.load({
 									 * 这是「host 算了 / wire 声明了 / client 不用」的三端漂移实例。 */
 									occupancyRatio: typeof r.occupancyRatio === "number" && Number.isFinite(r.occupancyRatio) ? r.occupancyRatio : null,
 									occupancyWindow: typeof r.occupancyWindow === "number" && Number.isFinite(r.occupancyWindow) ? r.occupancyWindow : null,
+									/* R18：智能思考判据（供「无档可切 ⇒ 已静默」提示行）。
+									 * ⚠️ 必须在这里透传——host 算了、这里不取，就永远到不了 UI。 */
+									effortEnabled: r.effortEnabled === true,
+									effortGate: (r.effort && typeof r.effort === "object" && r.effort.gate && typeof r.effort.gate === "object")
+										? {
+											canSwitch: r.effort.gate.canSwitch === true,
+											why: typeof r.effort.gate.why === "string" ? r.effort.gate.why : "",
+										}
+										: null,
 								};
 								/* C-own：引擎阈值上限（host 动态探测，方案 C 钳制用）——存 NS 供保存路径读取 */
 								if (typeof r.criticalCap === "number" && Number.isFinite(r.criticalCap) && r.criticalCap > 0 && r.criticalCap <= 1) {
