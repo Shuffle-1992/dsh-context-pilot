@@ -2230,3 +2230,36 @@ Error: tool "compact_context" returned invalid output: "value.scheduled" must be
 - 生效：**toggle 热换**；`client.js` 改动需**刷新页面**。
 - 判据不可用（provider 不暴露 `efforts`）时**保守不抑制**；`restrict` 不可用时**不隐藏**但留痕。
 - 真机 E2E 待做：四档模型应**零变化**；切单档模型应「后缀消失 + 工具退出清单」；切回应**当轮恢复**；单档下 toggle 应自愈。
+
+#### 七、真机 E2E（2026-10-13，用户配合切换模型）
+
+| 检查点 | 单档 `workbuddy/hy4-preview-f` | 切回四档 `deepseek-account/deepseek-flash` |
+| --- | --- | --- |
+| `set_reasoning_effort` 在该 agent 的可见清单里 | **无**（Inspect Tool 面实证） | **有**（另一次 Inspect 取证） |
+| `compact_context` | 有（不受影响：不同开关） | 有 |
+| 用量行后缀 `｜ 思考强度 …` | **没有** | 恢复 |
+| 「智能思考」一次性教学 | **没有** | 恢复（重讲一次） |
+
+报告侧旁证：`effortTool.revocable:true`（R18 新代码）、`effortLastSweep {why:'activate', released:0}`（激活清扫已跑）。
+恢复发生在 pre-step（早于 `system-prompt/assemble`）⇒ **当步生效**，不是下一轮。
+
+### R18.1 取证缺口：工具隐藏/恢复在报告里无痕（2026-10-13，用户截图反馈「小缺口修下」）
+
+**缺口**：`hideToolFor` / `liftToolFor` 只加内存计数（`state.m3.effortRestricts/Restores`），
+**没有任何 `schedule`** ⇒ 报告只在特定 reason（activation/boot/effort…）才写，
+真机上 `restricts/restores` 长时间不可见——R18 那轮真机验证只能靠 Inspect 侧面取证。
+这与本项目「任何静默降级都必须留痕」的纪律不符（R16/R17 的同类机制都带 `schedule('effort', 400)`）。
+
+**修**：两条路径各加一次 `schedule('effort', 400)`（隐藏/恢复都落报告）。
+
+**验证**：contract **480** + static 72 + report 54 + boot 21 = **627 断言**全绿；新增 2 条
+（静态 + 行为级：真跑 reconcile/sweep 并计数 `schedule` 调用次数）。
+
+⚠️ **两条弯路如实记录**（都是本项目的老坑换了个壳）：
+1. **变异锚点打偏**：首版变异脚本用「首次出现的 `schedule('effort', 400);`」当锚点，
+   而文件里**更早**（`applyTo` / `runTool`）本来就有同名调用 ⇒ 实际删的是无关那一处，
+   于是「M1 逃逸」是**假逃逸**（脚本的错，不是断言的错）——与 R9「逃逸的是脚本、不是断言」同型。
+2. **静态断言窗口过宽**：首版写 `function hideToolFor…[\s\S]{0,900}schedule('effort'`，
+   而两个函数相邻 ⇒ 删掉 hide 那处后正则**跨进 `liftToolFor`** 照样匹配（真逃逸）。
+   改为**按函数体取文本**（边界 = 下一个 2 空格缩进的 `}`）。修正锚点后 **M1/M2 双双 CAUGHT**（各 2 条红）。
+   ⇒ 再次印证 R7：**正则窗口宽度是断言的一部分**；R9：**先怀疑脚本，再怀疑断言**。

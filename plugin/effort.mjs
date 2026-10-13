@@ -627,6 +627,11 @@ export function createEffort(deps) {
       restrictRegistry.set(agent, { dispose: d, at: Date.now(), why: gate?.why ?? 'single' });
       state.m3.effortRestricts = (state.m3.effortRestricts ?? 0) + 1;
       log('info', `R18 工具已对本会话隐藏（无可切档：${gate?.why ?? 'single'}）`);
+      /* R18.1（用户实测反馈「小缺口」）：**必须落报告**。旧版只加内存计数，
+       * 而报告只在特定 reason（activation/boot/effort…）才写 ⇒ 真机上根本看不到这条记录
+       * ——R18 真机验证时只能靠 Inspect 侧面取证。R16/R17 的同类机制都是这个写法
+       * （与「任何静默降级都必须留痕」同一条纪律）。 */
+      schedule('effort', 400);
       return true;
     } catch (e) {
       log('warn', `R18 工具隐藏异常（吞，保持可见）：${msg(e)}`);
@@ -643,6 +648,7 @@ export function createEffort(deps) {
       try { rec.dispose(); } catch (e) { log('warn', `R18 限制释放失败（吞，下次清扫重试）：${msg(e)}`); }
       state.m3.effortRestores = (state.m3.effortRestores ?? 0) + 1;
       log('info', `R18 工具已恢复可见（${why}）`);
+      schedule('effort', 400); // R18.1：同 hideToolFor——恢复也要落报告（否则「切回多档」同样无痕）
       return true;
     } catch { return false; }
   }

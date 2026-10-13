@@ -2612,7 +2612,7 @@ console.log('\n== 6.23 R18：单档静默 + 工具可见性 + 开关撤回 ==');
     'm-default-plus': ['default', 'low', 'high'],
     'm-unknown': null,
   };
-  const mk18 = ({ model = 'm-multi', enabled = true, calls, throwRestrict = false, agents = [] } = {}) => {
+  const mk18 = ({ model = 'm-multi', enabled = true, calls, throwRestrict = false, agents = [], onSchedule } = {}) => {
     let on = enabled;
     const tools = {
       register: () => { calls.register += 1; return () => { calls.dispose += 1; }; },
@@ -2628,7 +2628,8 @@ console.log('\n== 6.23 R18：单档静默 + 工具可见性 + 开关撤回 ==');
           : k === 'llm' ? { resolveModelInfo: async () => ({ reasoning: MODELS[model] === null ? undefined : { efforts: MODELS[model].map((id) => ({ id })), defaultEffort: null } }) }
             : k === 'sessionProjections' ? { stateOf: () => null } : null),
       tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e?.message ?? e) }; } },
-      pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+      pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {},
+      schedule: () => { if (typeof onSchedule === 'function') onSchedule(); },
       state: { m3: { effortSkips: {}, effortDiag: {}, effortSwitches: 0, effortReasserts: 0, effortHooks: 0, effortToolCalls: 0 } },
       readCfg: () => ({ enabled: on, cooldownMs: 30000 }), getDefineTool: () => (spec) => spec,
     });
@@ -2724,6 +2725,42 @@ console.log('\n== 6.23 R18：单档静默 + 工具可见性 + 开关撤回 ==');
   ok('R18 行为级：restrict 抛错 ⇒ 吞掉、工具保持可见、留痕（绝不锁死能力）',
     threw === false && callsD.restrict === 0,
     `reconcile 抛错=${threw}；restrict 成功=${callsD.restrict}`);
+
+  /* ── R18.1（用户实测反馈「小缺口」）：收敛动作必须**落报告** ──
+   * 真机验证时发现：旧版只在内存里加计数，而报告只在特定 reason 才写 ⇒ 报告里看不到
+   * restricts/restores，只能靠 Inspect 侧面取证。与「任何静默降级都必须留痕」同一纪律。 */
+  ok('R18.1 静态：隐藏 / 释放两条路径都 schedule 落报告',
+    /* ⚠️ 用「**按函数体**取文本」而不是字符窗口：首版窗口 {0,900} 会跨进下一个函数
+     * （liftToolFor 里的 schedule），于是**删掉 hide 的那一处照样通过**（变异 M1 逃逸实测）。
+     * 函数体边界取「下一个 2 空格缩进的 `}`」——嵌套块的 `}` 都是 4 空格以上，不会误判。 */
+    (() => {
+      const bodyOf = (src, name) => {
+        const i = src.indexOf(`function ${name}(`);
+        if (i < 0) return null;
+        const j = src.indexOf('\n  }\n', i);
+        return j < 0 ? src.slice(i) : src.slice(i, j);
+      };
+      const hideBody = bodyOf(effortR18, 'hideToolFor');
+      const liftBody = bodyOf(effortR18, 'liftToolFor');
+      return hideBody !== null && liftBody !== null
+        && /schedule\('effort'/.test(hideBody) && /schedule\('effort'/.test(liftBody);
+    })(),
+    '只加内存计数 ⇒ 报告里看不到 restricts/restores（R18 真机验证吃过这个亏）');
+  {
+    const callsS = { register: 0, restrict: 0, dispose: 0 };
+    let schedN = 0;
+    const agentsS = [];
+    const S = mk18({ model: 'm-single', calls: callsS, agents: agentsS, onSchedule: () => { schedN += 1; } });
+    const agS = mkAgent18(S.tools, 'sid-S');
+    agentsS.push(agS);
+    await S.api.ensure();
+    await S.api.reconcile(agS);            // 隐藏 ⇒ 应 schedule
+    const afterHide = schedN;
+    S.api.sweepRestricts('test');          // 释放 ⇒ 应再 schedule
+    ok('R18.1 行为级：**隐藏**与**释放**各自都会 schedule（真机可直接取证）',
+      afterHide >= 1 && schedN > afterHide,
+      `隐藏后 schedule=${afterHide}；释放后=${schedN}`);
+  }
 }
 
 /* ═══════════ 汇总 ═══════════ */
