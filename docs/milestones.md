@@ -2301,3 +2301,19 @@ compact（`schedule('compact-tool', 400)`）两侧对称。
 基准取早了 ⇒ 断言恒真，删掉 `retractTool` 的 schedule 照样通过（M1 首次运行只红 1 条）。
 改为**在撤回这一步前后**夹住计数（`schedBeforeRetract`）后，M1 变红 2 条。
 ⇒ 与 R16.16 评审的批评同型：**断言的「基准点」与「观测点」之间不能夹带其他等价动作**。
+
+**真机闭环（2026-10-13 21:09，用户配合走完「开开关→发消息→关开关→发消息」）**：
+
+| 步骤 | 实测证据 |
+| --- | --- |
+| 开开关 + 一条消息 | 工具**注册**：harness 向模型下发 `set_reasoning_effort` 的 schema（"Updated Tool Schemas"）；用量行后缀 `｜ 思考强度 high（可选 off/low/high/max…）` 回归 |
+| 关开关 + 一条消息 | 报告出现 **`effortTool.retracted:"switch-off"`**（13:09:32.612Z，由 `retractTool` 自己的 schedule 写入，reason=`effort`）；后缀与教学消失；Inspect 清单 `set_reasoning_effort` **0 命中**、`compact_context` **1 命中**、总数 **73** |
+
+⇒ R18.2 修复在真机上确认有效；此前「开关关闭 ⇒ 工具退出清单」只能靠 Inspect 侧面取证、报告无痕。
+
+**两条操作纪律（本轮踩出来的）**：
+
+1. 开关**翻转本身不触发 pre-step** —— 注册/撤回只发生在 pre-step（需有消息经过）或激活期。
+   所以「开关翻来翻去但不发消息」不会产生任何注册/撤回痕迹。
+2. **关插件 ≠ 关开关**：插件被禁用时，工具注册由 DSH 卸载作用域自行回收（不经过我们的 `retractTool`），
+   因此也不会有 `retracted` 痕；两种「关闭」的痕口径不同，排查时先分清关的是哪一个。
