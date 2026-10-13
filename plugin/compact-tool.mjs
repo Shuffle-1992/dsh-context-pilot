@@ -597,10 +597,12 @@ export function createCompactTool(deps) {
           retracted: reason ?? 'switch-off',
         };
         log('info', `智能压缩 工具已撤回（${reason ?? 'switch-off'}）`);
+        schedule('compact-tool', 400); // R18.2：撤回落报告（与 effort 侧对称）
         return true;
       }
       state.m3.compactRevokeGap = { at: new Date().toISOString(), why: 'no-disposer', reason: reason ?? 'switch-off' };
       log('warn', '智能压缩 工具撤回：register() 未返回 disposer（本 DSH 版本不支持），保持现状');
+      schedule('compact-tool', 400); // R18.2：降级同样留痕
       return false;
     } catch { return false; }
   }

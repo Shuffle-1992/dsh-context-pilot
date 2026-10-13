@@ -2278,3 +2278,26 @@ Error: tool "compact_context" returned invalid output: "value.scheduled" must be
    而两个函数相邻 ⇒ 删掉 hide 那处后正则**跨进 `liftToolFor`** 照样匹配（真逃逸）。
    改为**按函数体取文本**（边界 = 下一个 2 空格缩进的 `}`）。修正锚点后 **M1/M2 双双 CAUGHT**（各 2 条红）。
    ⇒ 再次印证 R7：**正则窗口宽度是断言的一部分**；R9：**先怀疑脚本，再怀疑断言**。
+
+### R18.2 「关开关」也留痕：撤回路径缺 schedule（2026-10-13，真机验证时发现）
+
+**发现路径**：R18 真机 E2E 收尾时把「智能思考」关掉做最后一项验证——
+Inspect 的 Tool 面**确认工具已从模型清单消失**（0 命中，`compact_context` 仍在），
+profile 落盘也确认 `effortEnabled:false`（21:01:24 写入）；
+**但报告里找不到任何「工具已撤回」的痕**（`effortTool.retracted` 始终不出现）。
+
+**根因**：R18.1 只给 `hideToolFor` / `liftToolFor` 加了 `schedule`，**漏了 `retractTool`**——
+而它正是「关开关」这条路径的执行者。于是「关掉开关 ⇒ 工具退出清单」这件事在报告里不可见；
+更糟的是它的**降级分支**（`register()` 没返回 disposer ⇒ 撤不掉，只能靠 per-agent 限制兜底）同样无痕，
+而那属于「静默降级」，恰是本项目要求**必须可诊断**的一类。
+
+**修**：`retractTool` 的**成功支与降级支**各加一次 schedule；effort（`schedule('effort', 400)`）与
+compact（`schedule('compact-tool', 400)`）两侧对称。
+
+**验证**：contract **482** + static 72 + report 54 + boot 21 = **629 断言**全绿；新增 2 条；**变异 M1/M2 双双 CAUGHT**。
+
+⚠️ **又一次「虚假信心」被变异抓住**（第三次同型，记下来）：
+行为断言首版写成「关开关**前后**计数增长」——而它的**上一步** `reconcile(off)` 释放限制时**也会** schedule，
+基准取早了 ⇒ 断言恒真，删掉 `retractTool` 的 schedule 照样通过（M1 首次运行只红 1 条）。
+改为**在撤回这一步前后**夹住计数（`schedBeforeRetract`）后，M1 变红 2 条。
+⇒ 与 R16.16 评审的批评同型：**断言的「基准点」与「观测点」之间不能夹带其他等价动作**。

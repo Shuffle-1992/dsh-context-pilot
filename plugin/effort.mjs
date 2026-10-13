@@ -580,10 +580,14 @@ export function createEffort(deps) {
           retracted: reason ?? 'switch-off',
         };
         log('info', `智能思考 工具已撤回（${reason ?? 'switch-off'}）`);
+        /* R18.2：撤回同样要落报告——否则「关了开关 ⇒ 工具退出模型清单」这件事在报告里看不到
+         * （R18.1 只给 hide/lift 加了 schedule；真机实测：关开关后 effortTool.retracted 一直不出现）。 */
+        schedule('effort', 400);
         return true;
       }
       state.m3.effortRevokeGap = { at: new Date().toISOString(), why: 'no-disposer', reason: reason ?? 'switch-off' };
       log('warn', '智能思考 工具撤回：register() 未返回 disposer，改由 per-agent 限制兜底');
+      schedule('effort', 400); // R18.2：降级同样留痕（这是「静默降级必须可诊断」的典型场景）
       return false;
     } catch { return false; }
   }

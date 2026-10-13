@@ -2698,20 +2698,28 @@ console.log('\n== 6.23 R18：单档静默 + 工具可见性 + 开关撤回 ==');
   /* 开关关闭 ⇒ 撤回注册 + 释放限制 */
   const callsC = { register: 0, restrict: 0, dispose: 0 };
   const agentsC = [];
-  const C = mk18({ model: 'm-single', calls: callsC, agents: agentsC });
+  let schedC = 0;
+  const C = mk18({ model: 'm-single', calls: callsC, agents: agentsC, onSchedule: () => { schedC += 1; } });
   const agC = mkAgent18(C.tools, 'sid-C');
   agentsC.push(agC);
   await C.api.ensure();
   await C.api.reconcile(agC);
   const registeredBefore = C.api.toolState().registered;
+  const schedBeforeOff = schedC;
   C.setEnabled(false);
   await C.api.reconcile(agC);   // 先走 reconcile 的 switch-off 分支（不依赖 ensure 的清扫）
   ok('R18 行为级：关闭开关 ⇒ 释放该 agent 的限制（关=完全不介入）', callsC.dispose >= 1,
     `dispose=${callsC.dispose}（应 ≥1：限制被解除）`);
+  /* ⚠️ 计数必须**在撤回这一步前后**夹住：上一步 reconcile(off) 释放限制时也会 schedule，
+   * 用更早的基准会让断言恒真（变异 M1 实测逃逸 ⇒ 那是「虚假信心」的典型形态）。 */
+  const schedBeforeRetract = schedC;
   await C.api.ensure();
   ok('R18 行为级：关闭开关 ⇒ 撤回工具注册（旧实现只停注入、白付 schema）',
     registeredBefore === true && C.api.toolState().registered === false && callsC.dispose >= 2,
     `registered: ${registeredBefore} → ${C.api.toolState().registered}；dispose=${callsC.dispose}`);
+  ok('R18.2 行为级：**撤回**动作自己会 schedule 落报告（关开关也能在报告里看到）',
+    schedC > schedBeforeRetract,
+    `撤回前后 schedule 次数：${schedBeforeRetract} → ${schedC}（相等 ⇒ 报告里看不到「工具已退出清单」）`);
 
   /* restrict 抛错 ⇒ 不隐藏、不崩（失败极性） */
   const callsD = { register: 0, restrict: 0, dispose: 0 };
@@ -2761,6 +2769,19 @@ console.log('\n== 6.23 R18：单档静默 + 工具可见性 + 开关撤回 ==');
       afterHide >= 1 && schedN > afterHide,
       `隐藏后 schedule=${afterHide}；释放后=${schedN}`);
   }
+  /* R18.2：**撤回**同样要留痕——含「拿不到 disposer」的降级分支；effort 与 compact 对称。 */
+  ok('R18.2 静态：撤回路径（成功 + 降级两支）都 schedule 落报告（effort / compact 对称）',
+    (() => {
+      const bodyOf = (src, name) => {
+        const i = src.indexOf(`function ${name}(`);
+        if (i < 0) return null;
+        const j = src.indexOf('\n  }\n', i);
+        return j < 0 ? src.slice(i) : src.slice(i, j);
+      };
+      const cnt = (s) => (s ? (s.match(/schedule\(/g) ?? []).length : 0);
+      return cnt(bodyOf(effortR18, 'retractTool')) >= 2 && cnt(bodyOf(ct, 'retractTool')) >= 2;
+    })(),
+    '关开关后报告里看不到「工具已退出模型清单」（R18 真机实测踩到）');
 }
 
 /* ═══════════ 汇总 ═══════════ */
