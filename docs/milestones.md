@@ -2237,11 +2237,26 @@ Error: tool "compact_context" returned invalid output: "value.scheduled" must be
 | --- | --- | --- |
 | `set_reasoning_effort` 在该 agent 的可见清单里 | **无**（Inspect Tool 面实证） | **有**（另一次 Inspect 取证） |
 | `compact_context` | 有（不受影响：不同开关） | 有 |
+| 可见工具总数 | **73** | **74**（差 1 = 正好那个工具） |
 | 用量行后缀 `｜ 思考强度 …` | **没有** | 恢复 |
 | 「智能思考」一次性教学 | **没有** | 恢复（重讲一次） |
 
-报告侧旁证：`effortTool.revocable:true`（R18 新代码）、`effortLastSweep {why:'activate', released:0}`（激活清扫已跑）。
+报告侧旁证：`effortTool.revocable:true`（R18 新代码）、`m2.effortSuffixes/Briefings` 在单档轮次**不增长**（文本零注入的数值证据）。
 恢复发生在 pre-step（早于 `system-prompt/assemble`）⇒ **当步生效**，不是下一轮。
+
+**自愈（单档下 toggle，最后一项）**——决定性序列：
+
+```
+12:55:32  上一实例：单档 ⇒ gate NO-SWITCH/single、effortRestricts=1（工具已隐藏）
+12:58:06  用户 toggle ⇒ 新实例激活期清扫：effortLastSweep{why:'activate', released:1, agents:2}
+          effortRestores=1                       ← 释放了上个实例留在 agent fiber 上的限制
+12:58:30  reconcile 重新判定（仍单档）⇒ 再次隐藏：restricts=1、gate NO-SWITCH/single
+```
+
+⇒ **跨热换不留残**，且「切到多档后工具永远不见」这条最怕的静默失效被正面排除。
+
+**R18.1 落报告（真机）**：`12:55:32 reason:"effort"` 条目里出现 `effortRestricts:1` 与完整 `effortGate`
+（该写入**不是**换档工具触发的——工具当时正是隐藏态，是 `hideToolFor` 自己的 `schedule`）⇒ 缺口闭环。
 
 ### R18.1 取证缺口：工具隐藏/恢复在报告里无痕（2026-10-13，用户截图反馈「小缺口修下」）
 
