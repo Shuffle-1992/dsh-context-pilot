@@ -245,9 +245,24 @@ export function createCompactTool(deps) {
     try { const n = getRangeApi?.()?.TIER_NAMES; return Array.isArray(n) && n.length ? n : ['light', 'standard', 'heavy']; }
     catch { return ['light', 'standard', 'heavy']; }
   };
+  /* R19（2026-10-15 用户要求）：档位展示统一为中文说法 `深压8%/标准16%/浅压24%`。
+   * 展示文本全部由 compact-range.mjs 推导（叶子模块是唯一真相），此处只做**取用 + 兜底**。
+   * 兜底只在模块未就绪时生效（宁可显示旧口径，也不让工具/卡片渲染失败）。 */
+  const rangeApi = () => { try { return getRangeApi?.() ?? null; } catch { return null; } };
+  const labelOf = (t) => { try { return rangeApi()?.tierLabel?.(t) ?? String(t ?? ''); } catch { return String(t ?? ''); } };
+  const pctOf = (t) => {
+    try { const p = rangeApi()?.tierPct?.(t); if (Number.isFinite(p)) return p; } catch { /* 吞 */ }
+    return t === 'light' ? 8 : t === 'heavy' ? 24 : 16;
+  };
+  const textOf = (t) => { try { return rangeApi()?.tierText?.(t) ?? `${labelOf(t)}${pctOf(t)}%`; } catch { return `${labelOf(t)}${pctOf(t)}%`; } };
+  /** R19：`tier` 入参规范化——**同时接受中文标签与英文 id**（用户可能写「浅压24%」或 `heavy`）。 */
   const normTier = (tierName) => {
+    try {
+      const c = rangeApi()?.canonicalTier?.(tierName);
+      if (c && c.known) return { tier: c.tier, fallback: false, via: c.via };
+    } catch { /* 吞：退回下面的内联实现 */ }
     const t = typeof tierName === 'string' && tierName.trim() ? tierName.trim() : 'standard';
-    return tierNames().includes(t) ? { tier: t, fallback: false } : { tier: 'standard', fallback: true };
+    return tierNames().includes(t) ? { tier: t, fallback: false, via: 'id' } : { tier: 'standard', fallback: true, via: 'unknown' };
   };
 
   /**
@@ -273,7 +288,7 @@ export function createCompactTool(deps) {
        *   · 'set-tier'——**只登记档位，不登记压缩意图**（不压、不丢近端、零缓存成本）。 */
       const action = args?.action === 'set-tier' ? 'set-tier' : 'compact';
       /* R16：档位是**会话级持久偏好**（智能压缩线与强制线都读它）；未选/非法 ⇒ standard 兜底。 */
-      const { tier, fallback } = normTier(args?.tier);
+      const { tier, fallback, via } = normTier(args?.tier);
       setTier(sid, tier);
       const at = Date.now();
       const prev = bySid.get(sid);
@@ -285,18 +300,20 @@ export function createCompactTool(deps) {
         action,
         reason: reason || null,
         tier,
+        tierLabel: textOf(tier),
+        tierVia: via || null,
         tierFallback: fallback || null,
         /* 连续调用（<5s）多半是模型重复触发；记下来供报告核查，但**不拒绝**——
          * 拒绝会让模型以为自己没调成功而反复重试；意图是幂等的（覆盖写）。 */
         repeated: !!prev && at - prev.at < 5000,
       };
-      log('info', `智能压缩 工具已登记：${action === 'set-tier' ? '仅档位（不压缩）' : '下一步开始前执行'}（sid ${sid.slice(0, 8)}…，档位 ${tier}${fallback ? '（非法值兜底）' : ''}${reason ? '，理由：' + reason : ''}）`);
+      log('info', `智能压缩 工具已登记：${action === 'set-tier' ? '仅档位（不压缩）' : '下一步开始前执行'}（sid ${sid.slice(0, 8)}…，档位 ${textOf(tier)}${via === 'alias' ? '（中文标签）' : ''}${fallback ? '（非法值兜底）' : ''}${reason ? '，理由：' + reason : ''}）`);
       schedule('compact-tool', 400);
       /* R15（用户要求「工具完成后进行检查，起码 agent 自己过一遍」）：
        * 工具只能**登记**，真正的执行在下一步的 pre-step ⇒ 必须给出**自检契约**，否则
        * 「回了 ok 但实际没执行」对模型完全不可见（2026-10-08 真机踩过：M3 域加载失败两版，
        * 工具一直回 ok/scheduled，压缩一次都没发生）。回执由插件在下一步开头注入。 */
-      const pctOf = (t2) => (t2 === 'light' ? 8 : t2 === 'heavy' ? 24 : 16);
+      const pctNow = pctOf(tier);
       if (action === 'set-tier') {
         /* ⚠️ R16.16（另一会话实测事故，高）：这里曾写 `scheduled: false`（**boolean**），
          * 而 `output.schema` 声明 `type:'string'` ⇒ 宿主按 schema 校验**整条调用被拒**：
@@ -309,7 +326,7 @@ export function createCompactTool(deps) {
           ok: true,
           action: 'set-tier',
           tier,
-          verify: `档位已登记为 ${tier}（保留窗口 × ${pctOf(tier)}%）——**本次不压缩**。`
+          verify: `档位已登记为「${textOf(tier)}」（保留窗口 × ${pctNow}%）——**本次不压缩**。`
             + '该档位此后对本会话的压缩（包括系统在强制线代替你执行的那次）持续生效，直到再次改选。'
             + '想在低占用时提前锁定档位，就用这条路径（零压缩成本）。',
         };
@@ -319,7 +336,7 @@ export function createCompactTool(deps) {
         action: 'compact',
         scheduled: 'next-step',
         tier,
-        verify: `已登记，档位 ${tier}（保留窗口 × ${pctOf(tier)}%）——该档位此后对本会话的压缩（含强制线）持续生效，直到再次改选。下一步开头会有一条「压缩自检」回执；若显示「未执行」，请再调用一次 compact_context，或直接告知用户。`,
+        verify: `已登记，档位「${textOf(tier)}」（保留窗口 × ${pctNow}%）——该档位此后对本会话的压缩（含强制线）持续生效，直到再次改选。下一步开头会有一条「压缩自检」回执；若显示「未执行」，请再调用一次 compact_context，或直接告知用户。`,
       };
     } catch (e) {
       log('warn', `智能压缩 工具执行异常（吞）：${msg(e)}`);
@@ -341,7 +358,7 @@ export function createCompactTool(deps) {
     const r = Number(retainRatio);
     const t = Number(retainTokens);
     if (Number.isFinite(r) && r > 0 && Number.isFinite(t) && t > 0) {
-      return `**保留多少**（**按默认档位 standard 计**——若你已登记其它档位，以每轮决策卡上的活值为准）：`
+      return `**保留多少**（**按默认档位 ${textOf('standard')} 计**——若你已登记其它档位，以每轮决策卡上的活值为准）：`
         + `压缩按「上下文窗口 × ${Math.round(r * 100)}%」自选保留范围，当前窗口下**近端约 ${kfmt(t)} token 原样保留**，`
         + '更早的内容才转成摘要（摘要里仍含文件路径与结论要点）；若整段对话还没超出这个预算，则**什么都不会压**。';
     }
@@ -371,13 +388,15 @@ export function createCompactTool(deps) {
           + '**不要为了压缩而停下**、不要结束回合；之后的步骤都在压缩后的上下文上继续。'
           + '**不需要**任何「待执行」占位，也**没有**任何自动拉起动作。',
         retentionClause(retainRatio, retainTokens),
-        /* R16：三档只是**保留预算**不同；范围计算/边界保护/摘要策略完全一致。 */
-        `**压缩档位（tier，3 选 1）**：`
-          + '`light` 深压=保留窗口 × 8%（1M 窗口 ≈ 80k）——全新子任务/要预留大量空间；'
-          + '`standard` 标准=× 16%（≈160k）——默认；'
-          + '`heavy` 浅压=× 24%（≈240k）——接下来仍要频繁引用近端一大段。'
-          + `**登记方式**：调 ${TOOL_NAME} 时带 \`tier\`；**只想提前锁定档位、现在不压** ⇒ 加 \`action:'set-tier'\`（零压缩成本）。`
-          + `**不传 tier = 沿用已登记档位；从未登记过才按 standard**（不是重置）。`,
+        /* R16：三档只是**保留预算**不同；范围计算/边界保护/摘要策略完全一致。
+         * R19（2026-10-15 用户要求）：展示统一为中文说法 `深压8%/标准16%/浅压24%`，
+         * 百分比与 1M 窗口折算值**全部由 TIERS 推导**（写死会与常量漂移）。 */
+        `**压缩档位（3 选 1）**：`
+          + `**${textOf('light')}**=保留窗口 × ${pctOf('light')}%（1M 窗口 ≈ ${kfmt(Math.round(1e6 * pctOf('light') / 100))}）——全新子任务/要预留大量空间；`
+          + `**${textOf('standard')}**=× ${pctOf('standard')}%（≈${kfmt(Math.round(1e6 * pctOf('standard') / 100))}）——默认；`
+          + `**${textOf('heavy')}**=× ${pctOf('heavy')}%（≈${kfmt(Math.round(1e6 * pctOf('heavy') / 100))}）——接下来仍要频繁引用近端一大段。`
+          + `**登记方式**：调 ${TOOL_NAME} 时带 \`tier\`（传中文「深压/标准/浅压」或英文 ${tierNames().join('/')} 均可）；**只想提前锁定档位、现在不压** ⇒ 加 \`action:'set-tier'\`（零压缩成本）。`
+          + `**不传 tier = 沿用已登记档位；从未登记过才按 ${textOf('standard')}**（不是重置）。`,
         `**档位是会话级持久选择**：登记后对本会话之后的所有压缩（含 ${crit} 强制线那次）持续生效，直到再次改选。`
           + `**若预计任务会推高占用，趁占用还在 ${crit} 强制线之下时选定档位**——越线那一刻的自动压缩就按它执行；`
           + '越线之后才改档，管不上正在发生的那次（下一轮起才生效）。',
@@ -404,12 +423,19 @@ export function createCompactTool(deps) {
       const crit = `${Math.round((Number(criticalRatio) || 0.8) * 100)}%`;
       const r = Number(retainRatio);
       const t = Number(retainTokens);
-      /* R16：档位行按**当前窗口**折算三档的近似保留量；拿不到时给比例不给 token 数。 */
+      /* R16：档位行按**当前窗口**折算三档的近似保留量；拿不到时给比例不给 token 数。
+       * R19：① 展示用中文说法；② 预算按**真实窗口**折算（win = 当前档位预算 ÷ 当前档位比例），
+       * 不再用 0.5×/1.5× 的倍数魔法——那只是「8/16/24 恰好成倍数」时的巧合，常量一改就错。 */
+      const win = (Number.isFinite(t) && t > 0 && Number.isFinite(r) && r > 0) ? t / r : null;
+      const budgetOf = (name) => (win == null ? null : Math.round(win * pctOf(name) / 100));
+      const bLight = budgetOf('light');
+      const bStd = budgetOf('standard');
+      const bHeavy = budgetOf('heavy');
       const tierLine = Number.isFinite(t) && t > 0
-        ? `**light** 深压=保留窗口 × 8%（当前 ≈${kfmt(t * 0.5)} token）——近端细节不再需要/要预留大量空间时用；`
-          + `**standard** 标准=× 16%（≈${kfmt(t)}）——默认，拿不准就用它；`
-          + `**heavy** 浅压=× 24%（≈${kfmt(t * 1.5)}）——接下来仍要频繁引用近端一大段（多文件联调/长推理链）时用。`
-        : `**light** 深压=窗口 × 8%；**standard** 标准=× 16%（默认）；**heavy** 浅压=× 24%。`;
+        ? `**${textOf('light')}**=保留窗口 × ${pctOf('light')}%（当前 ≈${kfmt(bLight)} token）——近端细节不再需要/要预留大量空间时用；`
+          + `**${textOf('standard')}**=× ${pctOf('standard')}%（≈${kfmt(bStd)}）——默认，拿不准就用它；`
+          + `**${textOf('heavy')}**=× ${pctOf('heavy')}%（≈${kfmt(bHeavy)}）——接下来仍要频繁引用近端一大段（多文件联调/长推理链）时用。`
+        : `**${textOf('light')}**=窗口 × ${pctOf('light')}%；**${textOf('standard')}**=× ${pctOf('standard')}%（默认）；**${textOf('heavy')}**=× ${pctOf('heavy')}%。`;
       const keep = Number.isFinite(r) && r > 0 && Number.isFinite(t) && t > 0
         ? `近端约 ${kfmt(t)} token 原样保留（窗口 × ${Math.round(r * 100)}%），更早的转摘要；未超预算则什么都不压`
         : '近端内容原样保留，更早的转摘要；未超预算则什么都不压';
@@ -435,18 +461,18 @@ export function createCompactTool(deps) {
        * ⇒ 明确渲染**当前档位名**（含是否已登记），并把「现行生效」的语义限定为保留预算。 */
       const cur = typeof tierName === 'string' && tierName ? tierName : null;
       const tierNow = cur
-        ? `**当前档位：${cur}`
+        ? `**当前档位：${textOf(cur)}`
           + (tierState === 'restored' ? '（已登记；本次由**落盘恢复**——跨 toggle/重启仍有效）'
             : tierState === 'set' ? '（已登记）'
               : tierDeclared === true ? '（已登记）' : '（兜底，本会话从未登记）')
-          + `——目录里的「现行生效」说的是**保留 token 数**，不是档位名。**`
+          + `——目录里的「现行生效」说的是**保留 token 数**，不是档位说法。**`
         : '';
       /* R16.16（评审三条剩余项之一/二）：① 趋势行存在时，「若预计…」这句改为指向趋势行
        * （两处口径不一致）；② 损失数字并列「若先声明 heavy 会少丢多少」，把 set-tier 的收益变数字。 */
       const trendExists = trend !== '';
-      const gainLine = (used != null && Number.isFinite(t) && t > 0 && used > t)
-        ? `**若先声明 heavy（保留 ${kfmt(t * 1.5)}）：只丢 ~${kfmt(Math.max(0, used - Math.round(t * 1.5)))}**`
-          + `（比当前档位少丢 ~${kfmt(Math.round(t * 1.5) - t)}）——这就是「先 \`set-tier\` 再压」的量化收益。`
+      const gainLine = (used != null && Number.isFinite(t) && t > 0 && used > t && Number.isFinite(bHeavy) && bHeavy > 0)
+        ? `**若先声明「${textOf('heavy')}」（保留 ${kfmt(bHeavy)}）：只丢 ~${kfmt(Math.max(0, used - bHeavy))}**`
+          + `（比当前档位少丢 ~${kfmt(Math.max(0, bHeavy - t))}）——这就是「先 \`set-tier\` 再压」的量化收益。`
         : '';
       const overLine = ratio >= (Number(criticalRatio) || 0.8)
         ? `**当前占用 ${pct} 已越强制线 ⇒ 立刻用 \`action:'set-tier'\` 声明档位**，避免下一次强制压缩仍按兜底档执行。`
@@ -500,7 +526,7 @@ export function createCompactTool(deps) {
         + '**调用本工具前，先在回复正文里用一句话说明你要压缩的理由**（用户看不到工具调用的理由），然后再调用。'
         + '压缩在**你的下一个步骤开始前**执行，本轮不中断，调用后请直接继续当前任务、不要停下等它。'
         + '参数：`action`（默认 compact=登记并压缩；**set-tier=只登记档位、本次不压缩**）、'
-        + '`tier`（light/standard/heavy 三选一，**不传 = 沿用已登记档位**，从未登记则为 standard）、`reason`。'
+        + '`tier`（三选一：深压8% / 标准16% / 浅压24%，**不传 = 沿用已登记档位**，从未登记则为标准16%）、`reason`。'
         + '档位是**会话级持久选择**：登记后对本会话之后的所有压缩（含强制线那次）持续生效，直到再次改选。'
         + '**策略、当前档位与本轮数据（损失/趋势）见每轮注入的压缩决策卡**——按卡上的数字判断，不要凭空预测占用。'
         + '工具返回后会给出自检契约；下一步开头的「压缩自检」回执可确认是否真的执行了。',
@@ -524,7 +550,8 @@ export function createCompactTool(deps) {
          * 不接触会「切坏 tool 对」的底层参数。 */
         tier: {
           type: 'string',
-          description: '（可选）压缩档位：light=深压（保留 8%）/ standard=标准（16%，默认）/ heavy=浅压（24%）。'
+          description: '（可选）压缩档位：深压8%（只保留窗口 × 8%）/ 标准16%（默认）/ 浅压24%（保留最多）。'
+            + '传中文「深压/标准/浅压」或英文 light/standard/heavy 均可。'
             + '选档理由写在回复正文里；档位对本会话后续所有压缩持续生效。',
         },
       },
@@ -539,7 +566,7 @@ export function createCompactTool(deps) {
              * （additionalProperties:false ⇒ 多一个字段就整条工具调用失败：
              * `"value.verify" is not a declared property`）⇒ 加返回字段必须同时在这里声明。 */
             action: { type: 'string', description: '本次动作：compact（登记并压缩）或 set-tier（只登记档位，不压缩）。' },
-            tier: { type: 'string', description: '本次登记并持续生效的压缩档位（light/standard/heavy）。' },
+            tier: { type: 'string', description: '本次登记并持续生效的压缩档位（深压8%/标准16%/浅压24%；内部 id 为 light/standard/heavy）。' },
             verify: {
               type: 'string',
               description: '自检契约：next-step 压缩会有「压缩自检」回执；显示未执行就再调用一次或告知用户。',
@@ -646,5 +673,5 @@ export function createCompactTool(deps) {
     };
   }
 
-  return { TOOL_NAME, ensure, peekIntent, takeIntent, pending, getTier, hasTier, setTier, tierState, renderBrief, renderCard, diag };
+  return { TOOL_NAME, ensure, peekIntent, takeIntent, pending, getTier, hasTier, setTier, tierState, renderBrief, renderCard, diag, tierText: (t) => textOf(t) };
 }

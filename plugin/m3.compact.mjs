@@ -140,8 +140,10 @@ export function createM3Compaction(deps) {
       const ourLine = (() => { try { const c = criticalCapOf({ session: { id: sidE } }); return Number.isFinite(c) ? c : null; } catch { return null; } })();
       const preempted = Number.isFinite(lastSeen) && Number.isFinite(ourLine) && lastSeen < ourLine;
       const base = formatAct(kind === 'manual' ? 'engine-manual' : 'engine-auto', null);
+      /* R19：展示统一中文档位说法（这条 text 会进弹窗 tooltip ⇒ 属用户可见面）。 */
+      const stdText = (() => { try { return getCompactTool()?.tierText?.('standard') ?? 'standard'; } catch { return 'standard'; } })();
       const text = base
-        + (declared ? '' : ' · 系统代压（本会话未申报档位 ⇒ 按兜底 standard）')
+        + (declared ? '' : ` · 系统代压（本会话未申报档位 ⇒ 按兜底 ${stdText}）`)
         + (preempted ? ` · 引擎抢先：我方上次估计 ${(Number(lastSeen) * 100).toFixed(1)}% ＜ 我方线 ${(Number(ourLine) * 100).toFixed(0)}%（引擎在 step 边界判定，排在插件之前）` : '')
         + (d.error ? ' · 失败' : (ratioAfter != null ? ` · 压后占用 ${(ratioAfter * 100).toFixed(1)}%` : ''));
       recordHudAct(sidE, text);
@@ -381,7 +383,7 @@ export function createM3Compaction(deps) {
       const tierName = tool?.getTier?.(sid) ?? 'standard';
       log(
         'info',
-        `M3.5 pre-step 先压开始：${wanted ? '模型主动请求' : '越强制线'}（占用 ${(ratio * 100).toFixed(1)}%，强制线 ${(effCritical * 100).toFixed(1)}%，档位 ${tierName}，via ${compaction.via}）`,
+        `M3.5 pre-step 先压开始：${wanted ? '模型主动请求' : '越强制线'}（占用 ${(ratio * 100).toFixed(1)}%，强制线 ${(effCritical * 100).toFixed(1)}%，档位 ${tool?.tierText?.(tierName) ?? tierName}，via ${compaction.via}）`,
       );
       const out = await compactWithOwnRange(agent, compaction, { forced, sig, sid, window: mr.window, measure: mr.measure, tierName });
       let result = out.result;
@@ -393,7 +395,7 @@ export function createM3Compaction(deps) {
         const mr2 = measureRatio(agent.session);
         ratioAfter = mr2.ok ? mr2.ratio : null;
         if (mr2.ok && mr2.ratio != null && mr2.ratio >= effCritical) {
-          log('info', `M3.5 自选范围（档位 ${out.tier ?? tierName}）后占用仍 ${(mr2.ratio * 100).toFixed(1)}% ≥ 强制线 ${(effCritical * 100).toFixed(1)}% ⇒ 追加官方 overflow 收口`);
+          log('info', `M3.5 自选范围（档位 ${tool?.tierText?.(out.tier ?? tierName) ?? (out.tier ?? tierName)}）后占用仍 ${(mr2.ratio * 100).toFixed(1)}% ≥ 强制线 ${(effCritical * 100).toFixed(1)}% ⇒ 追加官方 overflow 收口`);
           const r2 = await compaction.service.compactIfNeeded(agent, 'context-overflow', sig);
           if (r2) {
             result = r2;

@@ -51,10 +51,11 @@ profile `package.json` 两处要改（以本机 `desktop` profile 为例）：
 > **交接说明**：本文是入口，读完 §1–§3 即可上手；深入内容在 [`docs/`](docs/)。
 > 创建 2026-10-05 · 最后更新 2026-10-12
 
-> **版本 v0.1.5**（2026-10-13）：**R18.2 撤回留痕**——关闭开关后 `retractTool` 撤回工具注册时没有 `schedule`，
-> 报告里看不到「工具已退出模型清单」（R18 真机实测：Inspect 已确认工具消失，报告却无痕）。
-> 现撤回的**成功支与降级支（拿不到 disposer）都落报告**，effort / compact 两侧对称；新增 2 条断言 + 变异验证。
-> 历史：**v0.1.4**（2026-10-13）R18.1 隐藏/恢复落报告（含「按函数体取文本」的断言写法修正）；
+> **版本 v0.1.6**（2026-10-15）：**R19 档位说法改中文**——三档统一展示为 **深压8% / 标准16% / 浅压24%**
+> （原先展示 `light` / `standard` / `heavy` 英文 id）。百分比由模块常量 `TIERS` **推导**（不写死）；英文 id 退为
+> **内部/兼容值**（落盘档位文件与老会话里存的仍是 id ⇒ **零迁移**），且工具的 `tier` 参数**中英都能传**。
+> 历史：**v0.1.5**（2026-10-13）R18.2 撤回留痕（关开关也能在报告里看到「工具已退出清单」）；
+> **v0.1.4**（2026-10-13）R18.1 隐藏/恢复落报告（含「按函数体取文本」的断言写法修正）；
 > **v0.1.3**（2026-10-13）**R18 单档模型「零注入 + 工具静默」**（排除 Default 后 ≤1 档 ⇒ 不注入换档文本、
 > 工具从该会话清单收起，省 ~417 字符/请求；切多档当轮恢复；并修掉「开关关闭后工具仍在下发」与「开关翻转晚一步」）；
 > **v0.1.2**（2026-10-12）R17 用户手动改档的轮首知情；**v0.1.1**（2026-10-10）**包名统一为 `dsh-context-pilot`**（去掉 `@local/` 前缀，符合 DSH Plugin Hub 上架基础项：
@@ -69,13 +70,13 @@ profile `package.json` 两处要改（以本机 `desktop` profile 为例）：
 
 ```
 每轮任务前 → 读上下文用量（tokenMeter.measure）→ 注入「窗口 / 已用 / 占比」到 prompt
-           ｜ 压缩档位（R16）：light 深压 8% / standard 标准 16%（默认）/ heavy 浅压 24%
+           ｜ 压缩档位（R16）：深压8% / 标准16%（默认）/ 浅压24%
            ｜ —— Agent 调 compact_context(tier=…) 选档，会话级持续生效；不选 = standard
            → 占用达「智能压缩线」时附决策卡，模型自行判断是否压缩并选档
            → 模型【先在正文里说一句理由，再】调用工具 compact_context（可选 tier）
            → 下一步的 pre-step 执行压缩（按档位自算保留范围）→ 之后所有步骤跑在压缩后的上下文上
            → 占用达「强制压缩线」时插件在 pre-step 无条件发起压缩
-              ｜ 档位同样由 Agent 事先选定的 tier 决定（Agent 选过 heavy 就按 24% 保留）；
+              ｜ 档位同样由 Agent 事先选定的 tier 决定（Agent 选过浅压24% 就按 24% 保留）；
               ｜ 没选过 = standard 兜底；只有自算失败/压完仍在线上，才落到 DSH 官方 overflow 收口
 
 可选（智能思考开关）：
@@ -89,7 +90,7 @@ profile `package.json` 两处要改（以本机 `desktop` profile 为例）：
 | --- | --- | --- |
 | **压缩改「工具触发」**（R4） | 模型调用 `compact_context` ⇒ 登记意图 ⇒ **下一步 pre-step** 执行 ⇒ 本轮无缝继续 | 彻底删掉「伪造用户消息拉起会话」那套（`maybeResumeAfterMarker` / `sessionController.prompt` / `agent.followup` 在代码里**零出现**）。压缩与「叫醒」解耦：工具调用本身就保证有下一步，**不需要叫醒** |
 | **保留范围「自己算」**（R5+R16） | 保留预算由**会话档位**决定（R16 三档，见下一行）⇒ 调公开方法 `compactRegion`；边界不合法则逐节点回退；失败或压完仍越线才**沿用官方 overflow** 兜底 | 引擎 `context-overflow` 写死 `retainTokens = 0`：真机实测在**只有 53% 占用**时把 surface 从 **1117 节点 / 367,794 token** 砍到 **4 节点 / 8,603 token**（影子化 97.7%）。现在近端细节留得住，且**整段没超预算时什么都不会压** |
-| **压缩档位（R16）** | `compact_context` 可选参数 `tier`：**light 深压（8%）/ standard 标准（16%，默认）/ heavy 浅压（24%）**；**会话级持续生效**（含强制线，未选 = standard 兜底）；范围计算/边界保护三档完全一致，夹取 `[40k, 窗口×50%]` | 把「不可靠的自由度」换成「有界的选择」：模型只在语义档位里挑，不接触会「切坏 tool 对」的底层参数；选档理由照旧写在正文（先说再调用）；回执带档位与保留预算，Agent 能确认选档真的生效 |
+| **压缩档位（R16）** | `compact_context` 可选参数 `tier`：**深压8% / 标准16%（默认）/ 浅压24%**；**会话级持续生效**（含强制线，未选 = 标准16% 兜底）；范围计算/边界保护三档完全一致，夹取 `[40k, 窗口×50%]` | 把「不可靠的自由度」换成「有界的选择」：模型只在语义档位里挑，不接触会「切坏 tool 对」的底层参数；选档理由照旧写在正文（先说再调用）；回执带档位与保留预算，Agent 能确认选档真的生效 |
 | **换档改「工具」**（R2/R3） | 模型调用 `set_reasoning_effort` ⇒ **下一步请求即用新档位** | 替代「写文本标记、等用户再发一条消息才生效」——旧方案要求用户参与才能生效 |
 | **「先说，再调用」**（R6） | 两个工具的 description + 一次性说明 + 决策卡都要求：**先在回复正文里用一句话说明理由，再调用工具** | 工具调用对用户是**静默的**（只显示「调用了某工具」）。理由写进正文，用户才看得出为什么压、为什么换档 |
 | **强制线恒低于引擎 5pp** | 生效值 = `min(配置, 引擎阈值 − 5pp)`（内置 80% ⇒ **75%**） | 两线相等时谁先命中取决于各自测量时机，插件可能「什么都没做、占用却降了」⇒ HUD 记录失真 |
@@ -117,7 +118,7 @@ profile `package.json` 两处要改（以本机 `desktop` profile 为例）：
 | 面板名 | 配置键 | 含义 |
 | --- | --- | --- |
 | **智能压缩线** | `markerMinRatio` | 占用达此值时注入决策卡，**模型可自行决定压缩**（含选档，见 R16）并自动续跑 |
-| **强制压缩线** | `criticalRatio` | 占用达此值**无条件发起压缩**（pre-step / idle 兜底；执行路径同上——先按**会话档位**自算保留范围，官方 overflow 只作兜底/收口；档位由 Agent 事先选定，未选 = standard）。**生效值 = min(配置, DSH 引擎阈值 − 5pp)**，即内置 80% ⇒ 上限 **75%** |
+| **强制压缩线** | `criticalRatio` | 占用达此值**无条件发起压缩**（pre-step / idle 兜底；执行路径同上——先按**会话档位**自算保留范围，官方 overflow 只作兜底/收口；档位由 Agent 事先选定，未选 = 标准16%）。**生效值 = min(配置, DSH 引擎阈值 − 5pp)**，即内置 80% ⇒ 上限 **75%** |
 
 推荐值（按计费口径，计算器可按实价实时推导）：
 
@@ -145,11 +146,11 @@ profile `package.json` 两处要改（以本机 `desktop` profile 为例）：
 > 占用达强制压缩线（生效值 = min(配置, DSH 引擎阈值 − 5pp)；内置 80% ⇒ 75%）时，
 > 仍由既有 pre-step / idle 安全网自动发起压缩——**执行路径与工具触发完全相同**
 > （不是切到 DSH 自带压缩）；**保留档位同样由 Agent 事先选定的 tier 决定**
-> （R16：会话级持续生效，未选 = standard 兜底）；详见下一条。
+> （R16：会话级持续生效，未选 = 标准16% 兜底）；详见下一条。
 >
 > **保留多少近端内容**（R5+R16）：无论哪条触发，都先按**会话档位**自算范围 → 只压这一段。
-> 三档：**light = 窗口 × 8%**（1M ⇒ ~80k，深压）/ **standard = 16%**（~160k，默认）/
-> **heavy = 24%**（~240k，浅压）；预算被夹取在 `[40k, 窗口 × 50%]`。
+> 三档：**深压8% = 窗口 × 8%**（1M ⇒ ~80k）/ **标准16% = 16%**（~160k，默认）/
+> **浅压24% = 24%**（~240k）；预算被夹取在 `[40k, 窗口 × 50%]`。
 > 边界不合法则逐节点回退；仍不行或压完还在强制线之上，才**沿用官方 overflow** 兜底；
 > 整段对话未超预算时**什么都不会压**。这条规则已**教给 Agent**（R6/R16），
 > 所以它知道压缩后还剩什么，不必靠猜。
@@ -277,8 +278,8 @@ Agent 自改档不应改掉新会话的默认档。
 > `import(\`./effort.mjs?ts=${implTs}\`)` 加载（ts 取自 impl 自身），**与 impl 同批热换**；
 > `static.mjs` §4/§5 的依赖方向与「动态 import 必须带 `?ts=`」护栏自动覆盖它。
 > R5（2026-10-08）同款加载 `plugin/compact-range.mjs`（保留范围自选，纯函数叶子）。
-> ⚠️ **压缩档位是模块常量表 `TIERS`**（R16：light 0.08 / standard 0.16 = 引擎默认 / heavy 0.24），
-> 由 **Agent 经 `compact_context(tier=…)` 选择**（会话级持续生效，含强制线；未选 = standard），
+> ⚠️ **压缩档位是模块常量表 `TIERS`**（R16：深压8% = 0.08 / 标准16% = 0.16（引擎默认）/ 浅压24% = 0.24），
+> 由 **Agent 经 `compact_context(tier=…)` 选择**（会话级持续生效，含强制线；未选 = 标准16%），
 > 不在面板配置。要改成面板可调，需给 `plugin-config.schema.mjs` 加字段 + **重启 DSH**——未做，等用户确认。
 
 详见 [`docs/setup.md`](docs/setup.md#4-部署矩阵)。
@@ -287,10 +288,10 @@ Agent 自改档不应改掉新会话的默认档。
 
 ## 3. 当前状态
 
-**已完成**：M1–M5（用量读取 / 每轮注入 / 会话自说明 / HUD 弹窗 / 历史持久化）、R1–R18
+**已完成**：M1–M5（用量读取 / 每轮注入 / 会话自说明 / HUD 弹窗 / 历史持久化）、R1–R19
 （智能思考 + 换档工具、压缩改工具触发、保留范围自算、全面审查加固、**压缩档位三选一**、
 工具后自检回执、回执按会话隔离、**用户手动改档的轮首知情**、**单档模型零注入 + 工具静默**）。**9 个域模块 + core**，`host.impl.mjs` **1836 → 518 行**。
-**测试**：contract 482 + static 72 + report 54 + boot 21 = **629 断言**全绿；关键回归均有变异验证。
+**测试**：contract 491 + static 72 + report 54 + boot 21 = **638 断言**全绿；关键回归均有变异验证。
 逐里程碑台账（含踩坑与实测数值）：[`docs/milestones.md`](docs/milestones.md)；
 早期进度历史存档：[`docs/status-archive.md`](docs/status-archive.md)。
 
@@ -307,12 +308,12 @@ npm run test:report   # 只跑报告形状
 
 | 套件 | 断言数 | 查什么 | 能抓到什么 |
 | --- | --- | --- | --- |
-| `contract.mjs` | 482 | face 方法表 ↔ client 描述符 ↔ TYPERT 三端对账；Config 字段在 FIELDS/schema/M3_DEFAULTS 三处齐全**且默认值值级一致**；退役字段未复活；`mergeConfig` 读取集 ↔ schema；**getHud 作用域契约**（防 ReferenceError 回归）；**弹窗/阈值行排版契约**（**状态提示独立成行**，防窄弹窗逐字断开）；**智能思考 UI 契约**（开关尺寸/右对齐/字段三端/chip 两态色 token）；**压缩工具化契约**（工具注册/意图 TTL/消费顺序/伪造恢复零残留）；**阈值余量契约**（引擎阈值 −5pp 三处同源 / **阈值核心已抽为叶子模块且 host 不再重复定义** / 未就绪时空值降级 / 面板自取上限 / 输入即时钳制 / 已存超限自动钳回保存 / 教学传生效值）；**组件作用域对账**（防跨组件引用面板 state ⇒ 整卡崩掉，`node --check` 的盲区）；**R5 保留范围契约**（`RETAIN_RATIO` 与引擎 `DEFAULT_RETAIN_RATIO` 同源 / 起点跳过 `system/message` / 走 `session.eventAt` 而非猜 / **真跑纯函数**验证预算-范围-影子量-一致性拒绝-回退上限 / 引擎错误文案逐字对账 + 边界错误分类 / 官方兜底与强制线收口接线 / 留痕）；**R6 教学契约**（**实例化两个模块真跑 `renderBrief`/`renderCard`**：先说再调用的「显著标注」与「具体做法」**分两半钉死** / 两个工具 description 也要求 / 参数说明也要求 / 「自己算范围」按活值渲染 / **拿不到活值时不编数字** / host 活值接线）；**R7 加固契约**（退役零残留 4 类 × 4 文件剥注释判定 / 保留项 `markerMinRatio` 未被误删 / 随会话增长的 Set 已**有界化** / 意图表**真跑 `runTool`**：登记→`pending()`→跨 sid 隔离→消费 / 全表 TTL 清扫 / 空可选集**不否决档位** / **顺序契约**（F1 冷却在成功分支 / F5 消费在服务确认之后 / F2 可抛语句前移）/ **真错误边界** / occupancy 搬运 / alive 守卫**计数**）；**R8/R9/R10 解耦契约**（阈值核心与 M3 压缩域（执行核心 + 编排层）已抽为叶子模块 / **宿主不得把 `api.RETAIN_RATIO`、`api.selectRange(`、`state.m3.lastPreStep`、`sweepInFlight` 抄回来**（查独有产物而非函数名，防改名躲过）/ 跨域回调（`publishHud`/`recordHudAct`/`formatAct`/`clearBriefed`/`schedule`）必须显式注入 / 未就绪时空值降级并留痕 / 模块对宿主内部件零 import）；**智能思考 8 条实证结论**（prepend 最外层 / pending 持久 / 冷却基准 / 计数语义 / 两侧校验 / agent.ctx / sid 现读 / 删 maxTokens）；**R17 用户手动改档的「轮首知情」**（读 `modelSelection` 投影的 pending，而非上一次请求的 header；行为级覆盖改档/降级/兜底五条路径） | **调用静默失败**（P29：三端漂移不报错、只是拿不到数据）；已实测抓过 7 个真 bug |
+| `contract.mjs` | 491 | face 方法表 ↔ client 描述符 ↔ TYPERT 三端对账；Config 字段在 FIELDS/schema/M3_DEFAULTS 三处齐全**且默认值值级一致**；退役字段未复活；`mergeConfig` 读取集 ↔ schema；**getHud 作用域契约**（防 ReferenceError 回归）；**弹窗/阈值行排版契约**（**状态提示独立成行**，防窄弹窗逐字断开）；**智能思考 UI 契约**（开关尺寸/右对齐/字段三端/chip 两态色 token）；**压缩工具化契约**（工具注册/意图 TTL/消费顺序/伪造恢复零残留）；**阈值余量契约**（引擎阈值 −5pp 三处同源 / **阈值核心已抽为叶子模块且 host 不再重复定义** / 未就绪时空值降级 / 面板自取上限 / 输入即时钳制 / 已存超限自动钳回保存 / 教学传生效值）；**组件作用域对账**（防跨组件引用面板 state ⇒ 整卡崩掉，`node --check` 的盲区）；**R5 保留范围契约**（`RETAIN_RATIO` 与引擎 `DEFAULT_RETAIN_RATIO` 同源 / 起点跳过 `system/message` / 走 `session.eventAt` 而非猜 / **真跑纯函数**验证预算-范围-影子量-一致性拒绝-回退上限 / 引擎错误文案逐字对账 + 边界错误分类 / 官方兜底与强制线收口接线 / 留痕）；**R6 教学契约**（**实例化两个模块真跑 `renderBrief`/`renderCard`**：先说再调用的「显著标注」与「具体做法」**分两半钉死** / 两个工具 description 也要求 / 参数说明也要求 / 「自己算范围」按活值渲染 / **拿不到活值时不编数字** / host 活值接线）；**R7 加固契约**（退役零残留 4 类 × 4 文件剥注释判定 / 保留项 `markerMinRatio` 未被误删 / 随会话增长的 Set 已**有界化** / 意图表**真跑 `runTool`**：登记→`pending()`→跨 sid 隔离→消费 / 全表 TTL 清扫 / 空可选集**不否决档位** / **顺序契约**（F1 冷却在成功分支 / F5 消费在服务确认之后 / F2 可抛语句前移）/ **真错误边界** / occupancy 搬运 / alive 守卫**计数**）；**R8/R9/R10 解耦契约**（阈值核心与 M3 压缩域（执行核心 + 编排层）已抽为叶子模块 / **宿主不得把 `api.RETAIN_RATIO`、`api.selectRange(`、`state.m3.lastPreStep`、`sweepInFlight` 抄回来**（查独有产物而非函数名，防改名躲过）/ 跨域回调（`publishHud`/`recordHudAct`/`formatAct`/`clearBriefed`/`schedule`）必须显式注入 / 未就绪时空值降级并留痕 / 模块对宿主内部件零 import）；**智能思考 8 条实证结论**（prepend 最外层 / pending 持久 / 冷却基准 / 计数语义 / 两侧校验 / agent.ctx / sid 现读 / 删 maxTokens）；**R17 用户手动改档的「轮首知情」**（读 `modelSelection` 投影的 pending，而非上一次请求的 header；行为级覆盖改档/降级/兜底五条路径） | **调用静默失败**（P29：三端漂移不报错、只是拿不到数据）；已实测抓过 7 个真 bug |
 | `static.mjs` | 72 | 真实 `node --check`（含 `docs/reference/tools/*.cjs`）；client 自足（无外部 import，require 仅 react）；entry 薄壳（<40 行、有静态 Config、动态 import 带 `?ts=`）；模块依赖方向无环；热换纪律；**功能域叶子模块清单**（effort / compact-tool / compact-range / threshold / m3.compact / m5.hud / m2.inject）；调试残留扫描（tools 下的 `console.log` 属 CLI 正常输出，豁免）；**上架基础项**（根清单可被市场识别 / Bundle patch 指向存在的公开 patch / 包名↔patch name 一致 / 版本一致 / README 有安装命令 / LICENSE 与 license 字段一致） | 语法错误、破坏热换、client 引入依赖、循环依赖、`TODO`/`XXX`/`console.log` 残留、**上架基础项漂移**（改了清单名/schema 而 patch 或 README 没跟上） |
 | `report.mjs` | 54 | 产出侧字段契约；`republishFromReport`（原 `bfOnce`）回填链依赖；C3② 关键事件必须走 full 档（含**满环优先淘汰 slim**，防 FULL 取证被高频事件挤出）；**getHud 作用域与 criticalCap 实参契约**；**调查结论留档**（探针退役后结论不得丢）；真实报告结构自洽（**无嵌套条件断言** ⇒ 断言数不得随数据漂移）；`hud-acts.json` 去重；dump 工具可跑 | 报告形状无声破坏（踩过 2 次：顶层读 m3/m5、脚本读已删字段）；**证据静默丢失**（120 条全 slim、FULL 被挤光而断言全绿） |
 | `boot.mjs` | 21 | **宿主启动冒烟**：真跑 `apply(ctx, {}, {pluginDir, reportPath})`（桩 ctx）→ HUD 面注册 → **真调 `getHud(null)` 必须 `ok:true`** → `criticalCap`/occupancy/`effortEnabled` 三线 → 四个监听器 → **真调 pre-step handler**（abort 与 step=1 两次）→ **M2 注入路径留下记账**（`m2.skips` 有键或 injections>0）→ 有历史时 `m5.lastPublish==='ok'` → 报告落盘。副作用边界：报告写临时目录、`hud-acts.json` 只读不写 | **接线不可达**（R11 真事故：接线块被嵌进 `schedule()` 函数体、语法合法、423 条源断言全绿，**压缩与弹窗全链路静默失效**）——`node --check` 与源断言都看不见「代码在不在正确的函数里」 |
 
-合计 **629 条断言**（四套：contract / static / report / **boot**）。
+合计 **638 条断言**（四套：contract / static / report / **boot**）。
 
 **已验证有效**：注入 3 个人为 bug（`m3-act` 误入精简档 / client face 改名 / host 引用 client.js），
 三套件全部抓到且定位精准。**新增断言均实测验证过「对回归确实失败」**（两边都通过的测试等于没测）：
@@ -369,7 +370,7 @@ node docs/reference/tools/session-records.cjs --find <会话 id 片段> --from 1
 | **智能压缩线** | `markerMinRatio` | 0.2 | 占用达此值时注入决策卡，模型可自行决定压缩（**决策卡门槛**，与已退役的文本标记无关） |
 | **强制压缩线** | `criticalRatio` | 0.85 | 占用达此值无条件**发起**压缩（先按**会话档位**自算保留范围，官方 overflow 兜底/收口）；**生效值 = min(配置, 引擎阈值 − 5pp)**（内置 80% ⇒ 75%） |
 | 强制压缩冷却(秒) | `sweepMinIntervalMs` | 600 | 两次强制压缩的最小间隔（存储为 ms） |
-| （无面板字段） | — | — | **压缩档位**（R16）：`tier` = light 8% / standard 16% / heavy 24%，**Agent 经工具选档、会话级持续生效**（含强制线），预算夹取 `[40k, 窗口×50%]`；取代引擎 `context-overflow` 的 `retainTokens = 0`（R5）；见 [`docs/r5-retention-range-design.md`](docs/r5-retention-range-design.md) 与 milestones 的 R16 节 |
+| （无面板字段） | — | — | **压缩档位**（R16）：`tier` = 深压8% / 标准16% / 浅压24%，**Agent 经工具选档、会话级持续生效**（含强制线），预算夹取 `[40k, 窗口×50%]`；取代引擎 `context-overflow` 的 `retainTokens = 0`（R5）；见 [`docs/r5-retention-range-design.md`](docs/r5-retention-range-design.md) 与 milestones 的 R16 节 |
 
 > **R7 删除的两个字段**：`marker`（压缩标记）与 `armedTtlMs`（标记有效期）——随 marker 通道整体退役。
 > 压缩改由工具 `compact_context` 在轮内触发，回复尾行文本标记既无教学也无执行路径。
@@ -429,7 +430,7 @@ node docs/reference/tools/asar-query.cjs grep --pattern compactIfNeeded --ext js
 1. 每轮 prompt 含实时用量三元组（上限/已用/占比），模型可正确复述；
 2. 占用达**智能压缩线**时，模型可调用 `compact_context` 触发压缩（**可选 tier 选档**），插件在下一步自动执行（用户零重发）；
 3. 占用达**强制压缩线**时，插件在 pre-step / idle 无条件发起压缩——保留范围按**会话档位**自算
-   （未选 = standard 兜底；官方 overflow 只作兜底/收口），压缩事件出现在会话日志；
+   （未选 = 标准16% 兜底；官方 overflow 只作兜底/收口），压缩事件出现在会话日志；
 4. 两条线可经 Config 配置（面板按秒/比率显示），改后**即时生效**（活读，无需重启）；
 5. 插件任何异常不影响 DSH 主流程（激活安全零抛）。
 6. **智能思考**（开启时）：注入当前档位 + 可选档；Agent 调用工具 `set_reasoning_effort`

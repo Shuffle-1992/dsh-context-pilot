@@ -38,11 +38,14 @@ export const RETAIN_RATIO = 0.16;
  * 范围计算仍是本模块的确定性代码（档位只改「喂给 selectRange 的预算」）——
  * 把「不可靠的自由度」换成「有界的选择」，边界合法性仍由引擎裁决。
  *
- * | 档位 | 保留比例 | 1M 窗口 | 语义 |
- * | --- | --- | --- | --- |
- * | light | 8% | ~80k | 深压：新子任务/要预留大量空间，近端细节不再需要 |
- * | standard | 16% | ~160k | 默认（= 既有行为，已验证）；**未选档/非法值都落这里** |
- * | heavy | 24% | ~240k | 浅压：仍要频繁引用近端一大段（多文件联调/长推理链） |
+ * | 展示说法 | id（兼容值） | 保留比例 | 1M 窗口 | 语义 |
+ * | --- | --- | --- | --- | --- |
+ * | **深压8%** | `light` | 8% | ~80k | 新子任务/要预留大量空间，近端细节不再需要 |
+ * | **标准16%** | `standard` | 16% | ~160k | 默认（= 既有行为，已验证）；**未选档/非法值都落这里** |
+ * | **浅压24%** | `heavy` | 24% | ~240k | 仍要频繁引用近端一大段（多文件联调/长推理链） |
+ *
+ * ⚠️ 2026-10-15 用户要求：**展示用中文说法（深压8%/标准16%/浅压24%）**，英文 id 退为内部/兼容值
+ * （落盘文件与老会话里存的仍是 id ⇒ 不产生迁移问题）。展示文本由 `tierText(name)` 统一生成。
  */
 export const TIERS = {
   light: 0.08,
@@ -52,6 +55,52 @@ export const TIERS = {
 
 /** 档位名的规范集合（工具 schema enum 与防御性校验共用）。 */
 export const TIER_NAMES = Object.keys(TIERS);
+
+/* ═══════════ 档位的中文说法（2026-10-15 用户要求） ═══════════
+ * 用户原话：「改成『深压8%/标准16%/浅压24%』的说法。」
+ *
+ * 口径：**展示一律用中文（标签 + 紧跟百分比），英文 id 只作内部/兼容值**。
+ *   · 展示：`深压8%` / `标准16%` / `浅压24%`（百分比由 TIERS 推导，**不写死**——
+ *     本项目已有「写死 16% 与常量漂移」的教训）；
+ *   · 兼容：工具参数、落盘文件（compact-tier.json）、老会话里存的仍是 `light/standard/heavy`，
+ *     且 `canonicalTier` 同时接受中文标签与英文 id ⇒ 改名不产生迁移问题。 */
+export const TIER_LABELS = {
+  light: '深压',
+  standard: '标准',
+  heavy: '浅压',
+};
+
+/** 中文标签（未知名字原样返回，绝不编造）。 */
+export function tierLabel(name) {
+  return TIER_LABELS[name] ?? String(name ?? '');
+}
+
+/** 保留比例 → 展示用百分比整数（未知档位返回 null）。 */
+export function tierPct(name) {
+  const r = TIERS[name];
+  return Number.isFinite(r) ? Math.round(r * 100) : null;
+}
+
+/** 统一展示口径：`深压8%` / `标准16%` / `浅压24%`（拿不到比例时退化为纯标签）。 */
+export function tierText(name) {
+  const p = tierPct(name);
+  return p == null ? tierLabel(name) : `${tierLabel(name)}${p}%`;
+}
+
+/** 中文标签 → 英文 id（兼容用户在正文/参数里写中文）。 */
+const TIER_ALIASES = { 深压: 'light', 标准: 'standard', 浅压: 'heavy' };
+
+/**
+ * 把「id 或中文标签」规范化成 id。
+ * @returns `{ tier, via: 'id'|'alias', known: boolean }`；未知值返回 `known:false` 且 tier 原样（由调用方兜底）。
+ */
+export function canonicalTier(input) {
+  const raw = typeof input === 'string' ? input.trim() : '';
+  if (Object.prototype.hasOwnProperty.call(TIERS, raw)) return { tier: raw, via: 'id', known: true };
+  const mapped = TIER_ALIASES[raw];
+  if (mapped) return { tier: mapped, via: 'alias', known: true };
+  return { tier: raw, via: 'unknown', known: false };
+}
 
 /** 保留预算下限（token）：小窗口下 light 只有 ~10k，保留太少没法干活 ⇒ 抬到 40k。 */
 export const MIN_RETAIN_TOKENS = 40_000;

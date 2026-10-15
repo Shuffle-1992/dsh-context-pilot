@@ -57,6 +57,12 @@ const m5src = read('m5.hud.mjs');
 const m2src = read('m2.inject.mjs');
 /* R13：M1 快照域（快照 / 瘦身 / 事件探针）已抽 plugin/m1.snapshot.mjs。 */
 const m1src = read('m1.snapshot.mjs');
+/* R19（2026-10-15 用户要求「改成『深压8%/标准16%/浅压24%』的说法」）：
+ * 档位展示的唯一真相是 compact-range.mjs 的标签/百分比助手 ⇒ **测试桩必须注入真实模块**。
+ * 若继续注入 `{TIER_NAMES}` 最小桩，展示面会走兜底路径（退化成英文 id + 百分比的拼接），
+ * 断言测到的就是兜底而不是生产口径——那属于「测试通过但生产不一致」的虚假信心。 */
+const rangeMod19 = await import(pathToFileURL(join(PLUGIN, 'compact-range.mjs')).href);
+const rangeStub = () => rangeMod19;
 
 const wireFace = /export const FACE_NAME = ['"]([^'"]+)['"]/.exec(wire)?.[1];
 const clientFace = /const HUD_FACE = ["']([^"']+)["']/.exec(client)?.[1];
@@ -605,7 +611,7 @@ ok('R16.13 文案：m5 为两种「非插件压缩」提供标签（不与「强
     pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
     state: { m3: { compactToolDiag: { calls: 0 } } }, readCfg: () => ({ enabled: true, effortEnabled: true }),
     getDefineTool: () => (sp) => { spec14 = sp; return sp; },
-    getRangeApi: () => ({ TIER_NAMES: ['light', 'standard', 'heavy'] }),
+    getRangeApi: rangeStub,
   });
   api14.ensure();
   const agent14 = { session: { id: 'sess-14' }, id: 'sess-14' };
@@ -689,7 +695,7 @@ ok('R16.14 接线：趋势数据（增量/触线轮数）由 m2 现算并注入�
     pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
     state: { m3: { compactToolDiag: { calls: 0 } } }, readCfg: () => ({ enabled: true }),
     getDefineTool: () => (sp) => { spec15 = sp; return sp; },
-    getRangeApi: () => ({ TIER_NAMES: ['light', 'standard', 'heavy'] }),
+    getRangeApi: rangeStub,
   });
   api15.ensure();
   const desc15 = spec15.description;
@@ -714,9 +720,9 @@ ok('R16.14 接线：趋势数据（增量/触线轮数）由 m2 现算并注入�
     '仍写「每轮留一行决策」⇒ 卡不出现的轮次要写却无提醒，无法执行');
   const cardDecl = api15.renderCard({ ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, tierName: 'heavy', tierDeclared: true }) ?? '';
   const cardUnd = api15.renderCard({ ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, tierName: 'standard', tierDeclared: false }) ?? '';
-  ok('R16.15 卡给出**当前档位名**（已登记 / 兜底两态可辨）',
-    /当前档位：heavy（已登记）/.test(cardDecl) && /当前档位：standard（兜底/.test(cardUnd)
-      && /不是档位名/.test(cardDecl),
+  ok('R16.15 卡给出**当前档位**（已登记 / 兜底两态可辨；R19 起用中文说法）',
+    /当前档位：浅压24%（已登记）/.test(cardDecl) && /当前档位：标准16%（兜底/.test(cardUnd)
+      && /不是档位说法/.test(cardDecl) && !/当前档位：heavy/.test(cardDecl),
     '决策行要求写 tier 保持 X 而 X 无处可查 ⇒ 模型只能猜（评审建议 3）');
   ok('R16.15 措辞：明确「不传 tier = 沿用已登记档位（不是重置）」',
     /沿用已登记档位/.test(desc15) && /不是重置/.test(card15),
@@ -760,7 +766,7 @@ ok('R16.14 接线：趋势数据（增量/触线轮数）由 m2 现算并注入�
     pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
     state: { m3: { compactToolDiag: { calls: 0 } } }, readCfg: () => ({ enabled: true }),
     getDefineTool: () => (sp) => { spec16 = sp; return sp; },
-    getRangeApi: () => ({ TIER_NAMES: ['light', 'standard', 'heavy'] }), pluginDir: dir,
+    getRangeApi: rangeStub, pluginDir: dir,
   });
   const api16 = mkCt16(tmp16);
   api16.ensure();
@@ -799,19 +805,19 @@ ok('R16.14 接线：趋势数据（增量/触线轮数）由 m2 现算并注入�
     `实际 tier=${api16b.getTier('sess-16')} has=${api16b.hasTier('sess-16')} state=${api16b.tierState('sess-16')}`);
   const cardRestored = api16b.renderCard({ ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, tierName: api16b.getTier('sess-16'), tierDeclared: true, tierState: api16b.tierState('sess-16') }) ?? '';
   ok('R16.16 卡片：热换后区分「由落盘恢复」与「本次登记/从未登记」三态',
-    /当前档位：heavy（已登记；本次由\*\*落盘恢复\*\*/.test(cardRestored),
+    /当前档位：浅压24%（已登记；本次由\*\*落盘恢复\*\*/.test(cardRestored),
     '三态不可辨 ⇒ 用户/模型无法判断档位是否真的还在（评审实测点）');
   /* ③ 评审剩余三条 */
   const brief16 = api16.renderBrief({ criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000 }) ?? '';
-  ok('R16.16 brief：保留数字标注「按默认档位 standard 计」（不再与已登记档位矛盾）',
-    /按默认档位 standard 计/.test(brief16),
-    'brief 硬写 ×16%/160k ⇒ 声明 heavy 后与卡片活值矛盾（评审剩项一）');
+  ok('R16.16 brief：保留数字标注「按默认档位 标准16% 计」（不再与已登记档位矛盾）',
+    /按默认档位 标准16% 计/.test(brief16),
+    'brief 硬写 ×16%/160k ⇒ 声明浅压24% 后与卡片活值矛盾（评审剩项一）');
   const cardTrend16 = api16.renderCard({ ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, usedTokens: 500000, deltaTokens: 50000, turnsToLine: 5 }) ?? '';
   ok('R16.16 卡片：趋势行存在时不再重复「若预计会推高」（口径统一）',
     /按上方趋势行判断/.test(cardTrend16) && !/若预计任务会推高占用/.test(cardTrend16),
     '趋势行与「若预计」并存 ⇒ 两种口径（评审剩项二）');
-  ok('R16.16 卡片：并列给出「先声明 heavy 能少丢多少」（把 set-tier 收益变数字）',
-    /若先声明 heavy（保留 240k）：只丢 ~/.test(cardTrend16) && /少丢 ~/.test(cardTrend16),
+  ok('R16.16 卡片：并列给出「先声明 浅压24% 能少丢多少」（把 set-tier 收益变数字）',
+    /若先声明「浅压24%」（保留 240k）：只丢 ~/.test(cardTrend16) && /少丢 ~/.test(cardTrend16),
     '只给当前档位的损失 ⇒ set-tier 的收益仍是抽象（评审剩项三）');
   rmSync(tmp16, { recursive: true, force: true });
 }
@@ -831,7 +837,7 @@ ok('R16.14 接线：趋势数据（增量/触线轮数）由 m2 现算并注入�
     tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
     pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
     state: { m3: { compactToolDiag: { calls: 0 } } }, readCfg: () => ({ enabled: true }),
-    getDefineTool: () => (sp) => sp, getRangeApi: () => ({ TIER_NAMES: ['light', 'standard', 'heavy'] }), pluginDir: dir,
+    getDefineTool: () => (sp) => sp, getRangeApi: rangeStub, pluginDir: dir,
   });
   const api17 = mk17(tmp17);
   /* 登记 70 个会话（远超上限）——最后一次登记之后，落盘只应保留最近 64 个 */
@@ -1064,7 +1070,7 @@ ok('工具返回 scheduled=next-step（模型据此知道「可以继续干活�
 /* R15（用户要求「工具完成后进行检查，起码 agent 自己过一遍」）：工具只能登记，执行在下一步 ⇒
  * 结果必须带**自检契约**；否则「回 ok 但实际没执行」对模型完全不可见（2026-10-08 真机踩过）。 */
 ok('压缩工具结果带自检契约（下一步会有「压缩自检」回执 + 未执行时怎么办）',
-  /verify: `已登记，档位 \$\{tier\}/.test(ct) && /「压缩自检」回执/.test(ct) && /请再调用一次 compact_context/.test(ct),
+  /verify: `已登记，档位「\$\{textOf\(tier\)\}」/.test(ct) && /「压缩自检」回执/.test(ct) && /请再调用一次 compact_context/.test(ct),
   '缺自检契约 ⇒ 工具回 ok 但没执行时，模型无从察觉（真机踩过的盲区）');
 /* R16：档位是会话级持续选择 ⇒ 自检契约必须把「持续生效」也教给模型。 */
 ok('压缩工具自检契约说明档位**持续生效**（含强制线）',
@@ -2782,6 +2788,66 @@ console.log('\n== 6.23 R18：单档静默 + 工具可见性 + 开关撤回 ==');
       return cnt(bodyOf(effortR18, 'retractTool')) >= 2 && cnt(bodyOf(ct, 'retractTool')) >= 2;
     })(),
     '关开关后报告里看不到「工具已退出模型清单」（R18 真机实测踩到）');
+}
+
+/* ═══════════ 6.24 R19：档位说法改中文（深压8% / 标准16% / 浅压24%） ═══════════
+ * 用户要求（2026-10-15）：「改成『深压8%/标准16%/浅压24%』的说法。」
+ * 口径：**展示一律中文**（标签 + 紧跟百分比；百分比由 TIERS 推导，**不写死**）；
+ * 英文 id 退为内部/兼容值（`compact-tier.json` 与老会话里存的仍是 id ⇒ 改名零迁移），
+ * 且 `tier` 参数**中英都能传**（中文走 `canonicalTier` 别名解析）。 */
+console.log('\n== 6.24 R19：档位说法改中文（深压8%/标准16%/浅压24%）==');
+{
+  const range19 = read('compact-range.mjs');
+  ok('R19 静态：中文说法由 compact-range.mjs 单一提供（标签 / 百分比 / 别名解析）',
+    /export const TIER_LABELS = \{/.test(range19) && /export function tierLabel\(name\)/.test(range19)
+    && /export function tierPct\(name\)/.test(range19) && /export function tierText\(name\)/.test(range19)
+    && /export function canonicalTier\(input\)/.test(range19),
+    '标签散落在各展示点 ⇒ 改一处漏一处');
+  ok('R19 静态：展示面不再以英文为主（无 `**light**`、无 `light=深压`）',
+    !/\*\*light\*\*/.test(ct) && !/light=深压/.test(ct) && !/`light` 深压/.test(ct),
+    '仍以英文 id 作主展示 ⇒ 与用户要的说法不一致');
+  ok('R19 静态：工具 schema 展示中文，且保留「可传值」说明（否则模型不知道传什么）',
+    /深压8%/.test(ct) && /浅压24%/.test(ct) && /light\/standard\/heavy/.test(ct),
+    '要么丢掉可传值说明，要么仍以英文为主');
+  ok('R19 静态：压缩回执用共享格式化器（不再拼英文 id）',
+    /tApi\?\.tierText\?\.\(v\.tier\)/.test(m2src),
+    '回执仍出现 heavy 这类内部 id ⇒ 与教学口径不一致');
+
+  /* 行为级：真跑 compact-tool，并注入**真实 range 模块**（= 生产同款接线） */
+  const ctMod19 = await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href);
+  let spec19 = null;
+  const api19 = ctMod19.createCompactTool({
+    svc: (k) => (k === 'tools' ? { register: () => {} } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { compactToolDiag: { calls: 0 } } }, readCfg: () => ({ enabled: true }),
+    getDefineTool: () => (sp) => { spec19 = sp; return sp; }, getRangeApi: rangeStub,
+  });
+  api19.ensure();
+  ok('R19 行为级：三档说法 = 深压8% / 标准16% / 浅压24%（由 TIERS 推导）',
+    api19.tierText('light') === '深压8%' && api19.tierText('standard') === '标准16%' && api19.tierText('heavy') === '浅压24%',
+    `实际 ${api19.tierText('light')} / ${api19.tierText('standard')} / ${api19.tierText('heavy')}`);
+  const brief19 = api19.renderBrief({ criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000 }) ?? '';
+  ok('R19 行为级：一次性教学用中文说法（英文只作「可传值」出现，不作展示标签）',
+    /深压8%/.test(brief19) && /标准16%/.test(brief19) && /浅压24%/.test(brief19)
+    && !/\*\*light\*\*/.test(brief19) && !/\*\*heavy\*\*/.test(brief19),
+    '教学里仍以英文档位名作展示');
+  const card19 = api19.renderCard({ ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, usedTokens: 500000, deltaTokens: 50000, turnsToLine: 5, tierName: 'heavy', tierDeclared: true }) ?? '';
+  ok('R19 行为级：卡片的「当前档位」与档位行都用中文说法',
+    /当前档位：浅压24%（已登记）/.test(card19) && /深压8%/.test(card19) && /标准16%/.test(card19)
+    && !/\*\*heavy\*\*/.test(card19) && !/当前档位：heavy/.test(card19),
+    '卡片仍是英文/旧词');
+  const run19 = (args) => (spec19?.execute ? spec19.execute(args, { agent: { session: { id: 'sess-r19' } } }) : Promise.resolve(null));
+  const vAlias = await run19({ tier: '浅压', action: 'set-tier' });
+  const vId = await run19({ tier: 'heavy', action: 'set-tier' });
+  const vBad = await run19({ tier: 'nope', action: 'set-tier' });
+  ok('R19 行为级：`tier` 中英都能传（「浅压」→ 内部 id heavy；非法值兜底标准16%）',
+    vAlias?.tier === 'heavy' && /浅压24%/.test(vAlias?.verify ?? '') && vId?.tier === 'heavy'
+    && vBad?.tier === 'standard' && /标准16%/.test(vBad?.verify ?? ''),
+    `alias=${vAlias?.tier} id=${vId?.tier} bad=${vBad?.tier}`);
+  ok('R19 行为级：对外仍回内部 id（改说法不破坏持久化与老会话兼容）',
+    vAlias?.tier === 'heavy' && vId?.tier === 'heavy',
+    '中文入参被原样落盘 ⇒ 老会话/持久化不兼容');
 }
 
 /* ═══════════ 汇总 ═══════════ */

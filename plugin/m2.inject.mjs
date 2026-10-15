@@ -203,7 +203,11 @@ export function createM2Injection(deps) {
     try {
       if (!v) return null;
       const parts = [];
-      if (v.tier) parts.push(`${v.tier} 档`);
+      /* R19（2026-10-15 用户要求）：档位说法统一为中文（深压8%/标准16%/浅压24%）——回执里不再出现英文 id。 */
+      if (v.tier) {
+        const tApi = getCompactToolApi?.() ?? null;
+        parts.push(`${tApi?.tierText?.(v.tier) ?? v.tier} 档`);
+      }
       if (Number.isFinite(v.retainBudget) && v.retainBudget > 0) parts.push(`保留 ~${Math.round(v.retainBudget / 1000)}k`);
       const head = parts.length ? `（${parts.join('，')}）` : '';
       if (v.state === 'executed') {
