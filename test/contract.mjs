@@ -1144,7 +1144,9 @@ ok('R10 编排层已抽：宿主不再自带 preStepCompaction / idleSweep 实�
   && !/state\.m3\.actErrors\[code\]/.test(hostNoComment),
   '宿主仍带编排层实现/留痕 ⇒ 两套真相，且跨域回调会退化成闭包穿透（R7 审计的第二个解耦障碍回归）');
 ok('R5 保留策略：自选范围优先 + 官方 overflow 兜底',
-  /const out = await compactWithOwnRange\(agent, compaction, \{ forced, sig, sid, window: mr\.window, measure: mr\.measure, tierName \}\);/.test(ctPreStep)
+  /* R21：调用**多了锚点三个字段**（retainOverride/anchorSeq/anchorFailReason）⇒ 正则改为跨行容忍，
+   * 但仍逐项钉住原有语义字段（measure 本体、tierName 来源）。 */
+  /const out = await compactWithOwnRange\(agent, compaction, \{[\s\S]{0,320}?forced, sig, sid, window: mr\.window, measure: mr\.measure, tierName/.test(ctPreStep)
   /* R16：档位从**会话级偏好**读取（工具登记），未选 ⇒ standard 兜底（用户明确要求）。 */
   && /const tierName = tool\?\.getTier\?\.\(sid\) \?\? 'standard';/.test(ctPreStep)
   && /const forced = ratio >= effCritical;/.test(ctPreStep)
@@ -1273,12 +1275,15 @@ ok('错误文案与引擎源码逐字一致（引擎改文案时这里先响）'
 /* ---- host 接线 ---- */
 ok('host 把 measure 本体带进自选范围（不二次测量、不猜节点）',
   /return \{ ok: true, used, surface, window, ratio, measure: m\.value \};/.test(m3src)
-  && /api\.selectRange\(\{ session: agent\.session, measurement: measure, retainTokens: budget \}\)/.test(ctOwnRange),
+  && /api\.selectRange\(\{ session: agent\.session, measurement: measure, retainTokens: budget, keepFromSeq:/.test(ctOwnRange),
   '没带 measure ⇒ 只能退化成官方路径，自选范围形同未接');
-ok('保留预算按**会话档位**解析（R16：档位只改预算，不改范围算法）',
+ok('保留预算按**会话档位**解析（R16：档位只改预算，不改范围算法）——R21 起锚点优先、失败退档位',
   /resolveTier\(tierName \?\? 'standard', window\)/.test(ctOwnRange)
-  && /api\.resolveTier/.test(ctOwnRange) && /selectRange\(\{ session: agent\.session, measurement: measure, retainTokens: budget \}\)/.test(ctOwnRange),
-  '档位没接进预算 ⇒ Agent 选档无效（功能性回归）');
+  && /api\.resolveTier/.test(ctOwnRange) && /api\.selectRange\(\{ session: agent\.session, measurement: measure, retainTokens: budget, keepFromSeq:/.test(ctOwnRange)
+  /* R21：**兜底链的源码形态**必须钉死——锚点预算可用就用它，否则原样用档位预算。 */
+  && /const useAnchor = Number\.isFinite\(anchorBudget\) && anchorBudget > 0;/.test(ctOwnRange)
+  && /const budget = useAnchor \? anchorBudget : tierBudget;/.test(ctOwnRange),
+  '档位没接进预算 ⇒ Agent 选档无效（功能性回归）；锚点没做兜底 ⇒ 解析失败就无预算可用');
 ok('rangeProbe 留档位取证（请求档位/夹取/回落）',
   /tier: tierInfo\.tier,/.test(ctOwnRange) && /tierClamped: tierInfo\.clamped/.test(ctOwnRange) && /tierFallback: tierInfo\.fallback/.test(ctOwnRange),
   '选档无现场 ⇒「Agent 选了 heavy 却按 16% 压」这类问题无从还原');
@@ -2882,6 +2887,107 @@ console.log('\n== 6.25 R20：卡片对称化 + 越线反向建议 ==');
   ok('R19/R20：决策卡内不出现英文档位 id（展示面彻底中文）',
     !/\blight\b/.test(cardOver20) && !/\bstandard\b/.test(cardOver20) && !/\bheavy\b/.test(cardOver20),
     '卡片里仍有英文 id ⇒ 展示面中英混杂');
+}
+
+/* ═══════════ 6.26 R21：语义锚点保留（A/B + 降级链 text→recentUser→tier） ═══════════
+ * 用户场景（2026-10-15）：「600k 里含新旧两个需求，最新需求只在最后 6% ⇒ 选深压8% 收益最大……
+ * **Agent 能知道新旧 2 个需求的节点在哪么？**」
+ * 结论：语义边界只有模型知道、物理节点只有插件知道 ⇒ 模型**指位置**（锚点），插件**算预算**。
+ * 兜底链：`text` 锚点 → `recentUser` 锚点 → **现有三档** → 标准16%，每一跳都留痕。 */
+console.log('\n== 6.26 R21：语义锚点保留（A/B + 降级链）==');
+{
+  const R21 = read('compact-range.mjs');
+  /* 假会话：system head + 旧需求(两条) + 插件注入的用量行 + 新需求 + 近端 assistant/tool */
+  const ev21 = {
+    10: { type: 'system/message', data: {} },
+    11: { type: 'user/message', data: { source: { kind: 'user' }, content: '旧需求A：重构 X' } },
+    12: { type: 'assistant/message', data: { message: { content: 'ok' } } },
+    13: { type: 'user/message', data: { source: { kind: 'user' }, content: '旧需求B：继续' } },
+    14: { type: 'user/message', data: { source: { kind: 'context-pilot' }, content: 'Context usage 行' } },
+    15: { type: 'user/message', data: { source: { kind: 'user' }, content: '新需求：把档位说法改中文' } },
+    16: { type: 'assistant/message', data: { message: { content: '好' } } },
+    17: { type: 'tool/result', data: { message: { content: 'out' } } },
+  };
+  const s21 = { surface: { nodes: [10, 11, 12, 13, 14, 15, 16, 17] }, eventAt: (q) => ev21[q] };
+  const toks21 = { 10: 2000, 11: 100000, 12: 5000, 13: 80000, 14: 50, 15: 20000, 16: 3000, 17: 7000 };
+  const m21 = { nodes: s21.surface.nodes.map((q) => ({ seq: q, tokens: toks21[q] })) };
+  const textOf21 = (e) => String(e?.type === 'user/message' ? e.data?.content : e?.data?.message?.content ?? '');
+  const W21 = 1_000_000;
+
+  ok('R21 纯函数：找「第 N 条真用户消息」（**跳过插件注入的用量行**）',
+    rangeMod19.recentUserSeq(s21, 1) === 15 && rangeMod19.recentUserSeq(s21, 2) === 13 && rangeMod19.recentUserSeq(s21, 9) === null,
+    `实际 1→${rangeMod19.recentUserSeq(s21, 1)} 2→${rangeMod19.recentUserSeq(s21, 2)}`);
+  ok('R21 纯函数：文本锚点**先比前缀**（最精确）、再退化为包含匹配，都取最近一条',
+    rangeMod19.findUserSeqByText(s21, '新需求：把档位', textOf21)?.via === 'text-prefix'
+    && rangeMod19.findUserSeqByText(s21, '档位说法改中文', textOf21)?.via === 'text-contains'
+    && rangeMod19.findUserSeqByText(s21, '不存在的片段', textOf21) === null,
+    '前缀/包含两档语义不清 ⇒ B 锚点定位会漂');
+  const a21 = rangeMod19.resolveAnchorBudget({ session: s21, measurement: m21, want: { recentUser: 1 }, window: W21, textOf: textOf21 });
+  const b21 = rangeMod19.resolveAnchorBudget({ session: s21, measurement: m21, want: { text: '新需求' }, window: W21, textOf: textOf21 });
+  ok('R21 纯函数：A/B 两形态都能算出预算（= 锚点→末尾 token + 余量，并夹到下限 40k）',
+    a21.ok === true && a21.seq === 15 && a21.tokens === 30000 && a21.budget === 40000 && a21.clamped === true
+    && b21.ok === true && b21.via === 'text-prefix' && b21.budget === 40000,
+    `A=${JSON.stringify(a21)} B=${JSON.stringify(b21)}`);
+  const chain21 = rangeMod19.resolveAnchorBudget({ session: s21, measurement: m21, want: { text: '不存在', recentUser: 1 }, window: W21, textOf: textOf21 });
+  const dead21 = rangeMod19.resolveAnchorBudget({ session: s21, measurement: m21, want: { text: '不存在', recentUser: 9 }, window: W21, textOf: textOf21 });
+  ok('R21 降级链：text 失败 ⇒ **退 recentUser**（并带回 tried 痕）；两者都失败 ⇒ ok:false（调用方退三档）',
+    chain21.ok === true && chain21.via === 'recent-user' && chain21.tried.includes('text:not-found')
+    && dead21.ok === false && dead21.reason === 'text:not-found|recent-user:not-found',
+    `chain=${JSON.stringify(chain21)} dead=${JSON.stringify(dead21)}`);
+  const selSmall = rangeMod19.selectRange({ session: s21, measurement: m21, retainTokens: 5000, keepFromSeq: 15 });
+  const selBig = rangeMod19.selectRange({ session: s21, measurement: m21, retainTokens: 40000, keepFromSeq: 15 });
+  ok('R21 护栏：小预算时范围**被拉到锚点**（绝不越过），且 retainedTokens **按真实边界重算**',
+    selSmall.ok === true && selSmall.anchorIdx === 5 && selSmall.endIdx === 4 && selSmall.retainedTokens === 30000,
+    `实际 ${JSON.stringify({ a: selSmall.anchorIdx, e: selSmall.endIdx, r: selSmall.retainedTokens })}`);
+  ok('R21 护栏：预算已比锚点更保守时不额外收紧（护栏是**下限**，不是硬边界）',
+    selBig.ok === true && selBig.endIdx < 5 && selBig.anchorIdx === 5,
+    `实际 endIdx=${selBig.endIdx} anchorIdx=${selBig.anchorIdx}`);
+
+  /* ---- 工具侧：参数 → 会话偏好 → 落盘往返 ---- */
+  const tmp21 = mkdtempSync(join(tmpdir(), 'dcp-r21-'));
+  const mk21 = async (dir) => {
+    const mod = await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href);
+    let sp = null;
+    const api = mod.createCompactTool({
+      svc: (k) => (k === 'tools' ? { register: () => {} } : null),
+      tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+      pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+      state: { m3: { compactToolDiag: { calls: 0 } } }, readCfg: () => ({ enabled: true }),
+      getDefineTool: () => (x) => { sp = x; return x; }, getRangeApi: rangeStub, pluginDir: dir,
+    });
+    api.ensure();
+    return { api, spec: () => sp };
+  };
+  const A21 = await mk21(tmp21);
+  const run21 = (args) => A21.spec().execute(args, { agent: { session: { id: 'sess-r21' } } });
+  const vKeep = await run21({ tier: '深压', action: 'set-tier', keepFrom: { recentUser: 2 } });
+  ok('R21 工具：`keepFrom` 被登记为会话偏好，回执**说清"压缩时解析、失败退档位"**',
+    A21.api.getAnchor('sess-r21')?.recentUser === 2
+    && /语义锚点已登记/.test(vKeep?.verify ?? '') && /压缩时解析，失败自动退档位/.test(vKeep?.verify ?? ''),
+    `anchor=${JSON.stringify(A21.api.getAnchor('sess-r21'))} verify=${(vKeep?.verify ?? '').slice(0, 80)}…`);
+  const B21 = await mk21(tmp21);   // 新实例 = toggle 热换
+  ok('R21 工具：锚点**随档位一起落盘**（跨 toggle/重启仍有效）',
+    B21.api.getAnchor('sess-r21')?.recentUser === 2 && B21.api.getTier('sess-r21') === 'light',
+    `restored anchor=${JSON.stringify(B21.api.getAnchor('sess-r21'))} tier=${B21.api.getTier('sess-r21')}`);
+  const vNoKeep = await B21.spec().execute({ tier: '标准', action: 'set-tier' }, { agent: { session: { id: 'sess-r21' } } });
+  ok('R21 工具：本次**不带 keepFrom ⇒ 清除**旧锚点（"忘记重申"退化为按档位 = 安全方向）',
+    B21.api.getAnchor('sess-r21') === null && B21.api.getTier('sess-r21') === 'standard' && /语义锚点/.test(vNoKeep?.verify ?? '') === false,
+    `anchor=${JSON.stringify(B21.api.getAnchor('sess-r21'))}`);
+  const anchorBad = B21.api.normAnchor({ recentUser: 9 });
+  const anchorTxt = B21.api.normAnchor({ text: '  a   b  ' });
+  ok('R21 工具：锚点形状校验（越界 recentUser 视为非法；text 归一化空白并截断）',
+    anchorBad.invalid === true && anchorBad.anchor === null && anchorTxt.anchor?.text === 'a b',
+    `bad=${JSON.stringify(anchorBad)} txt=${JSON.stringify(anchorTxt)}`);
+  rmSync(tmp21, { recursive: true, force: true });
+
+  /* ---- 接线与回执（源码级：源码里必须存在"来源可见"这条痕） ---- */
+  ok('R21 接线：压缩点**在压缩那一刻**解析锚点，并把来源/失败原因写进取证与回执',
+    /resolveAnchorBudget\(\{/.test(read('m3.compact.mjs'))
+    && /state\.m3\.anchorProbe = \{/.test(read('m3.compact.mjs'))
+    && /retainSource: out\.retainSource \?\?/.test(read('m3.compact.mjs'))
+    && /anchorFailReason: out\.anchorFailReason \?\?/.test(read('m3.compact.mjs'))
+    && /保留来源：语义锚点/.test(m2src) && /锚点未命中/.test(m2src),
+    '锚点结果不可见 ⇒ 静默降级（模型以为锚点生效了）');
 }
 
 /* ═══════════ 汇总 ═══════════ */

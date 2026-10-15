@@ -209,6 +209,13 @@ export function createM2Injection(deps) {
         parts.push(`${tApi?.tierText?.(v.tier) ?? v.tier} 档`);
       }
       if (Number.isFinite(v.retainBudget) && v.retainBudget > 0) parts.push(`保留 ~${Math.round(v.retainBudget / 1000)}k`);
+      /* R21：语义锚点的**实际结果必须在回执里可见**——否则模型以为锚点生效了、其实已退回档位
+       * （静默降级是本项目大忌）。生效说来源，未命中说原因。 */
+      if (typeof v.retainSource === 'string' && v.retainSource.startsWith('anchor:')) {
+        parts.push(`保留来源：语义锚点（${v.retainSource.slice('anchor:'.length)}）`);
+      } else if (v.anchorFailReason) {
+        parts.push(`锚点未命中（${String(v.anchorFailReason)}）⇒ 已按档位兜底`);
+      }
       const head = parts.length ? `（${parts.join('，')}）` : '';
       if (v.state === 'executed') {
         const k = Number.isFinite(v.shadowedTokens) ? `省 ~${(v.shadowedTokens / 1000).toFixed(1)}K token` : '已执行';

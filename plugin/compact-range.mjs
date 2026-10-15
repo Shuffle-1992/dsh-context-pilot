@@ -136,6 +136,128 @@ export function resolveTier(tierName, window) {
 /** 边界回退最大次数（每次都是零成本纯读；64 远超任何真实尾部长度）。 */
 export const MAX_WALK_BACK = 64;
 
+/* ═══════════ R21：语义锚点保留（A/B 两形态 + 降级链） ═══════════
+ * 用户场景（2026-10-15）：「上下文 600k 里含新旧两个需求，最新需求只在最后 6% ⇒ 选深压8% 收益最大：
+ * 新需求几乎全保留、又腾出空间、还避免旧需求带来的降智。**Agent 能知道新旧 2 个需求的节点在哪么？**」
+ *
+ * 结论：**语义边界只有模型知道**（它刚读过那些消息），**物理节点只有插件知道**（seq / token）。
+ * 本模块负责把两者接起来（纯函数：session / measurement / textOf 全部由调用方注入，自身零 IO）：
+ *   · A：`{recentUser:N}` —— 最近第 N 条**真用户消息**（跳过插件自己注入的 user/message）；
+ *   · B：`{text:'前缀片段'}` —— 按文本定位那条消息（更精确：可指向更早，或同条消息内的需求起点）；
+ *   · **降级链：text → recentUser → tier → 标准16%**，每一跳都带回 `reason`（调用方必须留痕，
+ *     否则模型会以为锚点生效了——这正是本项目最怕的静默降级）。
+ * 保留语义：**锚点之后的内容一律原样保留**（宁可多留，绝不丢新需求）。由两件事共同保证：
+ *   ① 预算 = 锚点→末尾 token + 余量；② `selectRange` 的 `keepFromSeq` 护栏（范围绝不越过锚点）。 */
+export const ANCHOR_MARGIN = { min: 8_000, max: 32_000, factor: 2, ratio: 0.1 };
+
+/** 锚点声明限值（工具侧校验与文案共用；单一真相）。 */
+export const ANCHOR_LIMITS = { maxRecentUser: 3, maxText: 60 };
+
+/** 真用户消息（`source.kind` 缺省或 'user'）；插件注入的 `context-pilot` 等一律跳过。 */
+const isRealUserEvent = (ev) => ev?.type === 'user/message'
+  && (ev?.data?.source?.kind === undefined || ev?.data?.source?.kind === null || ev?.data?.source?.kind === 'user');
+
+/** surface 与 measurement 同序同长的一致性校验（与 selectRange 同款；不一致一律不猜）。 */
+function alignedSurface(session, measurement) {
+  const surface = session?.surface?.nodes;
+  const nodes = measurement?.nodes;
+  if (!Array.isArray(surface) || !Array.isArray(nodes) || nodes.length === 0) return null;
+  if (surface.length !== nodes.length) return null;
+  for (let i = 0; i < surface.length; i += 1) if (surface[i] !== nodes[i]?.seq) return null;
+  return { surface, nodes };
+}
+
+/** 第 N 条真用户消息的 seq（从末尾往前数；找不到返回 null）。 */
+export function recentUserSeq(session, n = 1) {
+  try {
+    const surface = session?.surface?.nodes;
+    if (!Array.isArray(surface) || typeof session?.eventAt !== 'function') return null;
+    const want = Number.isInteger(n) && n >= 1 ? n : 1;
+    let seen = 0;
+    for (let i = surface.length - 1; i >= 0; i -= 1) {
+      const ev = session.eventAt(surface[i]);
+      if (!isRealUserEvent(ev)) continue;
+      seen += 1;
+      if (seen === want) return surface[i];
+    }
+  } catch { /* 吞：读不到即无锚点，由调用方退档位 */ }
+  return null;
+}
+
+/**
+ * 按文本片段定位真用户消息：**先比前缀（最精确），再退化为包含匹配**，都取**最近**一条。
+ * @param textOf 事件文本提取器（由调用方注入 core 的 `extractEventText`，保持单一真相）。
+ * @returns `{ seq, via:'text-prefix'|'text-contains' }` 或 null。
+ */
+export function findUserSeqByText(session, text, textOf) {
+  try {
+    const surface = session?.surface?.nodes;
+    if (!Array.isArray(surface) || typeof session?.eventAt !== 'function' || typeof textOf !== 'function') return null;
+    const norm = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+    const frag = norm(text);
+    if (!frag) return null;
+    let containsHit = null;
+    for (let i = surface.length - 1; i >= 0; i -= 1) {
+      const ev = session.eventAt(surface[i]);
+      if (!isRealUserEvent(ev)) continue;
+      const t = norm(textOf(ev));
+      if (!t) continue;
+      if (t.startsWith(frag)) return { seq: surface[i], via: 'text-prefix' };
+      if (containsHit === null && t.includes(frag)) containsHit = { seq: surface[i], via: 'text-contains' };
+    }
+    return containsHit;
+  } catch { return null; }
+}
+
+/** 锚点 seq → 末尾 的 token 量（含锚点自身那条消息）。surface 不一致一律返回 null。 */
+export function tokensFromSeq(session, measurement, seq) {
+  const al = alignedSurface(session, measurement);
+  if (!al) return null;
+  const idx = al.surface.indexOf(seq);
+  if (idx < 0) return null;
+  let acc = 0;
+  for (let i = idx; i < al.nodes.length; i += 1) acc += Number(al.nodes[i]?.tokens) || 0;
+  return acc;
+}
+
+/**
+ * 把「模型的锚点声明」解析成保留预算（A/B 两形态 + 降级链）。
+ * @param want `{ recentUser?:1|2|3, text?:string }`（text 优先，失败退 recentUser）
+ * @returns `{ok:true, seq, via, tokens, margin, budget, clamped}` 或
+ *          `{ok:false, reason, tried:string[]}`（调用方据此退 tier 并留痕）
+ */
+export function resolveAnchorBudget({ session, measurement, want, window, textOf, deltaTokens } = {}) {
+  const tried = [];
+  const ok = (hit) => {
+    const tokens = tokensFromSeq(session, measurement, hit.seq);
+    if (!Number.isFinite(tokens) || tokens <= 0) { tried.push(`${hit.via}:budget-invalid`); return null; }
+    if (!Number.isFinite(window) || window <= 0) { tried.push(`${hit.via}:no-window`); return null; }
+    const d = Number(deltaTokens);
+    const marginRaw = Number.isFinite(d) && d > 0
+      ? Math.round(d * ANCHOR_MARGIN.factor)
+      : Math.round(tokens * ANCHOR_MARGIN.ratio);
+    const margin = Math.min(ANCHOR_MARGIN.max, Math.max(ANCHOR_MARGIN.min, marginRaw));
+    const min = Math.min(MIN_RETAIN_TOKENS, Math.floor(window * MAX_RETAIN_RATIO));
+    const max = Math.floor(window * MAX_RETAIN_RATIO);
+    let budget = tokens + margin;
+    let clamped = false;
+    if (budget < min) { budget = min; clamped = true; }
+    if (budget > max) { budget = max; clamped = true; }
+    return { ok: true, seq: hit.seq, via: hit.via, tokens, margin, budget, clamped, tried };
+  };
+  if (typeof want?.text === 'string' && want.text.trim()) {
+    const hit = findUserSeqByText(session, want.text, textOf);
+    if (hit) { const r = ok(hit); if (r) return r; }
+    else tried.push('text:not-found');
+  }
+  if (Number.isInteger(want?.recentUser) && want.recentUser >= 1) {
+    const seq = recentUserSeq(session, want.recentUser);
+    if (seq !== null) { const r = ok({ seq, via: 'recent-user' }); if (r) return r; }
+    else tried.push('recent-user:not-found');
+  }
+  return { ok: false, reason: tried.length ? tried.join('|') : 'no-anchor', tried };
+}
+
 /**
  * 保留预算（token）= 上下文窗口 × 比例。
  * 引擎口径是 `floor((contextWindow - reservedCompletionTokens) * retainRatio)`；
@@ -172,11 +294,12 @@ export function isSystemHead(session, seq) {
  * @param session - 持有 `surface.nodes`（seq 数组）的会话。
  * @param measurement - `tokenMeter.measure(session)` 的返回值；用其 `nodes`（`{seq,tokens}[]`）。
  * @param retainTokens - 保留预算（token）。
+ * @param keepFromSeq - （可选，R21）语义锚点 seq：**范围绝不越过它**（宁可多留，绝不丢新需求）。
  * @returns
- *  - `{ ok:true, start, end, startIdx, endIdx, retainedTokens, shadowTokens, firstIdx }`
+ *  - `{ ok:true, start, end, startIdx, endIdx, retainedTokens, shadowTokens, firstIdx, anchorIdx? }`
  *  - `{ ok:false, why:'no-nodes'|'surface-mismatch'|'nothing-to-compact', ... }`
  */
-export function selectRange({ session, measurement, retainTokens }) {
+export function selectRange({ session, measurement, retainTokens, keepFromSeq }) {
   const nodes = measurement?.nodes;
   const surface = session?.surface?.nodes;
   if (!Array.isArray(nodes) || nodes.length === 0) return { ok: false, why: 'no-nodes' };
@@ -193,8 +316,23 @@ export function selectRange({ session, measurement, retainTokens }) {
     keepFromIdx = i;
     if (acc >= budget) break;
   }
+  /* R21（锚点护栏）：范围**绝不越过锚点**——预算是估算（含余量、夹取），而「锚点之后原样保留」
+   * 是模型的**语义声明**，不能用估算去覆盖它。宁可多留一点（少压），绝不丢新需求。 */
+  let anchorIdx = null;
+  if (Number.isInteger(keepFromSeq)) {
+    const ai = surface.indexOf(keepFromSeq);
+    if (ai >= firstIdx && ai < keepFromIdx) { anchorIdx = ai; keepFromIdx = ai; }
+    else if (ai >= firstIdx) anchorIdx = ai;
+  }
   if (keepFromIdx <= firstIdx) {
-    return { ok: false, why: 'nothing-to-compact', firstIdx, retainedTokens: acc, budget, surfaceNodes: nodes.length };
+    return { ok: false, why: 'nothing-to-compact', firstIdx, retainedTokens: acc, budget, surfaceNodes: nodes.length, anchorIdx };
+  }
+  /* 护栏生效时（范围被拉到锚点）**必须重算保留量**：`acc` 是"按预算回退"的累加值，
+   * 此刻已不是真实边界对应的量 ⇒ 不重算就会在回执/报告里报一个偏小的「保留 ~X」。 */
+  let retainedTokens = acc;
+  if (anchorIdx !== null && keepFromIdx === anchorIdx) {
+    retainedTokens = 0;
+    for (let i = keepFromIdx; i < nodes.length; i += 1) retainedTokens += Number(nodes[i]?.tokens) || 0;
   }
   let shadowTokens = 0;
   for (let i = firstIdx; i < keepFromIdx; i += 1) shadowTokens += Number(nodes[i]?.tokens) || 0;
@@ -205,7 +343,8 @@ export function selectRange({ session, measurement, retainTokens }) {
     startIdx: firstIdx,
     endIdx: keepFromIdx - 1,
     firstIdx,
-    retainedTokens: acc,
+    anchorIdx,
+    retainedTokens,
     shadowTokens,
     budget,
     surfaceNodes: nodes.length,

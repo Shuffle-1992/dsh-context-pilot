@@ -348,7 +348,7 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
       m3Ctl = m.createM3Compaction({
         svc, tryOf, state, M3, effEnabled, criticalCapOf, engineThreshold, resolveCompactionFor,
         log, msg, pick, nfmt, errCodeOf, schedule,
-        publishHud, recordHudAct, formatAct, clearBriefed,
+        publishHud, recordHudAct, formatAct, clearBriefed, extractEventText, // R21：锚点 text 定位用它（文本提取单一真相）
         /* range 模块与压缩工具的生命周期都由宿主拥有 ⇒ 交给模块 async 取用口。 */
         awaitRange: async () => rangeApi ?? (await rangeReady),
         getCompactTool: () => compactToolApi,

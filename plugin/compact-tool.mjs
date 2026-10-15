@@ -88,7 +88,17 @@ export function createCompactTool(deps) {
       if (j && typeof j === 'object' && j.bySid && typeof j.bySid === 'object') {
         for (const [sid, v] of Object.entries(j.bySid)) {
           if (v && typeof v.tier === 'string') {
-            out.set(sid, { tier: v.tier, at: Number(v.at) || 0, seq: Number(v.seq) || 0, restored: true });
+            /* R21：锚点随档位一起落盘（会话级；`keepFrom` 缺省的那次调用会清掉它）。 */
+            const a = v.anchor && typeof v.anchor === 'object'
+              ? {
+                ...(Number.isInteger(v.anchor.recentUser) ? { recentUser: Number(v.anchor.recentUser) } : {}),
+                ...(typeof v.anchor.text === 'string' && v.anchor.text ? { text: v.anchor.text } : {}),
+              }
+              : null;
+            out.set(sid, {
+              tier: v.tier, at: Number(v.at) || 0, seq: Number(v.seq) || 0, restored: true,
+              ...(a && Object.keys(a).length ? { anchor: a } : {}),
+            });
             if (Number(v.seq) > tierSeq) tierSeq = Number(v.seq); // 续号，避免与历史序号撞车
           }
         }
@@ -108,7 +118,7 @@ export function createCompactTool(deps) {
       if (!tierPath) return;
       mkdirSync(dirname(tierPath), { recursive: true });
       const bySidOut = {};
-      for (const [sid, v] of tierBySid) bySidOut[sid] = { tier: v.tier, at: v.at ?? 0, seq: v.seq ?? 0 };
+      for (const [sid, v] of tierBySid) bySidOut[sid] = { tier: v.tier, at: v.at ?? 0, seq: v.seq ?? 0, anchor: v.anchor ?? null };
       writeFileSync(tierPath, JSON.stringify({ version: 1, savedAt: new Date().toISOString(), bySid: bySidOut }, null, 2));
     } catch (e) {
       log('warn', `compact-tier.json 写入失败（吞）：${msg(e)}`);
@@ -185,12 +195,15 @@ export function createCompactTool(deps) {
    * 直到 Agent 再次改选。与「意图」（一次性、有 TTL）分开存。 */
 
   /** 登记/更新会话档位（入参已由 normTier 规范化）。R16.16：**同时落盘**（跨 toggle/重启有效）。
-   * R16.17：写入前有界化（只保留最近 TIER_SID_CAP 个会话）。 */
-  function setTier(sid, tier) {
+   * R16.17：写入前有界化（只保留最近 TIER_SID_CAP 个会话）。
+   * R21：锚点随档位一起存（`anchor` 缺省即不带 ⇒ **清除**旧锚点，见 normAnchor 的语义说明）。 */
+  function setTier(sid, tier, anchor) {
     const key = String(sid ?? '');
     if (!key) return;
     tierSeq += 1;
-    tierBySid.set(key, { tier, at: Date.now(), seq: tierSeq, restored: false });
+    const next = { tier, at: Date.now(), seq: tierSeq, restored: false };
+    if (anchor && typeof anchor === 'object' && Object.keys(anchor).length) next.anchor = { ...anchor };
+    tierBySid.set(key, next);
     const dropped = pruneTiers(tierBySid);
     if (dropped > 0) {
       try { state.m3.tierPrunedAtSave = { at: new Date().toISOString(), dropped, size: tierBySid.size }; } catch { /* 吞 */ }
@@ -255,6 +268,33 @@ export function createCompactTool(deps) {
     return t === 'light' ? 8 : t === 'heavy' ? 24 : 16;
   };
   const textOf = (t) => { try { return rangeApi()?.tierText?.(t) ?? `${labelOf(t)}${pctOf(t)}%`; } catch { return `${labelOf(t)}${pctOf(t)}%`; } };
+  /* ═══ R21：语义锚点（A: recentUser 1..3 / B: text 片段）═══
+   * 语义边界只有模型知道、物理节点只有插件知道 ⇒ 工具只**登记声明**，**解析放到压缩那一刻**
+   * （锚点会随新消息移动；只有到压缩时才拿得到最终 surface）。
+   * ⚠️ 缺省即**清除**已存锚点：这次没说锚点就按档位——"忘记重申"必须退化为安全兜底，而不是沿用旧锚点。 */
+  const anchorLimits = () => { try { return rangeApi()?.ANCHOR_LIMITS ?? { maxRecentUser: 3, maxText: 60 }; } catch { return { maxRecentUser: 3, maxText: 60 }; } };
+  const normAnchor = (keepFrom) => {
+    try {
+      const lim = anchorLimits();
+      if (keepFrom === undefined || keepFrom === null) return { anchor: null, cleared: true, invalid: false };
+      if (typeof keepFrom !== 'object' || Array.isArray(keepFrom)) return { anchor: null, cleared: false, invalid: true };
+      const out = {};
+      const n = Number(keepFrom.recentUser);
+      if (Number.isInteger(n) && n >= 1 && n <= lim.maxRecentUser) out.recentUser = n;
+      const t = typeof keepFrom.text === 'string' ? keepFrom.text.replace(/\s+/g, ' ').trim().slice(0, lim.maxText) : '';
+      if (t) out.text = t;
+      const has = Object.keys(out).length > 0;
+      return { anchor: has ? out : null, cleared: !has, invalid: !has };
+    } catch { return { anchor: null, cleared: false, invalid: true }; }
+  };
+  /** 本会话已登记的锚点（压缩点读取；未登记 ⇒ null）。 */
+  function getAnchor(sid) {
+    try {
+      const it = tierBySid.get(String(sid ?? ''));
+      const a = it?.anchor;
+      return a && typeof a === 'object' ? { ...a } : null;
+    } catch { return null; }
+  }
   /** R19：`tier` 入参规范化——**同时接受中文标签与英文 id**（用户可能写「浅压24%」或 `heavy`）。 */
   const normTier = (tierName) => {
     try {
@@ -289,7 +329,9 @@ export function createCompactTool(deps) {
       const action = args?.action === 'set-tier' ? 'set-tier' : 'compact';
       /* R16：档位是**会话级持久偏好**（智能压缩线与强制线都读它）；未选/非法 ⇒ standard 兜底。 */
       const { tier, fallback, via } = normTier(args?.tier);
-      setTier(sid, tier);
+      /* R21：语义锚点（可选）。缺省 ⇒ 清除旧锚点（"忘记重申"退化为按档位 = 安全方向）。 */
+      const anchorNorm = normAnchor(args?.keepFrom);
+      setTier(sid, tier, anchorNorm.anchor);
       const at = Date.now();
       const prev = bySid.get(sid);
       if (action === 'compact') bySid.set(sid, { at, reason });
@@ -303,17 +345,28 @@ export function createCompactTool(deps) {
         tierLabel: textOf(tier),
         tierVia: via || null,
         tierFallback: fallback || null,
+        /* R21：锚点取证（`keepFrom` 若给了但形状非法 ⇒ anchorInvalid，压缩点会退档位）。 */
+        anchor: anchorNorm.anchor,
+        anchorInvalid: anchorNorm.invalid || null,
+        anchorCleared: anchorNorm.cleared || null,
         /* 连续调用（<5s）多半是模型重复触发；记下来供报告核查，但**不拒绝**——
          * 拒绝会让模型以为自己没调成功而反复重试；意图是幂等的（覆盖写）。 */
         repeated: !!prev && at - prev.at < 5000,
       };
-      log('info', `智能压缩 工具已登记：${action === 'set-tier' ? '仅档位（不压缩）' : '下一步开始前执行'}（sid ${sid.slice(0, 8)}…，档位 ${textOf(tier)}${via === 'alias' ? '（中文标签）' : ''}${fallback ? '（非法值兜底）' : ''}${reason ? '，理由：' + reason : ''}）`);
+      log('info', `智能压缩 工具已登记：${action === 'set-tier' ? '仅档位（不压缩）' : '下一步开始前执行'}（sid ${sid.slice(0, 8)}…，档位 ${textOf(tier)}${via === 'alias' ? '（中文标签）' : ''}${fallback ? '（非法值兜底）' : ''}${anchorNorm.anchor ? `，锚点 ${anchorNorm.anchor.text ? 'text=' + anchorNorm.anchor.text : 'recentUser=' + anchorNorm.anchor.recentUser}` : ''}${reason ? '，理由：' + reason : ''}）`);
       schedule('compact-tool', 400);
       /* R15（用户要求「工具完成后进行检查，起码 agent 自己过一遍」）：
        * 工具只能**登记**，真正的执行在下一步的 pre-step ⇒ 必须给出**自检契约**，否则
        * 「回了 ok 但实际没执行」对模型完全不可见（2026-10-08 真机踩过：M3 域加载失败两版，
        * 工具一直回 ok/scheduled，压缩一次都没发生）。回执由插件在下一步开头注入。 */
       const pctNow = pctOf(tier);
+      /* R21：锚点回执。**必须把「压缩时才解析」说清**——否则模型会以为锚点已生效；
+       * 失败路径（形状非法）也要当场告知，而不是等压缩点静默退档位。 */
+      const anchorNote = anchorNorm.anchor
+        ? (anchorNorm.anchor.text
+          ? `；**语义锚点已登记**：按文本「${anchorNorm.anchor.text}」定位那条消息（压缩时解析，失败自动退档位）`
+          : `；**语义锚点已登记**：从最近第 ${anchorNorm.anchor.recentUser} 条你的消息起全部保留（压缩时解析，失败自动退档位）`)
+        : (anchorNorm.invalid ? '；⚠️ `keepFrom` 形状非法，已忽略（本次按档位）' : '');
       if (action === 'set-tier') {
         /* ⚠️ R16.16（另一会话实测事故，高）：这里曾写 `scheduled: false`（**boolean**），
          * 而 `output.schema` 声明 `type:'string'` ⇒ 宿主按 schema 校验**整条调用被拒**：
@@ -326,7 +379,7 @@ export function createCompactTool(deps) {
           ok: true,
           action: 'set-tier',
           tier,
-          verify: `档位已登记为「${textOf(tier)}」（保留窗口 × ${pctNow}%）——**本次不压缩**。`
+          verify: `档位已登记为「${textOf(tier)}」（保留窗口 × ${pctNow}%）${anchorNote}——**本次不压缩**。`
             + '该档位此后对本会话的压缩（包括系统在强制线代替你执行的那次）持续生效，直到再次改选。'
             + '想在低占用时提前锁定档位，就用这条路径（零压缩成本）。',
         };
@@ -336,7 +389,7 @@ export function createCompactTool(deps) {
         action: 'compact',
         scheduled: 'next-step',
         tier,
-        verify: `已登记，档位「${textOf(tier)}」（保留窗口 × ${pctNow}%）——该档位此后对本会话的压缩（含强制线）持续生效，直到再次改选。下一步开头会有一条「压缩自检」回执；若显示「未执行」，请再调用一次 compact_context，或直接告知用户。`,
+        verify: `已登记，档位「${textOf(tier)}」（保留窗口 × ${pctNow}%）${anchorNote}——该档位此后对本会话的压缩（含强制线）持续生效，直到再次改选。下一步开头会有一条「压缩自检」回执；若显示「未执行」，请再调用一次 compact_context，或直接告知用户。`,
       };
     } catch (e) {
       log('warn', `智能压缩 工具执行异常（吞）：${msg(e)}`);
@@ -397,6 +450,13 @@ export function createCompactTool(deps) {
           + `**${textOf('heavy')}**=× ${pctOf('heavy')}%（≈${kfmt(Math.round(1e6 * pctOf('heavy') / 100))}）——接下来仍要频繁引用近端一大段。`
           + `**登记方式**：调 ${TOOL_NAME} 时带 \`tier\`（传中文「深压/标准/浅压」或英文 ${tierNames().join('/')} 均可）；**只想提前锁定档位、现在不压** ⇒ 加 \`action:'set-tier'\`（零压缩成本）。`
           + `**不传 tier = 沿用已登记档位；从未登记过才按 ${textOf('standard')}**（不是重置）。`,
+        /* R21：把「语义锚点」教出去**必须与档位同段**——它是同一件事的更精确形态：
+         * 模型知道新旧需求的边界，插件知道 token ⇒ 分工是「模型指位置、插件算预算」。
+         * ⚠️ 措辞要短：三处教学合计有 ≤3000 字符的预算断言（desc+brief+card）。 */
+        `**语义锚点（比比例更准）**：旧需求占地方、新需求只在近端时，按比例选档会白留旧内容——`
+          + `传 \`keepFrom:{recentUser:1}\`（从最近第 1 条你的消息起全保留，可 1/2/3）`
+          + `或 \`keepFrom:{text:'开头十来字'}\`（按文本定位）。text 优先、失败退 recentUser、再失败退档位；`
+          + `**锚点之后原样保留**。不传 = 清除锚点。`,
         `**档位是会话级持久选择**：登记后对本会话之后的所有压缩（含 ${crit} 强制线那次）持续生效，直到再次改选。`
           + `**若预计任务会推高占用，趁占用还在 ${crit} 强制线之下时选定档位**——越线那一刻的自动压缩就按它执行；`
           + '越线之后才改档，管不上正在发生的那次（下一轮起才生效）。',
@@ -516,7 +576,9 @@ export function createCompactTool(deps) {
         `• 档位（3 选 1）：${tierLine}`
           + `**只想登记档位、现在不压** ⇒ 加 \`action:'set-tier'\`（零压缩成本）。`
           + `**不传 tier = 沿用已登记档位**（不是重置）。${overLine}`
-          + `（现行生效：${keep}。）`,
+          + `（现行生效：${keep}。）`
+          /* R21：锚点提示（一行，短）——旧需求很占地方、新需求只在近端时，按比例选档会白留旧内容。 */
+          + `**想精确到"从最近需求起保留" ⇒ 传 \`keepFrom:{recentUser:1}\`**（失败自动退档位）。`,
         loss,
         dirLine,
         trend,
@@ -549,7 +611,8 @@ export function createCompactTool(deps) {
         + '**调用本工具前，先在回复正文里用一句话说明你要压缩的理由**（用户看不到工具调用的理由），然后再调用。'
         + '压缩在**你的下一个步骤开始前**执行，本轮不中断，调用后请直接继续当前任务、不要停下等它。'
         + '参数：`action`（默认 compact=登记并压缩；**set-tier=只登记档位、本次不压缩**）、'
-        + '`tier`（三选一：深压8% / 标准16% / 浅压24%，**不传 = 沿用已登记档位**，从未登记则为标准16%）、`reason`。'
+        + '`tier`（三选一：深压8% / 标准16% / 浅压24%，**不传 = 沿用已登记档位**）、'
+        + '`keepFrom`（可选，语义锚点：从你指定的那条需求起保留，比比例更准）、`reason`。'
         + '档位是**会话级持久选择**：登记后对本会话之后的所有压缩（含强制线那次）持续生效，直到再次改选。'
         + '**策略、当前档位与本轮数据（损失/趋势）见每轮注入的压缩决策卡**——按卡上的数字判断，不要凭空预测占用。'
         + '工具返回后会给出自检契约；下一步开头的「压缩自检」回执可确认是否真的执行了。',
@@ -576,6 +639,16 @@ export function createCompactTool(deps) {
           description: '（可选）压缩档位：深压8%（只保留窗口 × 8%）/ 标准16%（默认）/ 浅压24%（保留最多）。'
             + '传中文「深压/标准/浅压」或英文 light/standard/heavy 均可。'
             + '选档理由写在回复正文里；档位对本会话后续所有压缩持续生效。',
+        },
+        /* R21：语义锚点（用户场景：600k 里含新旧两个需求，新需求只在最后 6% ⇒ 按比例选档会白留旧内容）。
+         * 语义边界只有模型知道、物理节点只有插件知道 ⇒ 模型**指位置**，插件**算预算**。 */
+        keepFrom: {
+          type: 'object',
+          description: '（可选）**语义锚点**：把保留范围精确到你指定的那条"新需求"，比三档比例更准。'
+            + '`{recentUser: 1}` = 从最近第 1 条你的消息起全部保留（1/2/3）；'
+            + '`{text: "那条消息开头十来个字"}` = 按文本定位（更精确，可指向更早或同条内的起点）。'
+            + '两者都给 ⇒ text 优先、失败退 recentUser、再失败退 tier。**锚点之后一律原样保留**（绝不丢新需求）。'
+            + '不传 = 清除本会话已登记的锚点（按档位）。',
         },
       },
       output: {
@@ -696,5 +769,5 @@ export function createCompactTool(deps) {
     };
   }
 
-  return { TOOL_NAME, ensure, peekIntent, takeIntent, pending, getTier, hasTier, setTier, tierState, renderBrief, renderCard, diag, tierText: (t) => textOf(t) };
+  return { TOOL_NAME, ensure, peekIntent, takeIntent, pending, getTier, hasTier, setTier, tierState, renderBrief, renderCard, diag, tierText: (t) => textOf(t), getAnchor, normAnchor };
 }

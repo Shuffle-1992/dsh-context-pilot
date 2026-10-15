@@ -35,7 +35,7 @@ export function createM3Compaction(deps) {
     /* 跨域回调（R10：由宿主显式注入，不再靠闭包穿透） */
     publishHud, recordHudAct, formatAct, clearBriefed,
     /* 取用口（模块生命周期由宿主拥有） */
-    awaitRange, getCompactTool,
+    awaitRange, getCompactTool, extractEventText,
     /* 常量 */
     COMPACT_TIMEOUT_MS, SET_CAP,
   } = deps;
@@ -203,7 +203,7 @@ export function createM3Compaction(deps) {
    *   range?:{start:number,end:number}}>}
    */
   const compactWithOwnRange = async (agent, compaction, ctx) => {
-    const { forced, sig, sid, window, measure, tierName } = ctx;
+    const { forced, sig, sid, window, measure, tierName, retainOverride, anchorSeq, anchorFailReason } = ctx;
     const official = async (why) => {
       markOwnCompaction(sid);
       try {
@@ -224,8 +224,15 @@ export function createM3Compaction(deps) {
       ? api.resolveTier(tierName ?? 'standard', window)
       : { tier: 'standard', ratio: api.RETAIN_RATIO, budget: api.retainBudgetTokens(window, api.RETAIN_RATIO), clamped: false, fallback: false };
     const ratioKept = tierInfo.ratio;
-    const budget = tierInfo.budget > 0 ? tierInfo.budget : api.retainBudgetTokens(window, ratioKept);
-    const sel = api.selectRange({ session: agent.session, measurement: measure, retainTokens: budget });
+    const tierBudget = tierInfo.budget > 0 ? tierInfo.budget : api.retainBudgetTokens(window, ratioKept);
+    /* R21：语义锚点优先（`retainOverride` 由调用方在**压缩这一刻**解析好）——
+     * 解析成功 ⇒ 预算 = 锚点→末尾 token + 余量；解析失败/未登记 ⇒ 原样用档位预算（就是兜底三档）。
+     * 无论走哪条都要留痕：`retainSource` 会进 rangeProbe 与回执（静默降级是本项目大忌）。 */
+    const anchorBudget = Number(retainOverride?.budget);
+    const useAnchor = Number.isFinite(anchorBudget) && anchorBudget > 0;
+    const budget = useAnchor ? anchorBudget : tierBudget;
+    const retainSource = useAnchor ? String(retainOverride?.source ?? 'anchor') : 'tier';
+    const sel = api.selectRange({ session: agent.session, measurement: measure, retainTokens: budget, keepFromSeq: useAnchor ? anchorSeq : null });
     /* 取证：无论成败都留一次范围读数（范围不对时这是唯一的现场）。
      * ⚠️ **必须同时记 surface 位置（startIdx/endIdx）**：seq 是全局事件序号，**在 surface 上并不单调**——
      * 每次压缩都会在**表头**插入一条 `source.kind='compact-checkpoint'` 的 user/message，其 seq
@@ -242,6 +249,11 @@ export function createM3Compaction(deps) {
       tierFallback: tierInfo.fallback || null,
       retainRatio: ratioKept,
       budget,
+      /* R21：保留来源与锚点现场（`tier` = 按三档兜底；`anchor:*` = 语义锚点生效）。 */
+      retainSource,
+      anchorSeq: useAnchor ? anchorSeq ?? null : null,
+      anchorIdx: sel.anchorIdx ?? null,
+      anchorFailReason: !useAnchor && anchorFailReason ? String(anchorFailReason) : null,
       ok: sel.ok === true,
       why: sel.why ?? null,
       surfaceNodes: sel.surfaceNodes ?? null,
@@ -273,7 +285,7 @@ export function createM3Compaction(deps) {
         try {
           result = await compaction.service.compactRegion(sel.start, end, agent, sig);
         } finally { clearOwnCompaction(); }
-        return { result, source: 'own', retainBudget: budget, walkBacks, tier: tierInfo.tier, range: { start: sel.start, end } };
+        return { result, source: 'own', retainBudget: budget, retainSource, anchorSeq: useAnchor ? anchorSeq ?? null : null, anchorFailReason: useAnchor ? null : (anchorFailReason ?? null), walkBacks, tier: tierInfo.tier, range: { start: sel.start, end } };
       } catch (e) {
         /* 末端不合法 ⇒ 回退一个 surface 节点重试（零副作用、零 LLM 成本，见文件头）。 */
         if (api.isEndBoundaryError(e)) {
@@ -381,11 +393,49 @@ export function createM3Compaction(deps) {
       /* R16：档位是**会话级持久偏好**——智能压缩线（工具）与强制线都读同一个偏好；
        * 未选/未知 ⇒ standard（16%）。这满足用户要求「两线都要有 Agent 参与选档，未选 16% 兜底」。 */
       const tierName = tool?.getTier?.(sid) ?? 'standard';
+      /* ═══ R21：语义锚点在**此刻**解析（surface 已是最终态）═══
+       * 降级链：text 锚点 → recentUser 锚点 → 失败退 tier（三档兜底）。
+       * 工具侧只登记声明、不解析——因为锚点会随新消息移动，只有压缩这一刻的位置才算数。 */
+      const anchorWant = (() => { try { return tool?.getAnchor?.(sid) ?? null; } catch { return null; } })();
+      let anchorInfo = null;
+      if (anchorWant) {
+        try {
+          const rApi = await awaitRange();
+          anchorInfo = typeof rApi?.resolveAnchorBudget === 'function'
+            ? rApi.resolveAnchorBudget({
+              session: agent.session, measurement: mr.measure, want: anchorWant,
+              window: mr.window, textOf: extractEventText,
+            })
+            : { ok: false, reason: 'no-range-module' };
+        } catch (e) { anchorInfo = { ok: false, reason: `anchor-error:${msg(e)}` }; }
+      }
+      /* 无论成败都留痕（静默降级是本项目大忌）：未登记锚点 ⇒ 不写痕（那是常态）。 */
+      if (anchorWant) {
+        state.m3.anchorProbe = {
+          at: new Date().toISOString(),
+          sessionId: sid,
+          want: anchorWant,
+          ok: anchorInfo?.ok === true,
+          via: anchorInfo?.via ?? null,
+          seq: anchorInfo?.seq ?? null,
+          tokens: anchorInfo?.tokens ?? null,
+          margin: anchorInfo?.margin ?? null,
+          budget: anchorInfo?.budget ?? null,
+          clamped: anchorInfo?.clamped || null,
+          tried: anchorInfo?.tried ?? null,
+          reason: anchorInfo?.ok === true ? null : (anchorInfo?.reason ?? 'unknown'),
+        };
+      }
       log(
         'info',
-        `M3.5 pre-step 先压开始：${wanted ? '模型主动请求' : '越强制线'}（占用 ${(ratio * 100).toFixed(1)}%，强制线 ${(effCritical * 100).toFixed(1)}%，档位 ${tool?.tierText?.(tierName) ?? tierName}，via ${compaction.via}）`,
+        `M3.5 pre-step 先压开始：${wanted ? '模型主动请求' : '越强制线'}（占用 ${(ratio * 100).toFixed(1)}%，强制线 ${(effCritical * 100).toFixed(1)}%，档位 ${tool?.tierText?.(tierName) ?? tierName}${anchorWant ? `，锚点 ${anchorInfo?.ok ? `生效(${anchorInfo.via}, 保留 ${anchorInfo.budget})` : `未命中(${anchorInfo?.reason ?? '?'}) ⇒ 退档位`}` : ''}，via ${compaction.via}）`,
       );
-      const out = await compactWithOwnRange(agent, compaction, { forced, sig, sid, window: mr.window, measure: mr.measure, tierName });
+      const out = await compactWithOwnRange(agent, compaction, {
+        forced, sig, sid, window: mr.window, measure: mr.measure, tierName,
+        retainOverride: anchorInfo?.ok ? { budget: anchorInfo.budget, source: `anchor:${anchorInfo.via}` } : null,
+        anchorSeq: anchorInfo?.ok ? anchorInfo.seq : null,
+        anchorFailReason: anchorWant && !anchorInfo?.ok ? (anchorInfo?.reason ?? 'unknown') : null,
+      });
       let result = out.result;
       let rangeSource = out.source;
       let ratioAfter = null;
@@ -415,6 +465,9 @@ export function createM3Compaction(deps) {
         trigger,
         tier: out.tier ?? tierName,
         retainBudget: out.retainBudget ?? null,
+        /* R21：保留来源（anchor:* = 语义锚点生效；tier = 三档兜底）+ 锚点失败原因（写了才有痕）。 */
+        retainSource: out.retainSource ?? (out.retainBudget != null ? 'tier' : null),
+        anchorFailReason: out.anchorFailReason ?? null,
         rangeSource,
         shadowedTokens: result?.shadowedTokenCount ?? null,
         skipWhy: out.skipWhy ?? null,
@@ -428,6 +481,8 @@ export function createM3Compaction(deps) {
         rangeSource,
         tier: out.tier ?? tierName,
         retainBudget: out.retainBudget ?? null,
+        retainSource: out.retainSource ?? null,
+        anchorFailReason: out.anchorFailReason ?? null,
         walkBacks: out.walkBacks ?? 0,
         skipWhy: out.skipWhy ?? null,
         officialWhy: out.officialWhy ?? null,
