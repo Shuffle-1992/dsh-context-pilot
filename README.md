@@ -376,7 +376,7 @@ node docs/reference/tools/session-records.cjs --find <会话 id 片段> --from 1
 | **智能压缩线** | `markerMinRatio` | 0.2 | 占用达此值时注入决策卡，模型可自行决定压缩（**决策卡门槛**，与已退役的文本标记无关） |
 | **强制压缩线** | `criticalRatio` | 0.85 | 占用达此值无条件**发起**压缩（先按**会话档位**自算保留范围，官方 overflow 兜底/收口）；**生效值 = min(配置, 引擎阈值 − 5pp)**（内置 80% ⇒ 75%） |
 | 强制压缩冷却(秒) | `sweepMinIntervalMs` | 600 | 两次强制压缩的最小间隔（存储为 ms） |
-| （无面板字段） | — | — | **压缩档位**（R16）：`tier` = 深压8% / 标准16% / 浅压24%，**Agent 经工具选档、会话级持续生效**（含强制线），预算夹取 `[40k, 窗口×50%]`；取代引擎 `context-overflow` 的 `retainTokens = 0`（R5）；见 [`docs/r5-retention-range-design.md`](docs/r5-retention-range-design.md) 与 milestones 的 R16 节 |
+| （无面板字段） | — | — | **压缩档位**（R16）：`tier` = 深压8% / 标准16% / 浅压24%，**Agent 经工具选档、会话级持续生效**（含强制线），预算夹取 `[40k, 窗口×50%]`；**语义锚点**（R21）：`keepFrom` = `{recentUser:1\|2\|3}` 或 `{text:'开头十来字'}`，**锚点之后一律原样保留**（护栏 `keepFromSeq`），降级链 `text → recentUser → 三档 → 标准16%`；两者都取代引擎 `context-overflow` 的 `retainTokens = 0`（R5）；见 [`docs/r5-retention-range-design.md`](docs/r5-retention-range-design.md)、[`docs/r21-semantic-anchor-design.md`](docs/r21-semantic-anchor-design.md) 与 milestones 的 R16/R21 节 |
 
 > **R7 删除的两个字段**：`marker`（压缩标记）与 `armedTtlMs`（标记有效期）——随 marker 通道整体退役。
 > 压缩改由工具 `compact_context` 在轮内触发，回复尾行文本标记既无教学也无执行路径。
