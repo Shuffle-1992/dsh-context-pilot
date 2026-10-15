@@ -2990,6 +2990,66 @@ console.log('\n== 6.26 R21：语义锚点保留（A/B + 降级链）==');
     '锚点结果不可见 ⇒ 静默降级（模型以为锚点生效了）');
 }
 
+/* ═══════════ 6.27 R21.1：工具 spec **结构化**自检（防「schema 被拒 ⇒ 工具静默不注册」） ═══════════
+ * 真机事故（2026-10-15）：R21 新增的 `keepFrom` 是 `type:'object'` 却没写 `additionalProperties`
+ * ⇒ `defineTool` 抛
+ *   `unsupported JSON schema: parameters.keepFrom.additionalProperties must be explicitly true or false`
+ * ⇒ **整个 `compact_context` 静默不注册**（模型看不到、调不了，而教学/卡片仍在喊"调用 compact_context"）。
+ * 同型事故：R16.16 的 `required: false`（同样"静默不注册"）。
+ * ⚠️ **既有断言为什么没抓住**：测试桩 `getDefineTool: (sp) => sp` **绕过了 defineTool 的 schema 校验**。
+ * ⇒ 本段**直接遍历真实 spec 对象**（不依赖真 defineTool 可用），把规则显式钉住。 */
+console.log('\n== 6.27 R21.1：工具 spec 结构化自检（防静默不注册）==');
+{
+  let specC = null;
+  let specE = null;
+  const ctMod27 = await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href);
+  const eMod27 = await import(pathToFileURL(join(PLUGIN, 'effort.mjs')).href);
+  ctMod27.createCompactTool({
+    svc: (k) => (k === 'tools' ? { register: () => {} } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { compactToolDiag: { calls: 0 } } }, readCfg: () => ({ enabled: true }),
+    getDefineTool: () => (sp) => { specC = sp; return sp; }, getRangeApi: rangeStub,
+  }).ensure();
+  eMod27.createEffort({
+    svc: (k) => (k === 'tools' ? { register: () => () => {}, restrict: () => () => {} } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { effortSkips: {}, effortDiag: {} } }, readCfg: () => ({ enabled: true, cooldownMs: 30000 }),
+    getDefineTool: () => (sp) => { specE = sp; return sp; },
+  }).ensure();
+  /** 逐条对应 defineTool 的真实报错（见 R16.16 / R21.1 两次事故）。
+   * ⚠️ 千万注意顶层形态：`spec.parameters` **本身就是「参数名 → schema」的映射**（没有 `.properties`），
+   * 写成「从 parameters 取 .properties」会**一个参数都遍历不到** ⇒ 断言恒真（本段首版就栽在这，
+   * 变异 M1 只红了一条窄断言、结构化那条静默通过 —— 又一次"虚假信心"）。 */
+  const specErrs = (spec, label) => {
+    const errs = [];
+    const visit = (def, path) => {
+      if (def === null || typeof def !== 'object') return;
+      if (def.type === 'object') {
+        if (typeof def.additionalProperties !== 'boolean') errs.push(`${path}: object 缺 additionalProperties`);
+        if (def.properties === undefined || typeof def.properties !== 'object') errs.push(`${path}: object 缺 properties`);
+      }
+      if ('required' in def && def.required !== true) errs.push(`${path}: required 必须为 true 或省略（写成 false 会被拒）`);
+      for (const [k, v] of Object.entries(def.properties ?? {})) visit(v, `${path}.${k}`);
+    };
+    for (const [k, v] of Object.entries(spec?.parameters ?? {})) visit(v, `${label}.parameters.${k}`);
+    const out = spec?.output?.schema;
+    if (out?.additionalProperties !== false) errs.push(`${label}.output.schema: 必须 additionalProperties:false`);
+    for (const [k, v] of Object.entries(out?.properties ?? {})) visit(v, `${label}.output.schema.${k}`);
+    return errs;
+  };
+  const errsAll = [...specErrs(specC, 'compact_context'), ...specErrs(specE, 'set_reasoning_effort')];
+  ok('R21.1 结构化自检：**两个工具**的 spec 全量通过 defineTool 的 schema 规则（桩绕不过这一层）',
+    !!specC && !!specE && errsAll.length === 0,
+    `违规 ${errsAll.length} 处：${JSON.stringify(errsAll).slice(0, 300)}`);
+  ok('R21.1 回归：`keepFrom` 显式声明 `additionalProperties`（本次事故的直接原因）',
+    specC?.parameters?.keepFrom?.additionalProperties === false
+    && specC?.parameters?.keepFrom?.properties?.recentUser?.type === 'number'
+    && specC?.parameters?.keepFrom?.properties?.text?.type === 'string',
+    '再漏一次 = 工具整条不可用（模型调不了，教学还在喊它）');
+}
+
 /* ═══════════ 汇总 ═══════════ */
 console.log(`\n${'='.repeat(52)}`);
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);

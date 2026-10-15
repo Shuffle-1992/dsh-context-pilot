@@ -642,8 +642,21 @@ export function createCompactTool(deps) {
         },
         /* R21：语义锚点（用户场景：600k 里含新旧两个需求，新需求只在最后 6% ⇒ 按比例选档会白留旧内容）。
          * 语义边界只有模型知道、物理节点只有插件知道 ⇒ 模型**指位置**，插件**算预算**。 */
+        /* ⚠️ R21.1（2026-10-15 真机事故）：`type:'object'` 的参数**必须显式声明
+         * `additionalProperties`**（true/false 都要写），否则 defineTool 直接拒绝：
+         *   `unsupported JSON schema: parameters.keepFrom.additionalProperties must be explicitly true or false`
+         * ⇒ **整个工具静默不注册**（模型看不到它、调不了），而教学/卡片仍在喊"调用 compact_context"。
+         * 影响面：v0.1.8 上线后约 1.5 小时内，**模型自主压缩全线失效**（只剩强制线自动兜底）。
+         * 与 R16.16 那条（`required: false` 被拒）**同型**；两条都靠 m3.compactTool 取证字段才定位得到。
+         * 教训：测试桩 `getDefineTool: (sp)=>sp` 会**绕过 schema 校验** ⇒ 必须补一条结构化断言
+         * （见 contract 的「工具 spec 自检」：object 参数必须有 additionalProperties）。 */
         keepFrom: {
           type: 'object',
+          additionalProperties: false,
+          properties: {
+            recentUser: { type: 'number', description: '（可选）最近第 N 条**真人用户消息**（1/2/3；跳过插件自己注入的用量行）。' },
+            text: { type: 'string', description: '（可选）那条消息的**开头十来个字**（前缀匹配优先，退化为包含匹配）。' },
+          },
           description: '（可选）**语义锚点**：把保留范围精确到你指定的那条"新需求"，比三档比例更准。'
             + '`{recentUser: 1}` = 从最近第 1 条你的消息起全部保留（1/2/3）；'
             + '`{text: "那条消息开头十来个字"}` = 按文本定位（更精确，可指向更早或同条内的起点）。'

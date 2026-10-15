@@ -2420,3 +2420,48 @@ compact（`schedule('compact-tool', 400)`）两侧对称。
 2. 给 m3 注入 `extractEventText` 时，host 的「代码行 ≤ 320」断言从 320 → **321 抓红** ⇒ 合并到既有注入行（回 320）。
    ⇒ 两处都是**既有断言在正确工作**，不是回归。
 3. 锚点只在**pre-step 压缩路径**生效（强制线/工具触发同源）；`idleSweep` 走的是另一条路，**本轮未接**（待评估）。
+
+### R21.1 生产事故：`keepFrom` schema 缺 `additionalProperties` ⇒ **工具整条不注册**（2026-10-15，真机测试当场发现）
+
+**怎么发现的（这就是本次"真机多轮测试"的第一个产出）**：用户要求在长上下文会话里实测主路径与两级兜底，
+我按计划先调 `compact_context` 登记锚点 —— **返回 `unknown tool "compact_context"`**：
+工具根本不在我的工具清单里。
+
+**取证（只读，报告字段一次命中）**：
+
+```
+m3.compactTool     = { ok:false,
+  error: "unsupported JSON schema: parameters.keepFrom.additionalProperties must be explicitly true or false" }
+m3.compactToolDiag = { calls:100, enabled:true, installed:false, intents:0 }
+```
+
+**根因**：R21 新增的 `keepFrom` 参数写成 `{ type:'object', description }` —— **没有显式声明
+`additionalProperties`**（true/false 都必须写）。`defineTool` 的校验直接拒收整个 spec ⇒
+`tools.register` 抛错被我们吞下 ⇒ **工具静默不注册**。
+
+**影响面（严重，且是"教学与能力脱节"的经典形态）**：
+- 自 **v0.1.8 激活（13:30 CST）** 起到本修复，`compact_context` 全天不可用 ⇒
+  **模型自主压缩 / 选档 / 指锚点全线失效**（模型只会看到"没有这个工具"）；
+- **强制线自动压缩不受影响**（那条路径不经过工具）⇒ 所以症状很隐蔽：占用照样能被压，只是"模型主动"这条路没了；
+- 更糟的是**教学与卡片仍在喊「调用 compact_context」** ⇒ 模型被教去调一个不存在的工具。
+
+**为什么 654 条断言全绿却没抓住（两层原因，都很典型）**：
+1. 所有 compact-tool 测试用桩 `getDefineTool: (sp) => sp` ⇒ **绕过了 defineTool 的 schema 校验**；
+2. 我随即补的「工具 spec 结构化自检」**首版遍历器写错**：从 `spec.parameters` 取 `.properties`
+   （而 `parameters` 本身就是"参数名 → schema"的映射）⇒ **一个参数都没遍历到** ⇒ 断言恒真。
+   变异 M1 只红了一条窄断言、结构化那条静默通过 —— 又一次「虚假信心」。
+   ⇒ 修正遍历器后，M1（删掉 `additionalProperties`）**红 2 条**、M2（参数写 `required:false`）被既有断言红 1 条。
+
+**修**：
+- `keepFrom` 补 `additionalProperties: false` + `properties: { recentUser:{type:'number'}, text:{type:'string'} }`；
+- 新增 **6.27 结构性自检**：对**两个工具**的真实 spec 全量遍历，规则 = ① `type:'object'` 必须显式
+  `additionalProperties` 且必须有 `properties`；② 可选参数不得写 `required:false`；③ `output.schema` 必须
+  `additionalProperties:false`。**不依赖真 defineTool 可用**（桩绕不过这一层）。
+
+**验证**：**656 断言全绿**（contract **509** / static 72 / report 54 / boot 21）；变异 M1 红 2 条 / M2 红 1 条。
+
+**教训（第三次同类，值得单独记一行）**：
+- 「**静默不注册**」这类事故**无法靠行为测试发现**（工具不在清单里，行为测试只会看到"没人调用它"）——
+  只能靠**对真实 spec 做结构化校验**。这与 R16.16（`required:false` 被拒）**完全同型**，说明"该补的是校验层，
+  不是再写一条断言"。
+- 桩越像真货越好，但**校验层必须有独立断言**；且**断言本身必须变异验证**，否则很容易写出恒真的遍历器。
