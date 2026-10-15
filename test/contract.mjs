@@ -1276,7 +1276,7 @@ ok('错误文案与引擎源码逐字一致（引擎改文案时这里先响）'
 /* ---- host 接线 ---- */
 ok('host 把 measure 本体带进自选范围（不二次测量、不猜节点）——R24 起 used 走 DSH 表盘口径',
   /return \{ ok: true, used, total, surface, window, ratio, basis, projected, reported, measure: m\.value \};/.test(m3src)
-  && /const dsh = projected \?\? reported;/.test(m3src)
+  && /Math\.max\(0, reported \+ psurf - sampled\)/.test(m3src)
   && /api\.selectRange\(\{ session: agent\.session, measurement: measure, retainTokens: budget, keepFromSeq:/.test(ctOwnRange),
   '没带 measure ⇒ 只能退化成官方路径，自选范围形同未接');
 ok('保留预算按**会话档位**解析（R16：档位只改预算，不改范围算法）——R21 起锚点优先、失败退档位',
@@ -3368,9 +3368,18 @@ console.log('\n== 6.31 R24：占用口径对齐 DSH + 回执「压缩后占用�
     `实际 ${JSON.stringify({ used: r1.used, ratio: r1.ratio, basis: r1.basis, total: r1.total })}`
     + ' —— 变异：改回 `used = totalTokens` 时这里给 510000（与用户表盘矛盾）');
   const r2 = mkM3({ contextWindow: 1000000, pressureTokens: 750000 }, 510000, 248000).measureRatio(sess24);
-  ok('R24 行为级：无 projected 时退 **pressureTokens**（最新一次 provider 实报）',
-    r2.used === 750000 && Math.abs(r2.ratio - 0.75) < 1e-9 && r2.basis === 'provider 实报',
+  ok('R24 行为级：无 surface 增量参照时退 **pressureTokens**（provider 实报）并**标明缺参照**',
+    r2.used === 750000 && Math.abs(r2.ratio - 0.75) < 1e-9 && r2.basis === 'provider 实报(无增量参照)',
     `实际 ${JSON.stringify({ used: r2.used, basis: r2.basis })}`);
+  /* R24.1（当晚自查出的真缺陷）：state 里**没有** projectedTokens（只有 wire.view 才有）⇒
+   * 必须自算 `pressure + surface − sampled`；不自算就会退回**过期的** provider 值（真机 748,806/74.9%，
+   * 而表盘当时已是 51%/40%）。本用例的三个数就是真机 session-54597a24 压缩后那一帧。 */
+  const r4 = mkM3({ contextWindow: 1000000, pressureTokens: 748806, surfaceTokens: 247859, sampledSurfaceTokens: 487049 }, 510484, 245699).measureRatio(sess24);
+  ok('R24.1 行为级：state 无 projectedTokens 时**自算**「provider 实报 + surface 增量」= 509,616（不是过期的 748,806）',
+    r4.used === 509616 && Math.abs(r4.ratio - 0.509616) < 1e-9 && r4.basis === '下一请求预估(自算)'
+    && r4.total === 510484 && r4.surface === 245699,
+    `实际 ${JSON.stringify({ used: r4.used, ratio: r4.ratio, basis: r4.basis })}`
+    + ' —— 变异：退回 `pressureTokens` 时这里给 748806（压缩前旧值 ⇒ 插件与表盘再次矛盾）');
   const r3 = mkM3({ contextWindow: 1000000 }, 510000, 248000).measureRatio(sess24);
   ok('R24 行为级：两条都取不到才退本地启发式，且**标明**是退化口径（不冒充 provider 数）',
     r3.used === 510000 && r3.basis === '本地启发式(退化)',

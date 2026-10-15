@@ -2646,3 +2646,38 @@ M4 启发式 total 无条件附上 ⇒ 红 1。
   实际是**不含路由感知定价的组成估值**。这类"名字很合理但语义不同"的字段，是本项目第四次踩到的同类坑。
 - 压缩的**触发口径与显示口径必须同源**：否则会出现"按 A 口径触发、按 B 口径解释"的错位，
   表现为提前压缩（白花钱）或该压不压。
+
+#### R24.1 自查出的真缺陷：`projectedTokens` 只在 wire.view 里，读 state 拿到 undefined
+
+R24 上线（v0.1.13）后当晚自查发现：DSH 的 `projectedTokens` **只存在于 token-meter 的 `wire.view`**
+（发给客户端的形状），而 `sessionProjections.stateOf(..., 'contextPressure')` 拿到的是 **state**
+（只有 `surfaceTokens / pressureTokens / sampledSurfaceTokens`）⇒ R24 的 `pressureRec?.projectedTokens ?? ...`
+恒为 `undefined`，于是退回 `pressureTokens` —— **那是上一次 provider 上报的值，压缩后是过期的**：
+真机 `session-54597a24` 压缩后 `state.pressureTokens` 仍是 **748,806（74.9%）**，而表盘当时是 51% → 40%
+（**比改用 totalTokens 之前更糟**：会报 75%）。
+
+修法：**照抄 DSH 的 view 公式自算**（token-meter 源码原文）：
+```js
+projectedTokens: Math.max(0, pressureTokens + surfaceTokens - sampledSurfaceTokens)
+```
+语义 =「provider 实报的 prompt 大小 **+** 从那以后 surface 的增量」= 下一请求的预计大小。
+真机配对验证（同一帧三数）：`748,806 + 247,859 − 487,049 = 509,616`（51%）✓ 与表盘当时一致；
+等下一次 provider 上报（408K）后表盘变 41% ✓ —— 用户看到的两个数都能复现。
+
+#### R24 附：用户问「表盘 408K，但三行只有 2.2+14.7+255=272K，缺的 ~136K 是什么？」
+
+**不是丢了内容，是表盘头条与三行来自两个不同的计数器**（DSH 源码/文档原文）：
+
+| 面板元素 | 来源 | 口径 |
+| --- | --- | --- |
+| 头条 `~408K / 1M` | `contextOccupancy`：`pressure.projectedTokens ?? pressure.pressureTokens`（`projectedTokens` 的公式见上），图例脚注 `~${formatTokens(context.usedTokens)}` | **provider 锚定**：provider 实报的 prompt + surface 增量；`route-pricing.js`「replaces attachment-block heuristics with **the image and file representations sent to the routed model**」 |
+| 三行（系统/工具/对话） | `contextBreakdown`，图例是**原始值** `~${formatTokens(breakdown[row.key])}`（**不按头条缩放**，只有进度条按比例切分） | **固定启发式组成**：文档明说「the context's composition, **not its provider-billed size**」「`messageTokens` … **including superseded prompts**」「**not route image pricing or file-handle projection**」 |
+
+⇒ 缺的 ~136K = **启发式不计入而 provider 计入的那部分**：图片/附件的真实路由定价、文件句柄投影、
+以及固定估算与真实分词的差。实测配对（`session-54597a24` 08:16:56 同一时刻）：
+provider 实报 **527,042** vs 启发式 surface **343,387**（+系统 2,161）⇒ **+184K** 都是这类内容，
+与面板上的 136K 同一量级 ✓（那是网页样式任务，截图/读文件很多）。
+第三个数 `measure().totalTokens`（510K）又是"启发式**日志**节点总和（含被取代的提示）"——三套口径各自自洽。
+
+**结论**：面板**不会、也不该**把这三套口径的数字相加；回答"占用多少"要认准**表盘口径**（provider 锚定）。
+插件 R24/R24.1 起用同一个口径（含自算投影），因此插件报的数与表盘一致。

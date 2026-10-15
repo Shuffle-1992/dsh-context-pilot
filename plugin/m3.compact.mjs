@@ -65,11 +65,23 @@ export function createM3Compaction(deps) {
      * 我们此前用 `measure().totalTokens`（同一份启发式节点总和）⇒ 与用户看到的表盘**不是同一个口径**，
      * 真机后果：我方按 75.1% 判定越线并压掉 243K，而 DSH 口径当时只有约 41%（**提前压缩 = 白压**）。
      * 现 `used` = DSH 口径（触发判定 + 显示都用它）；`total`/`surface` 保留供取证。 */
-    const projected = pressureRec?.projectedTokens ?? null;
+    const projected0 = pressureRec?.projectedTokens ?? null;
     const reported = pressureRec?.pressureTokens ?? null;
-    const dsh = projected ?? reported;
-    const used = dsh ?? total;
-    const basis = projected != null ? '下一请求预估' : (reported != null ? 'provider 实报' : '本地启发式(退化)');
+    const sampled = pressureRec?.sampledSurfaceTokens ?? null;
+    const psurf = pressureRec?.surfaceTokens ?? null;
+    /* ⚠️ R24.1（2026-10-15 当晚自查出的**真缺陷**）：`projectedTokens` 只存在于 token-meter 的
+     * **wire.view**（发给客户端的形状）；`sessionProjections.stateOf(..., 'contextPressure')` 拿到的是
+     * **state**（只有 surfaceTokens / pressureTokens / sampledSurfaceTokens）⇒ 直接读 `projectedTokens`
+     * 恒为 undefined，于是退回 `pressureTokens`——那是**上一次 provider 上报的值，压缩后是过期的**：
+     * 真机 session-54597a24 压缩后 state.pressureTokens 仍是 748,806（74.9%），而表盘当时是 51%→40%。
+     * 修：**照抄 DSH 的 view 公式自算**（token-meter 源码）：
+     *   `projectedTokens: Math.max(0, pressureTokens + surfaceTokens - sampledSurfaceTokens)`
+     * 语义 =「provider 实报的 prompt 大小 + 从那以后 surface 的增量」= 下一请求的预计大小。 */
+    const projected = projected0 ?? (reported != null && psurf != null && sampled != null
+      ? Math.max(0, reported + psurf - sampled) : null);
+    const used = projected ?? reported ?? total;
+    const basis = projected0 != null ? '下一请求预估'
+      : (projected != null ? '下一请求预估(自算)' : (reported != null ? 'provider 实报(无增量参照)' : '本地启发式(退化)'));
     const ratio = window && used != null ? used / window : null;
     return { ok: true, used, total, surface, window, ratio, basis, projected, reported, measure: m.value };
   };
