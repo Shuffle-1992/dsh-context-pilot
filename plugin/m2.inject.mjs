@@ -68,7 +68,7 @@ export function createM2Injection(deps) {
   const renderUsageText = (session) => {
     const mr = measureRatio(session); // B2：读取收敛
     if (!mr.ok) return { error: mr.error };
-    const { used, surface, window } = mr;
+    const { used, surface, total, window, basis } = mr;
 
     const breakdown = tryOf(() => svc('sessionProjections')?.stateOf?.(session, 'contextBreakdown'));
 
@@ -76,8 +76,14 @@ export function createM2Injection(deps) {
 
     const seg = [];
     seg.push(`window ${window != null ? nfmt(window) : '?'}`);
-    seg.push(`used ${used != null ? nfmt(used) : '?'}${pct ? ` (${pct})` : ''}`);
-    seg.push(`surface ${surface != null ? nfmt(surface) : '?'}`);
+    /* R24：`used` 现为 **DSH 表盘口径**（projectedTokens ?? pressureTokens，见 m3.measureRatio 注释），
+     * 并在括号里点明它来自哪一档 —— 用户/模型不会再看到「插件 24% vs DSH 40%」这种自相矛盾。
+     * 启发式节点总和（totalTokens）与 provider 口径**按设计不同**，差得明显时才附上（避免噪声）。 */
+    seg.push(`used ${used != null ? nfmt(used) : '?'}${pct ? ` (${pct}${basis ? `, ${basis}` : ''})` : ''}`);
+    if (surface != null) seg.push(`surface ${nfmt(surface)}`);
+    if (total != null && used != null && Math.abs(total - used) / Math.max(used, 1) >= 0.05) {
+      seg.push(`heuristic total ${nfmt(total)}`);
+    }
     const bsum = summarizeBreakdown(breakdown.error ? null : breakdown.value ?? null);
     if (bsum) {
       seg.push(`system ≈${nfmt(bsum.system)} ｜ messages+tools ≈${nfmt(bsum.rest)} (heuristic)`);
@@ -226,6 +232,12 @@ export function createM2Injection(deps) {
         parts.push(`锚点未命中（${String(v.anchorFailReason)}）⇒ 已按档位兜底`);
       }
       const head = parts.length ? `（${parts.join('，')}）` : '';
+      /* R24（用户实测「插件说回到 ~24%、DSH 显示 40%」）：把**压缩后的真实占用**念出来。
+       * 模型此前只能从档位名/保留预算推断 ⇒ 真机把「浅压24% 档，保留 ~240k」读成「回到 24%」。
+       * 口径与 DSH 表盘一致（`projectedTokens ?? pressureTokens`，见 m3.measureRatio 的 R24 注释）。 */
+      const after = Number.isFinite(v.ratioAfter)
+        ? `压缩后占用 ≈${Math.round(v.ratioAfter * 100)}%${Number.isFinite(v.usedAfter) ? `（${Math.round(v.usedAfter / 1000)}k）` : ''}`
+        : null;
       if (v.state === 'executed') {
         const k = Number.isFinite(v.shadowedTokens) ? `省 ~${(v.shadowedTokens / 1000).toFixed(1)}K token` : '已执行';
         /* R16.8（用户提出的时机逻辑）：压缩已重置前缀缓存 ⇒ 同一轮里顺带换档，
@@ -234,7 +246,7 @@ export function createM2Injection(deps) {
           ? `**压缩已重置前缀缓存——这正是换档的最佳时机**（换档同样会使缓存失效，现在换只付一次重建成本）：`
             + `若接下来的任务更难可顺带升档、进入机械阶段可降档省额度——调用 set_reasoning_effort 即可（可选，不需要则忽略本句）。`
           : '';
-        return `【压缩自检】你上次请求的压缩**已执行**${head}：${k}（保留策略 ${v.rangeSource ?? '?'}，${v.ms ?? '?'}ms）。`
+        return `【压缩自检】你上次请求的压缩**已执行**${head}：${k}${after ? `，${after}` : ''}（保留策略 ${v.rangeSource ?? '?'}，${v.ms ?? '?'}ms）。`
           + switchHint;
       }
       if (v.state === 'no-need') {

@@ -2604,3 +2604,45 @@ R19 那次只把**教学 / 卡片 / 回执正文**换成了中文；本次审计
   正确做法是**在产出侧（m3/effort）就给出面向人的描述**，显示侧只做渲染。
 - 显示改中英并排后，**入参必须同时兼容回填**，否则"看得懂却传不进去"——这是显示层改动的连带契约，
   必须与显示改动同批发布并断言（本节 `parseEffortInput`）。
+
+### R24 占用口径对齐 DSH 表盘 + 回执报「压缩后占用」（2026-10-15）
+
+用户真机反馈：「当时压缩时，DSH 确实是显示 75% 的，压缩完成后显示 40%」，而**模型在正文里写出「回到 ~24%」**——
+三个数互不相同，看起来像"压缩逻辑不对"。
+
+**根因：同一个物理量在 DSH 里有三套口径，我们用的是第三套。**
+
+| 口径 | 来源（DSH 源码/文档原文） | 那个会话的值 |
+| --- | --- | --- |
+| **表盘头条** | `ContextMeter.js#contextOccupancy`：`usedTokens = pressure?.projectedTokens ?? pressure?.pressureTokens` —— 依次是「**下一请求的 prompt 预计大小**」「**最新一次 provider 实报的 prompt 大小**」 | 压缩前 **75%**(748K) → 压缩后 **40%**(408K) |
+| **弹窗三行** | `contextBreakdown`：**启发式**组成（`systemTokens/toolsTokens/messageTokens`），文档明说「the context's **composition, not its provider-billed size**」，`messageTokens` **includes superseded prompts**，三个数都**不含** route image pricing / file-handle projection | 2.2K + 14.7K + 255K = **272K** |
+| **插件旧用** | `measure().totalTokens`（= `nodes[].heuristicTokens` 之和，同一份启发式） | **510K(51%)** |
+
+⇒ 弹窗三行与头条差 136K **按设计就是不同量**（组成估值 vs provider 路由感知预估），不是"上下文丢了"。
+**真正的缺陷是我们自己的**：`measureRatio` 用 `totalTokens` 判定压缩线与显示 ⇒ 与用户看到的表盘不是同一口径，
+真机后果是**按 75.1% 提前触发压缩、白压掉 243K**（DSH 口径当时只有 40%）；而且回执不含压缩后占用，
+模型只能从「浅压24% 档，保留 ~240k」里瞎推 ⇒ 写出「回到 ~24%」。
+
+**修法（R24）**：
+1. `measureRatio`：`used = projectedTokens ?? pressureTokens ?? totalTokens`（**与 DSH 表盘同口径**），
+   并新增 `total / surface / projected / reported / basis` 取证字段（`basis` ∈ 下一请求预估｜provider 实报｜本地启发式(退化)）；
+2. **用量行**：`used <DSH 口径> (40.8%, 下一请求预估) ｜ surface 248K`，启发式 total 相对差异 ≥5% 时才附上
+   （<5% 不附 ⇒ 每轮注入零噪声增长）——两个数都可解释，不再自相矛盾；
+3. **回执**：`ratioAfter / usedAfter` **每条路径都取**（executed 实测；official 收口后**再测一次**；no-need 用当前值），
+   回执念出「**压缩后占用 ≈41%（408k）**」⇒ 模型不再从档位名猜百分比；
+4. 决策卡与审计行同源（`usedTokens: used`）⇒ 插件显示、触发判定、DSH 表盘三者一致。
+
+**验证**：**684 断言全绿**（contract **537** / static 72 / report 54 / boot 21）。新增 6.31 段（R24）**7 条**：
+三档口径优先级（projected → pressure → 启发式退化）+ 用量行两例（含 <5% 不附 total）+ 回执端到端 + 接线。
+**变异 4/4 CAUGHT**：M1 `used` 退回 `totalTokens` ⇒ 红 3；M2 回执不念占用 ⇒ 红 1；M3 verify 丢 `usedAfter` ⇒ 红 1；
+M4 启发式 total 无条件附上 ⇒ 红 1。
+
+**教训**：
+- **同一个物理量在不同口径下有三个值**（provider 实报 / 下一请求预估 / 启发式组成）。凡是要报给用户或模型的数，
+  先确认"宿主表盘用的是哪个"，**沿用它的口径并标明来源**；各报各口径的结果就是用户看到「插件说 24%、DSH 说 41%」这种
+  自相矛盾，进而怀疑整个压缩逻辑。
+- **官方投影字段的语义必须读源码，不能按名字猜**：`measure().totalTokens` 听起来是"当前占用"，
+  实际是**日志节点的启发式总和（含被取代的提示）**；`contextBreakdown` 听起来是"计费组成"，
+  实际是**不含路由感知定价的组成估值**。这类"名字很合理但语义不同"的字段，是本项目第四次踩到的同类坑。
+- 压缩的**触发口径与显示口径必须同源**：否则会出现"按 A 口径触发、按 B 口径解释"的错位，
+  表现为提前压缩（白花钱）或该压不压。

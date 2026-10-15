@@ -1274,8 +1274,9 @@ ok('错误文案与引擎源码逐字一致（引擎改文案时这里先响）'
   '引擎错误文案已变 ⇒ 本模块的边界识别会静默失灵（回退重试不再发生）');
 
 /* ---- host 接线 ---- */
-ok('host 把 measure 本体带进自选范围（不二次测量、不猜节点）',
-  /return \{ ok: true, used, surface, window, ratio, measure: m\.value \};/.test(m3src)
+ok('host 把 measure 本体带进自选范围（不二次测量、不猜节点）——R24 起 used 走 DSH 表盘口径',
+  /return \{ ok: true, used, total, surface, window, ratio, basis, projected, reported, measure: m\.value \};/.test(m3src)
+  && /const dsh = projected \?\? reported;/.test(m3src)
   && /api\.selectRange\(\{ session: agent\.session, measurement: measure, retainTokens: budget, keepFromSeq:/.test(ctOwnRange),
   '没带 measure ⇒ 只能退化成官方路径，自选范围形同未接');
 ok('保留预算按**会话档位**解析（R16：档位只改预算，不改范围算法）——R21 起锚点优先、失败退档位',
@@ -3335,6 +3336,74 @@ console.log('\n== 6.30 R23：锚点来源与思考强度显示全中文 ==');
     /verify: `下一次请求起生效为 \$\{effortLabel\(want\)\}/.test(effort)
     && /error: `档位「\$\{effortLabel\(wantInput\)\}」不在当前模型的可选集内。`/.test(effort),
     '工具回执露英文 id ⇒ 模型照抄进正文（正是本次要根治的形态）');
+}
+
+/* ═══════════ 6.31 R24：占用口径对齐 DSH 表盘 + 回执报「压缩后占用」 ═══════════
+ * 用户真机反馈：「压缩时 DSH 确实显示 75%，压缩完成后显示 40%」——而插件当时报的是
+ * `measure().totalTokens`（510k/51%）与档位名「浅压24%」，模型据此在正文里写出「回到 ~24%」。
+ * DSH 源码 `ContextMeter.js#contextOccupancy`：`usedTokens = pressure.projectedTokens ?? pressure.pressureTokens`；
+ * DSH 文档：`contextBreakdown`（三行）是**启发式组成**、`messageTokens` **含已被取代的提示**、
+ * 且三个数都**不含** route image pricing / file-handle projection ⇒ 三套口径按设计不同（差 136K 不是丢内容）。
+ * 本节钉住：① used 走 DSH 口径且标明来源；② 差异大时才附启发式 total（不刷屏）；③ 回执念出压缩后占用。 */
+console.log('\n== 6.31 R24：占用口径对齐 DSH + 回执「压缩后占用」 ==');
+{
+  const m3Mod24 = await import(pathToFileURL(join(PLUGIN, 'm3.compact.mjs')).href);
+  const mkM3 = (pressure, total, surface) => m3Mod24.createM3Compaction({
+    state: { m3: {} }, log: () => {}, msg: (e) => String(e?.message ?? e),
+    pick: (...a) => a.find((x) => x != null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    nfmt: (n) => String(n), errCodeOf: (e) => String(e?.code ?? 'err'), schedule: () => {},
+    svc: (k) => (k === 'tokenMeter' ? { measure: () => ({ totalTokens: total, surfaceTokens: surface }) }
+      : k === 'sessionProjections' ? { stateOf: () => pressure } : null),
+    M3: {}, effEnabled: () => true, criticalCapOf: () => 0.8,
+    resolveCompactionFor: () => ({ service: null, via: 'stub' }),
+    publishHud: () => {}, recordHudAct: () => {}, formatAct: () => '', clearBriefed: () => {},
+    awaitRange: async () => null, getCompactTool: () => null, COMPACT_TIMEOUT_MS: 1000, SET_CAP: 10,
+  });
+  const sess24 = { id: 'sess-r24' };
+  const r1 = mkM3({ contextWindow: 1000000, projectedTokens: 408000, pressureTokens: 750000 }, 510000, 248000).measureRatio(sess24);
+  ok('R24 行为级：`used` 优先取 **projectedTokens**（下一请求预估）——与 DSH 表盘同口径；total/surface 留作取证',
+    r1.ok && r1.used === 408000 && Math.abs(r1.ratio - 0.408) < 1e-9 && r1.basis === '下一请求预估'
+    && r1.total === 510000 && r1.surface === 248000,
+    `实际 ${JSON.stringify({ used: r1.used, ratio: r1.ratio, basis: r1.basis, total: r1.total })}`
+    + ' —— 变异：改回 `used = totalTokens` 时这里给 510000（与用户表盘矛盾）');
+  const r2 = mkM3({ contextWindow: 1000000, pressureTokens: 750000 }, 510000, 248000).measureRatio(sess24);
+  ok('R24 行为级：无 projected 时退 **pressureTokens**（最新一次 provider 实报）',
+    r2.used === 750000 && Math.abs(r2.ratio - 0.75) < 1e-9 && r2.basis === 'provider 实报',
+    `实际 ${JSON.stringify({ used: r2.used, basis: r2.basis })}`);
+  const r3 = mkM3({ contextWindow: 1000000 }, 510000, 248000).measureRatio(sess24);
+  ok('R24 行为级：两条都取不到才退本地启发式，且**标明**是退化口径（不冒充 provider 数）',
+    r3.used === 510000 && r3.basis === '本地启发式(退化)',
+    `实际 ${JSON.stringify({ used: r3.used, basis: r3.basis })}`);
+
+  const apiR24 = (measure) => mkM2({ m2: { skips: {}, injections: 0 }, m3: {} }, measure);
+  const line24 = apiR24(() => ({ ok: true, used: 408000, total: 510000, surface: 248000, window: 1000000, ratio: 0.408, basis: '下一请求预估', measure: {} }))
+    .renderUsageText(sess24);
+  ok('R24 端到端：用量行用 DSH 口径 + **标明来源**；启发式 total 差异大时附上（让两个数都可解释）',
+    /used 408000 \(40\.8%, 下一请求预估\)/.test(line24?.text ?? '')
+    && /surface 248000/.test(line24?.text ?? '') && /heuristic total 510000/.test(line24?.text ?? ''),
+    `实际：${JSON.stringify(String(line24?.text ?? '').slice(0, 200))}`);
+  const line24b = apiR24(() => ({ ok: true, used: 750000, total: 751000, surface: 248000, window: 1000000, ratio: 0.75, basis: 'provider 实报', measure: {} }))
+    .renderUsageText(sess24);
+  ok('R24 行为级：两口径接近（<5%）时**不附**启发式 total（每轮注入不涨噪声）',
+    !/heuristic total/.test(line24b?.text ?? '') && /provider 实报/.test(line24b?.text ?? ''),
+    `实际：${JSON.stringify(String(line24b?.text ?? '').slice(0, 200))}`);
+
+  const v24 = {
+    at: new Date().toISOString(), sessionId: 'selfcheck-1', state: 'executed', trigger: 'pressure',
+    tier: 'heavy', retainBudget: 240000, retainSource: 'tier', rangeSource: 'own',
+    shadowedTokens: 243337, ratioAfter: 0.408, usedAfter: 408000, ms: 27000,
+  };
+  const out24 = await mkM2({ m2: { skips: {}, injections: 0 }, m3: {} }, undefined, stubVerify(v24))
+    .buildInjection({ agent, step: 1, turn: 1 });
+  ok('R24 端到端：压缩回执念出**压缩后占用**（DSH 口径百分比 + 绝对值）——模型不再从档位名猜「回到 24%」',
+    /压缩后占用 ≈41%（408k）/.test(out24?.text ?? ''),
+    `实际：${String(out24?.text ?? '').slice(0, 220)}`);
+  ok('R24 接线：m3 在**每条路径**上取值（executed 测、no-need 用当前值）并写进 verify',
+    /ratioAfter: ratioAfter != null \? ratioAfter : null,/.test(m3src) && /usedAfter,/.test(m3src)
+    && /const mrA = result != null \? measureRatio\(agent\.session\) : mr;/.test(m3src)
+    && /ratioAfter: ratioAfter != null \? \+\(ratioAfter \* 100\)\.toFixed\(1\) : null,/.test(m3src),
+    '只在 own 分支取值 ⇒ 官方兜底/official 路径的回执没有占用读数');
 }
 
 /* ═══════════ 汇总 ═══════════ */

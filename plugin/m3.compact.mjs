@@ -53,11 +53,25 @@ export function createM3Compaction(deps) {
     const sp = svc('sessionProjections');
     const pressure = tryOf(() => sp?.stateOf?.(session, 'contextPressure'));
     const pressureRec = pressure.error ? null : pressure.value ?? null;
-    const used = m.value.totalTokens ?? null;
+    const total = m.value.totalTokens ?? null;
     const surface = m.value.surfaceTokens ?? null;
     const window = pressureRec?.contextWindow ?? null;
+    /* ═══ R24（2026-10-15 用户实测「插件说 24%、DSH 显示 41%」）：占用口径**对齐 DSH 表盘** ═══
+     * DSH 源码 `ContextMeter.js`：`contextOccupancy(p)` 用 `p?.projectedTokens ?? p?.pressureTokens`
+     *   —— 依次为「**下一请求的 prompt 预计大小**」→「**最新一次 provider 实报的 prompt 大小**」。
+     * DSH 文档（tokenMeter）：`contextBreakdown`（系统/工具/对话三行）是**启发式组成**，
+     *   「`messageTokens` includes every other visible node, **including superseded prompts**」，
+     *   且三个数都用固定启发式，「**not route image pricing or file-handle projection**」。
+     * 我们此前用 `measure().totalTokens`（同一份启发式节点总和）⇒ 与用户看到的表盘**不是同一个口径**，
+     * 真机后果：我方按 75.1% 判定越线并压掉 243K，而 DSH 口径当时只有约 41%（**提前压缩 = 白压**）。
+     * 现 `used` = DSH 口径（触发判定 + 显示都用它）；`total`/`surface` 保留供取证。 */
+    const projected = pressureRec?.projectedTokens ?? null;
+    const reported = pressureRec?.pressureTokens ?? null;
+    const dsh = projected ?? reported;
+    const used = dsh ?? total;
+    const basis = projected != null ? '下一请求预估' : (reported != null ? 'provider 实报' : '本地启发式(退化)');
     const ratio = window && used != null ? used / window : null;
-    return { ok: true, used, surface, window, ratio, measure: m.value };
+    return { ok: true, used, total, surface, window, ratio, basis, projected, reported, measure: m.value };
   };
 
   /* ═══ R16.18：比例历史（动态余量的输入） ═══
@@ -466,17 +480,27 @@ export function createM3Compaction(deps) {
       let result = out.result;
       let rangeSource = out.source;
       let ratioAfter = null;
+      let usedAfter = null;
+      /* R24：压缩后的占用**在每条路径上都取值**（原先只在 own 分支取，且没进回执）——
+       * 不报这个数时模型只能拿档位名/保留预算自己猜：真机把「保留 ~240k」读成「回到 24%」，
+       * 而 DSH 表盘当时是 40%（`projectedTokens`）。口径见 measureRatio 的 R24 注释。 */
+      {
+        const mrA = result != null ? measureRatio(agent.session) : mr;
+        if (mrA?.ok) { ratioAfter = mrA.ratio; usedAfter = mrA.used; }
+      }
       /* 强制线收口（R16 泛化）：**无论档位/触发**，自算压完仍在线之上 ⇒ 追加官方 overflow 再压一次。
        * 保证「越强制线必定压到线下」这条旧承诺不因换了保留策略（哪怕 Agent 选了 heavy 浅压）而丢失。 */
       if (rangeSource === 'own' && result != null) {
         const mr2 = measureRatio(agent.session);
-        ratioAfter = mr2.ok ? mr2.ratio : null;
         if (mr2.ok && mr2.ratio != null && mr2.ratio >= effCritical) {
           log('info', `M3.5 自选范围（档位 ${tool?.tierText?.(out.tier ?? tierName) ?? (out.tier ?? tierName)}）后占用仍 ${(mr2.ratio * 100).toFixed(1)}% ≥ 强制线 ${(effCritical * 100).toFixed(1)}% ⇒ 追加官方 overflow 收口`);
           const r2 = await compaction.service.compactIfNeeded(agent, 'context-overflow', sig);
           if (r2) {
             result = r2;
             rangeSource = 'own+official';
+            /* 收口后**再测一次**：否则回执报的是收口前的数（用户就是靠这个数判断「压到哪了」）。 */
+            const mr3 = measureRatio(agent.session);
+            if (mr3?.ok) { ratioAfter = mr3.ratio; usedAfter = mr3.used; }
           }
         }
       }
@@ -499,6 +523,10 @@ export function createM3Compaction(deps) {
         anchorFailReason: out.anchorFailReason ?? null,
         rangeSource,
         shadowedTokens: result?.shadowedTokenCount ?? null,
+        /* R24：压缩后占用（DSH 表盘口径 = projectedTokens ?? pressureTokens）——回执要念给模型听。 */
+        ratioAfter: ratioAfter != null ? ratioAfter : null,
+        usedAfter,
+        basis: mr.ok ? mr.basis : null,
         skipWhy: out.skipWhy ?? null,
         officialWhy: out.officialWhy ?? null,
         ms: Date.now() - t0,
