@@ -1274,9 +1274,9 @@ ok('错误文案与引擎源码逐字一致（引擎改文案时这里先响）'
   '引擎错误文案已变 ⇒ 本模块的边界识别会静默失灵（回退重试不再发生）');
 
 /* ---- host 接线 ---- */
-ok('host 把 measure 本体带进自选范围（不二次测量、不猜节点）——R24 起 used 走 DSH 表盘口径',
+ok('host 把 measure 本体带进自选范围（不二次测量、不猜节点）——R24/R25 起 used 走 DSH 表盘口径',
   /return \{ ok: true, used, total, surface, window, ratio, basis, projected, reported, measure: m\.value \};/.test(m3src)
-  && /Math\.max\(0, reported \+ psurf - sampled\)/.test(m3src)
+  && /const proj = projectedFromPressure\(pressureRec\);/.test(m3src)
   && /api\.selectRange\(\{ session: agent\.session, measurement: measure, retainTokens: budget, keepFromSeq:/.test(ctOwnRange),
   '没带 measure ⇒ 只能退化成官方路径，自选范围形同未接');
 ok('保留预算按**会话档位**解析（R16：档位只改预算，不改范围算法）——R21 起锚点优先、失败退档位',
@@ -3348,11 +3348,16 @@ console.log('\n== 6.30 R23：锚点来源与思考强度显示全中文 ==');
 console.log('\n== 6.31 R24：占用口径对齐 DSH + 回执「压缩后占用」 ==');
 {
   const m3Mod24 = await import(pathToFileURL(join(PLUGIN, 'm3.compact.mjs')).href);
+  /* R25：口径公式**唯一一份**在 core.mjs（命名导出给测试、同时挂进 createCore 出口供宿主注入）。 */
+  const coreMod25 = await import(pathToFileURL(join(PLUGIN, 'core.mjs')).href);
+  const projectedFromPressure = coreMod25.projectedFromPressure;
+  const contextLedgerOf = coreMod25.contextLedgerOf;
   const mkM3 = (pressure, total, surface) => m3Mod24.createM3Compaction({
     state: { m3: {} }, log: () => {}, msg: (e) => String(e?.message ?? e),
     pick: (...a) => a.find((x) => x != null),
     tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
     nfmt: (n) => String(n), errCodeOf: (e) => String(e?.code ?? 'err'), schedule: () => {},
+    projectedFromPressure,
     svc: (k) => (k === 'tokenMeter' ? { measure: () => ({ totalTokens: total, surfaceTokens: surface }) }
       : k === 'sessionProjections' ? { stateOf: () => pressure } : null),
     M3: {}, effEnabled: () => true, criticalCapOf: () => 0.8,
@@ -3397,6 +3402,36 @@ console.log('\n== 6.31 R24：占用口径对齐 DSH + 回执「压缩后占用�
   ok('R24 行为级：两口径接近（<5%）时**不附**启发式 total（每轮注入不涨噪声）',
     !/heuristic total/.test(line24b?.text ?? '') && /provider 实报/.test(line24b?.text ?? ''),
     `实际：${JSON.stringify(String(line24b?.text ?? '').slice(0, 200))}`);
+
+  /* R25：口径公式的唯一一份实现 + **单源守卫**（禁止在 m3/m1 里重写公式——R22/R23 的重复实现教训）。 */
+  const P24 = { contextWindow: 1000000, pressureTokens: 748806, surfaceTokens: 247859, sampledSurfaceTokens: 487049 };
+  const pf24 = projectedFromPressure(P24);
+  ok('R25 纯函数：`projectedFromPressure` 自算 DSH 投影（真机三数 ⇒ 509,616）+ 降级链各自**标明来源**',
+    pf24.used === 509616 && pf24.projected === 509616 && pf24.basis === '下一请求预估(自算)'
+    && projectedFromPressure({ projectedTokens: 408000, pressureTokens: 748806 }).basis === '下一请求预估'
+    && projectedFromPressure({ pressureTokens: 748806 }).basis === 'provider 实报(无增量参照)'
+    && projectedFromPressure({ contextWindow: 1000000 }).used === null
+    && projectedFromPressure(undefined).basis === '无 provider 数据',
+    `实际 ${JSON.stringify([pf24.basis, projectedFromPressure({ pressureTokens: 1 }).basis, projectedFromPressure(null).basis])}`);
+  const ledger24 = contextLedgerOf(P24, { totalTokens: 510484, surfaceTokens: 245699 },
+    { breakdown: { systemTokens: 2161, messageTokens: 200000, toolsTokens: 58256 } });
+  ok('R25 纯函数：`contextLedgerOf` 账本 = 表盘口径 + 启发式总量 + **三行分项** + 两口径之差（真机 249,199）',
+    ledger24.projected === 509616 && ledger24.heuristicTotal === 510484
+    && ledger24.breakdown?.system === 2161 && ledger24.breakdown?.tools === 58256 && ledger24.breakdown?.messages === 200000
+    && ledger24.breakdownSum === 260417 && ledger24.gapVsBreakdown === 249199,
+    `实际 ${JSON.stringify(ledger24)}`);
+  ok('R25 单源守卫：公式只在 core.mjs 一份 —— m3 只调用注入的 `projectedFromPressure`，自己不再重写 `Math.max(...)`',
+    /Math\.max\(0, reported \+ surface - sampled\)/.test(coreSrc)
+    && !/Math\.max\(0, reported/.test(m3src)
+    && /const proj = projectedFromPressure\(pressureRec\);/.test(m3src)
+    && /projectedFromPressure, contextLedgerOf,/.test(coreSrc)
+    && (host.match(/projectedFromPressure/g) ?? []).length >= 2
+    && (host.match(/contextLedgerOf/g) ?? []).length >= 2,
+    `实际 core 有公式=${/Math\.max\(0, reported \+ surface - sampled\)/.test(coreSrc)}, m3 仍自带=${/Math\.max\(0, reported/.test(m3src)}, host 注入 projected=${(host.match(/projectedFromPressure/g) ?? []).length} 次 / ledger=${(host.match(/contextLedgerOf/g) ?? []).length} 次`);
+  ok('R25 接线：m1 每次快照落**占用账本**（表盘口径 vs 三行组成）⇒ 以后「差的 136K 是什么」直接从报告读',
+    /if \(typeof contextLedgerOf === 'function'\) row\.contextLedger = contextLedgerOf\(pv, mv, bv\);/.test(m1src)
+    && /let mv = null;/.test(m1src),
+    'm1 不落账本 ⇒ 每次都要挖 asar 才能解释表盘与三行的差');
 
   const v24 = {
     at: new Date().toISOString(), sessionId: 'selfcheck-1', state: 'executed', trigger: 'pressure',

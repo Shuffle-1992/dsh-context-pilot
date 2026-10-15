@@ -37,6 +37,8 @@ export function createM1Snapshot(deps) {
   const {
     state, log, msg, svc, tryOf, pick, M3, effEnabled, resolveCompactionFor,
     compactMeasure, summarizeBreakdown, extractEventText, SESSION_CAP,
+    /* R25：占用账本（表盘口径 vs 三行启发式组成）——由 core 注入，禁止本模块重写口径公式。 */
+    contextLedgerOf,
   } = deps;
 
   /* ---- B2（审查）：`session/event` 是未文档化的内部事件面 ----
@@ -150,16 +152,25 @@ export function createM1Snapshot(deps) {
         headerKeys: tryOf(() => (s?.header ? Object.keys(s.header) : undefined)).value,
         keys: tryOf(() => Object.keys(s).slice(0, 40)).value,
       };
+      let mv = null;
       if (canMeasure) {
         const m = tryOf(() => tm.measure(s));
         if (m.error) row.measureError = m.error;
         else row.measure = compactMeasure(m.value);
+        mv = m.error ? null : m.value;
       }
       if (sp && typeof sp.stateOf === 'function') {
         const p = tryOf(() => sp.stateOf(s, 'contextPressure'));
         row.pressureProjection = p.error ? { error: p.error } : p.value ?? null;
         const b = tryOf(() => sp.stateOf(s, 'contextBreakdown'));
-        row.breakdownSummary = b.error ? { error: b.error } : summarizeBreakdown(b.value ?? null); // 形状取证（不落全量条目）
+        const bv = b.error ? null : b.value ?? null;
+        row.breakdownSummary = summarizeBreakdown(bv); // 形状取证（不落全量条目）
+        /* R25（用户要求）：**占用账本**——把「表盘口径 / 启发式总量 / 三行组成 / 两者之差」四件套
+         * 每次快照都记账，以后「表盘 408K 而三行只有 272K，缺的 136K 是什么」可以**直接从报告读**，
+         * 不必再挖 asar。口径实现唯一一份在 core.mjs（`contextLedgerOf`），此处只落盘。
+         * ⚠️ 账本纯取证，不参与任何判定（判定一律用表盘口径，见 m3.measureRatio）。 */
+        const pv = p.error ? null : p.value ?? null;
+        if (typeof contextLedgerOf === 'function') row.contextLedger = contextLedgerOf(pv, mv, bv);
       }
       snap.sessions.push(row);
     }

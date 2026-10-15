@@ -39,7 +39,7 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
     state, log, msg, svc, tryOf, pick, kfmt, nfmt, M3, mergeConfig, effEnabled,
     schedule, addListener, remember, SET_CAP, SOURCE_KIND, SESSION_CAP, HEARTBEAT_MS, TAG,
     COMPACT_TIMEOUT_MS, HISTORY_CAP,
-    compactMeasure, summarizeBreakdown, extractEventText, messageText, errCodeOf,
+    compactMeasure, summarizeBreakdown, extractEventText, messageText, errCodeOf, projectedFromPressure, contextLedgerOf, // R25 占用口径单源：注入 M1（账本）与 M3（触发/显示）
     getCreateUserMessage, attachSnapshot, loadDefineTool, loadReportBase,
   } = core;
 /**
@@ -240,7 +240,7 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
     .then((m) => {
       m1Ctl = m.createM1Snapshot({
         state, log, msg, svc, tryOf, pick, M3, effEnabled, resolveCompactionFor,
-        compactMeasure, summarizeBreakdown, extractEventText, SESSION_CAP,
+        compactMeasure, summarizeBreakdown, extractEventText, SESSION_CAP, contextLedgerOf,
       });
       return m1Ctl;
     })
@@ -347,7 +347,7 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
     .then((m) => {
       m3Ctl = m.createM3Compaction({
         svc, tryOf, state, M3, effEnabled, criticalCapOf, engineThreshold, resolveCompactionFor,
-        log, msg, pick, nfmt, errCodeOf, schedule,
+        log, msg, pick, nfmt, errCodeOf, schedule, projectedFromPressure,
         publishHud, recordHudAct, formatAct, clearBriefed, extractEventText, // R21：锚点 text 定位用它（文本提取单一真相）
         /* range 模块与压缩工具的生命周期都由宿主拥有 ⇒ 交给模块 async 取用口。 */
         awaitRange: async () => rangeApi ?? (await rangeReady),

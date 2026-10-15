@@ -136,9 +136,16 @@ function summarizeBreakdown(bd) {
   if (!bd || typeof bd !== 'object') return null;
   const nodes = Array.isArray(bd.nodes) ? bd.nodes : null;
   const b = bd.breakdown;
+  /* R25：把 `toolsTokens` / `messageTokens` **分开**留出来（原先只有合并的 `rest`）——
+   * 面板上「系统/工具/对话」三行就是这三个数，报告要与面板逐项对得上。 */
+  const split = (o) => ({
+    tools: typeof o.toolsTokens === 'number' ? o.toolsTokens : null,
+    messages: typeof o.messageTokens === 'number' ? o.messageTokens : null,
+  });
   if (b && typeof b === 'object' && typeof b.systemTokens === 'number') {
     return {
       system: b.systemTokens,
+      ...split(b),
       rest: (b.messageTokens ?? 0) + (b.toolsTokens ?? 0),
       count: nodes ? nodes.length : null,
       sample: nodes ? nodes[0] ?? null : null,
@@ -153,12 +160,76 @@ function summarizeBreakdown(bd) {
       all += t;
       if (e?.system) system += t;
     }
-    return { system, rest: all - system, count: entries.length, sample: entries[0] ?? null };
+    return { system, tools: null, messages: null, rest: all - system, count: entries.length, sample: entries[0] ?? null };
   }
   if (typeof bd.systemTokens === 'number') {
-    return { system: bd.systemTokens, rest: (bd.messageTokens ?? 0) + (bd.toolsTokens ?? 0), count: null, sample: null };
+    return {
+      system: bd.systemTokens,
+      ...split(bd),
+      rest: (bd.messageTokens ?? 0) + (bd.toolsTokens ?? 0),
+      count: null,
+      sample: null,
+    };
   }
   return { unknown: true, keys: Object.keys(bd).slice(0, 20), sample: null };
+}
+
+/* ═══════════ R24/R25：占用口径（**单一真相**） ═══════════
+ * DSH 表盘（`ContextMeter.js#contextOccupancy`）用的是 `contextPressure` 的 **wire.view**：
+ *   `projectedTokens = Math.max(0, pressureTokens + surfaceTokens − sampledSurfaceTokens)`
+ * 语义 =「provider 实报的 prompt 大小 + 从那以后 surface 的增量」= 下一请求的预计大小。
+ * ⚠️ 两种情况下必须**自算**：① `projectedTokens` 只在 wire.view 里，投影 **state** 没有它；
+ *   ② 直接退回 `pressureTokens` 会拿到**上一次上报的过期值**（真机：压缩后仍是 748,806/74.9%，
+ *      而表盘已是 51%→40%）。
+ * 这里放**唯一一份**实现：`createCore` 出口把 `projectedFromPressure` / `contextLedgerOf` 交给宿主，
+ * m3（触发判定 + 显示）与 m1（报告取证）都用同一份，禁止在模块内重写公式（参见 R22/R23 的重复实现教训）。
+ * `usage.composer` 的 `pressureFrom` 定义：prompt 侧压力 = input + cacheRead + cacheWrite（不含 output）。 */
+
+/** → `{ used, projected, reported, surface, sampled, basis }`；`used=null` 表示**没有任何** provider 数据。 */
+export function projectedFromPressure(rec) {
+  const reported = rec?.pressureTokens ?? null;
+  const surface = rec?.surfaceTokens ?? null;
+  const sampled = rec?.sampledSurfaceTokens ?? null;
+  const out = { projected: null, reported, surface, sampled, used: null, basis: '无 provider 数据' };
+  if (rec?.projectedTokens != null) {
+    return { ...out, projected: rec.projectedTokens, used: rec.projectedTokens, basis: '下一请求预估' };
+  }
+  if (reported != null && surface != null && sampled != null) {
+    const p = Math.max(0, reported + surface - sampled);
+    return { ...out, projected: p, used: p, basis: '下一请求预估(自算)' };
+  }
+  if (reported != null) return { ...out, used: reported, basis: 'provider 实报(无增量参照)' };
+  return out;
+}
+
+/**
+ * 一个会话的**占用账本**（报告取证用，四件套 + 差额）：表盘口径 vs 三行启发式组成。
+ * ⚠️ `gapVsBreakdown` **只作读数**，不参与任何判定：它是「provider 计入而启发式不计」的部分
+ * （route-pricing 的图片/文件真实表示、文件句柄投影、固定估算 vs 真实分词的差）。
+ * 真机样例（session-54597a24 压缩后）：`748806 + 247859 − 487049 = 509616`，组成 `2161 + 258256`。
+ */
+export function contextLedgerOf(pressure, measure, breakdown) {
+  const proj = projectedFromPressure(pressure);
+  const b = summarizeBreakdown(breakdown);
+  const bdSum = b && typeof b.system === 'number' ? b.system + (b.rest ?? 0) : null;
+  return {
+    at: new Date().toISOString(),
+    window: pressure?.contextWindow ?? null,
+    /* ① 表盘口径（provider 锚定） */
+    providerReported: proj.reported,
+    sampledSurface: proj.sampled,
+    projected: proj.projected,
+    providerSurface: proj.surface,
+    displayUsed: proj.used,
+    basis: proj.basis,
+    /* ② 启发式口径（面板三行 / 日志总量） */
+    heuristicTotal: measure?.totalTokens ?? null,
+    heuristicSurface: measure?.surfaceTokens ?? null,
+    breakdown: b ? { system: b.system, tools: b.tools ?? null, messages: b.messages ?? null, rest: b.rest ?? null } : null,
+    breakdownSum: bdSum,
+    /* ③ 两个口径之差（取证读数，不参与判定） */
+    gapVsBreakdown: proj.used != null && bdSum != null ? proj.used - bdSum : null,
+  };
 }
 
 /* ─────────── 官方 createUserMessage 解析（候选链：bare → env → resourcesPath → 硬编码，镜像 zcode-dispatch ZB-01） ─────────── */
@@ -723,6 +794,8 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
     M3, mergeConfig, effEnabled, schedule, addListener, SOURCE_KIND, TAG,
     COMPACT_TIMEOUT_MS, HISTORY_CAP, HEARTBEAT_MS, SESSION_CAP,
     compactMeasure, summarizeBreakdown, messageText, messageTextLength, extractEventText, lastUserText,
+    /* R25：占用口径单源（m3 触发/显示、m1 报告账本都用这两支）。 */
+    projectedFromPressure, contextLedgerOf,
     loadCreateUserMessage, loadDefineTool, getCreateUserMessage: () => createUserMessage,
     attachSnapshot, loadReportBase, refresh, writeReport,
   };

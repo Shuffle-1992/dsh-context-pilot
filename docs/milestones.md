@@ -2681,3 +2681,37 @@ provider 实报 **527,042** vs 启发式 surface **343,387**（+系统 2,161）�
 
 **结论**：面板**不会、也不该**把这三套口径的数字相加；回答"占用多少"要认准**表盘口径**（provider 锚定）。
 插件 R24/R24.1 起用同一个口径（含自算投影），因此插件报的数与表盘一致。
+
+### R25 占用账本（报告四件套）+ 口径公式单源（2026-10-15）
+
+用户要求：「加」——把「provider 实报 / 计算投影 / 启发式 surface / 三行组成」记进报告，
+以后"表盘 408K 而三行只有 272K，缺的 136K 是什么"**直接从报告读**，不必再挖 asar。
+
+**实现**：
+1. `core.mjs` 新增两个**纯函数**（**唯一一份**实现）：
+   - `projectedFromPressure(rec)` → `{ used, projected, reported, surface, sampled, basis }`：
+     照抄 DSH `wire.view` 公式 `max(0, pressureTokens + surfaceTokens − sampledSurfaceTokens)`；
+     降级链 = view 直给 → **自算** → provider 实报(无增量参照) → 无数据，`basis` 逐档标明来源；
+   - `contextLedgerOf(pressure, measure, breakdown)` → 账本：
+     `providerReported / sampledSurface / projected / providerSurface / displayUsed / basis`
+     ＋ `heuristicTotal / heuristicSurface / breakdown{system,tools,messages,rest} / breakdownSum`
+     ＋ `gapVsBreakdown`（两口径之差，**纯读数、不参与判定**）。
+2. `m1.snapshot.mjs`：每个会话行新增 `contextLedger`（原先只有 `pressureProjection` 与
+   `breakdownSummary`，且**都不含投影值**）；`summarizeBreakdown` 增加 `tools`/`messages` 分项
+   ⇒ 报告与面板三行**逐项**可对。
+3. **单源**：两个函数既作命名导出（测试可直接用），又挂进 `createCore` 出口，由宿主**同 ts** 注入
+   M1（账本）与 M3（触发/显示）；m3 里不再保留公式副本（守卫：m3 源码出现 `Math.max(0, reported` 即红）。
+
+**真机样例（已写成断言）**：`748806 + 247859 − 487049 = 509616`；
+三行 `2161 + 200000 + 58256 = 260417` ⇒ **gapVsBreakdown = 249,199**（图片/文件路由定价 + 分词差）。
+
+**验证**：**689 断言全绿**（contract **542** / static 72 / report 54 / boot 21）。新增 6.31 段内 **4 条**：
+`projectedFromPressure` 降级链、`contextLedgerOf` 账本（含真机 249,199）、**单源守卫**、m1 接线。
+**变异 3/3 CAUGHT**：M1 公式丢掉 `sampled` 项 ⇒ 红 4；M2 m1 不落账本 ⇒ 红 1；M3 m3 里重新长出第二份公式 ⇒ 红 1。
+
+**附带**：`host.impl.mjs` 有 **代码行 ≤320** 的静态预算（D1 已完成的判据），本次新增依赖被**并进既有行**
+（未靠删注释凑数）——预算已接近上限（320/320），下次再动 host 接线前先考虑抽模块。
+
+**教训**：跨模块共享的**口径公式必须单源**（命名导出 + 注入），否则"同一物理量两份实现"必然漂移——
+R22（档位标签）、R23（锚点显示）已各踩过一次，R24.1 又踩一次（state/view 字段语义不同）。
+凡是"读一个字段就算数"的地方，先确认**该字段在哪个形状里存在**。
