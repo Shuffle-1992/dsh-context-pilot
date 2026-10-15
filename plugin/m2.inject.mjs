@@ -77,25 +77,38 @@ export function createM2Injection(deps) {
   const NUDGE_PER_TURN_CAP = 4;
   const REPEAT_NUDGE_TEXT = '（系统备注：本轮决策行**只需写一次**——后续步骤不必重复贴；'
     + '仅在真的改变决定（决定压缩 / 升或降档）时补一行。）';
-  /** 只取正文 text 块（不数 reasoning / tool-call）。 */
-  const assistantTextOf = (event) => {
-    const c = event?.data?.message?.content;
-    if (!Array.isArray(c)) return '';
-    return c.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('\n');
-  };
   const DECISION_RE = /压缩决策：|档位决策：/g;
-  /** 事件入口（宿主转发 `session/event`）：统计"本轮写了多少条决策行"。**只读**，不触发任何压缩。 */
+  /** R32：**动作背书的决策行不算重复** —— R27 的规矩是「中途真的改了决定（压缩/升或降档）再补一行」，
+   * 那第二条是**合法**的；若一律按"同轮 ≥2 条"判重复，会把守规矩的会话误判成重复（用户追问点）。
+   * 判据：该条消息里是否含指向压缩/换档工具的 tool-call（工具名从各自 api 取，**不硬编码**）。 */
+  const actionToolNames = () => {
+    const out = new Set();
+    try { const t = getCompactToolApi()?.TOOL_NAME; if (t) out.add(String(t)); } catch { /* 未加载 */ }
+    try { const e = getEffortApi()?.TOOL_NAME; if (e) out.add(String(e)); } catch { /* 未加载 */ }
+    return out;
+  };
+  const countDecisionLines = (event) => {
+    const c = event?.data?.message?.content;
+    if (!Array.isArray(c)) return 0;
+    const acts = actionToolNames();
+    /* ⚠️ 工具名集合为空（模块未加载）时**保守计数**（宁可误判为重复，也不漏掉真重复）。 */
+    if (acts.size && c.some((b) => b?.type === 'tool-call' && acts.has(String(b.name ?? '')))) return 0;
+    const txt = c.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('\n');
+    return (txt.match(DECISION_RE) ?? []).length;
+  };
+  /** 事件入口（宿主转发 `session/event`）：统计"本轮写了多少条**无动作背书**的决策行"。**只读**。 */
   const noteSessionEvent = (session, event) => {
     try {
       if (event?.type !== 'assistant/message') return null;
       const d = event.data ?? {};
       const sid = String(pick(session?.id, session?.header?.id, d.sessionId, ''));
       if (!sid) return null;
-      const n = (assistantTextOf(event).match(DECISION_RE) ?? []).length;
+      const n = countDecisionLines(event);
       if (!n) return null;
       const bySid = state.m2.decisionRepeat = state.m2.decisionRepeat ?? {};
       const rec = bySid[sid] ?? { turn: null, count: 0, lastStep: null };
-      if (rec.turn !== d.turn) { rec.turn = d.turn ?? null; rec.count = 0; }   // 新轮重置
+      /* 只在事件**确实带轮号**时才按轮重置（真机事件都带 `data.turn`；缺字段时保守累计，不清零）。 */
+      if (Number.isFinite(d.turn) && rec.turn !== d.turn) { rec.turn = d.turn; rec.count = 0; }
       rec.count += n;
       rec.lastStep = Number.isFinite(d.step) ? d.step : rec.lastStep;
       bySid[sid] = rec;

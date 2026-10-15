@@ -3660,6 +3660,7 @@ console.log('\n== 6.35 R31：检测到重复才注入 ==');
 {
   const mk31 = (st) => mkM2(st, () => ({ ok: true, used: 590000, total: 0, surface: 0, window: 1000000, ratio: 0.59, basis: '下一请求预估', measure: {} }),
     undefined, undefined, {
+      TOOL_NAME: 'compact_context',   // R32：动作背书判据要从 api 取工具名（不硬编码）
       tierText: () => '浅压24%', renderBrief: () => 'stub', getTier: () => 'heavy', hasTier: () => true,
       renderCard: ({ ratio: r, minRatio } = {}) => (Number.isFinite(r) && Number.isFinite(minRatio) && r < minRatio ? null : '压缩决策卡（stub）'),
     });
@@ -3709,6 +3710,35 @@ console.log('\n== 6.35 R31：检测到重复才注入 ==');
   ok('R31 接线：宿主把 `session/event` 转发给 m2（**只读检测**，不触发任何压缩）',
     /m2Ctl\?\.noteSessionEvent\?\.\(session, event\)/.test(host) && /noteSessionEvent \}/.test(m2src),
     '不转发 ⇒ 检测恒为空、备注永不触发（静默失效）');
+
+  /* R32（用户追问「被纠正后就不会注入了吧？」暴露的漏洞）：R27 允许「中途真的改了决定再补一行」——
+   * 那种**动作背书**的决策行是合法的，不能算重复。判据：同一条消息里有没有指向压缩/换档工具的 tool-call。 */
+  const st32 = { m2: { skips: {}, injections: 0 }, m3: { policyCards: 0 } };
+  const api32 = mk31(st32);
+  const agent32 = { session: { id: 'sess-32' }, id: 'sess-32' };
+  const at32 = async (step) => api32.buildInjection({ agent: agent32, step, turn: 1 });
+  const withAction = (turn, step, tool) => ({
+    type: 'assistant/message',
+    data: { turn, step, message: { content: [
+      { type: 'text', text: '压缩决策：压｜占用 59%｜理由：换子任务。' },
+      { type: 'tool-call', name: tool, arguments: '{}' },
+    ] } },
+  });
+  api32.noteSessionEvent({ id: 'sess-32' }, withAction(1, 1, 'compact_context'));
+  const d32a = await at32(2);
+  ok('R32 行为级：**动作背书**的决策行不算重复（真的调了 compact_context ⇒ 合法补行，不打扰）',
+    d32a?.skip === 'not-step-1' && !st32.m2.decisionRepeat,
+    `实际 ${JSON.stringify(d32a)}｜rec=${JSON.stringify(st32.m2.decisionRepeat)}`);
+  api32.noteSessionEvent({ id: 'sess-32' }, withAction(1, 2, 'pwsh'));
+  const d32b = await at32(3);
+  ok('R32 行为级：**其它** tool-call（如 pwsh）不豁免——纯文本重复仍会被计入',
+    st32.m2.decisionRepeat?.['sess-32']?.count === 1 && d32b?.skip === 'not-step-1',
+    `实际 rec=${JSON.stringify(st32.m2.decisionRepeat?.['sess-32'])}｜${JSON.stringify(d32b)}`);
+  api32.noteSessionEvent({ id: 'sess-32' }, { type: 'assistant/message', data: { turn: 1, step: 3, message: { content: [{ type: 'text', text: '压缩决策：不压｜占用 60%｜理由：空间充足。' }] } } });
+  const d32c = await at32(4);
+  ok('R32 行为级：豁免之后再出现**纯文本**重复 ⇒ 仍按 ≥2 条判定并注入',
+    st32.m2.decisionRepeat?.['sess-32']?.count === 2 && d32c?.repeatNudge === true,
+    `实际 rec=${JSON.stringify(st32.m2.decisionRepeat?.['sess-32'])}｜nudge=${d32c?.repeatNudge}`);
 }
 
 /* ═══════════ 汇总 ═══════════ */
