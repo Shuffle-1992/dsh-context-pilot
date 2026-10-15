@@ -212,6 +212,11 @@ export function createM3Compaction(deps) {
           source: 'official',
           officialWhy: why ?? null,
           retainBudget: null,
+          /* R21.2（真机发现）：官方兜底路径**也必须带上保留来源与锚点失败原因**——
+           * 否则回执里「锚点未命中⇒已按档位兜底」这句话会丢（静默降级 = 本项目大忌）。 */
+          retainSource,
+          anchorFailReason: useAnchor ? null : (anchorFailReason ?? null),
+          tier: tierInfo.tier,
           walkBacks: 0,
         };
       } finally { clearOwnCompaction(); }
@@ -268,7 +273,16 @@ export function createM3Compaction(deps) {
     if (!sel.ok) {
       /* 「没什么可压」而占用又没越强制线 ⇒ **就此收手**（见文件头语义要点）。 */
       if (sel.why === 'nothing-to-compact' && !forced) {
-        return { result: null, source: 'none', skipWhy: sel.why, retainBudget: budget, walkBacks: 0 };
+        /* R21.2（真机发现）：「无需压缩」这条提前 return 曾漏掉 retainSource / anchorFailReason ⇒
+         * ① verify 里的 retainSource 靠 `?? 'tier'` 猜出来（值碰巧对，但**语义是猜的**）；
+         * ② 锚点失败原因变 null ⇒ 回执无法显示「锚点未命中（text:not-found）⇒ 已按档位兜底」。
+         * 真机实测：只给 text 锚点（未命中）时，回执只剩「已执行但判定无需压缩」，**降级痕迹丢失**。 */
+        return {
+          result: null, source: 'none', skipWhy: sel.why, retainBudget: budget, walkBacks: 0,
+          retainSource,
+          anchorFailReason: useAnchor ? null : (anchorFailReason ?? null),
+          tier: tierInfo.tier,
+        };
       }
       return official(sel.why);
     }

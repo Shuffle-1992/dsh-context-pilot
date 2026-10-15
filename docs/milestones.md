@@ -2465,3 +2465,58 @@ m3.compactToolDiag = { calls:100, enabled:true, installed:false, intents:0 }
   只能靠**对真实 spec 做结构化校验**。这与 R16.16（`required:false` 被拒）**完全同型**，说明"该补的是校验层，
   不是再写一条断言"。
 - 桩越像真货越好，但**校验层必须有独立断言**；且**断言本身必须变异验证**，否则很容易写出恒真的遍历器。
+
+### R21.2 真机多轮测试（2026-10-15，本会话 614k 上下文）+ 又抓出两处行为级缺陷
+
+用户要求：「现在本会话窗口上下文也比较长了，你来测试下，可以多轮测试，覆盖主路径，一级兜底，二级兜底。」
+—— 用**真实会话**（614k / 1M，61%）跑，结果：**主路径与两级兜底全部符合预期，同时抓出 2 个真实缺陷**。
+
+#### 测试矩阵与实际结果（全部来自 m1-report 取证字段，非推测）
+
+| # | 调用 | 实际结果 | 判定 |
+| --- | --- | --- | --- |
+| ① | `keepFrom:{text:'<不存在>', recentUser:1}` | `anchorProbe = {ok:true, via:'recent-user', seq:3360, tokens:3346, margin:8000, budget:40000, clamped:true, tried:['text:not-found']}`；`retainSource='anchor:recent-user'`，`rangeSource='own'`，`retainedTokens=40632`，`shadowedTokens=365356`；回执「保留来源：语义锚点（recent-user）」 | ✅ 主路径 + **一级兜底**（text→recentUser）全对；**锚点预算压过档位**（240k 档位被 40k 锚点预算替代）也符合设计 |
+| ② | `keepFrom:{text:'<也不存在>'}`（无 recentUser） | `anchorProbe={ok:false, tried:['text:not-found'], reason:'text:not-found'}`；`rangeProbe.retainSource='tier'`、`anchorFailReason='text:not-found'`、`why:'nothing-to-compact'` | ⚠️ 解析链正确，但**回执丢了降级句**（见缺陷②） |
+| ③ | `keepFrom:{recentUser:9}`（越界） | 回执：「⚠️ `keepFrom` 形状非法，已忽略（本次按档位）」；档位显式传入未被误伤 | ✅ 工具侧边界正确 |
+
+#### 缺陷①（v0.1.9 及以前）：**不传 `tier` 会重置会话档位**
+
+- **现象**：测试② 只传 `keepFrom`（卡片正是这么教的）⇒ 回执显示「标准16% 档」，而本会话登记的是**浅压24%**；
+  落盘文件 `compact-tier.json` 里本会话的 `tier` 从 `heavy` **被改写成 `standard`**。
+- **根因**：`compact-tool.runTool` 把 `args.tier == null` 也交给 `normTier` ⇒ 返回 `standard` ⇒ `setTier` 覆盖 + 落盘。
+  与卡片/README/工具 description 三处明文承诺的「**不传 = 沿用已登记档位（不是重置）**」直接矛盾。
+- **影响**：任何"只给锚点"的调用都会**静默降级**用户/模型此前选定的档位，而且**落盘**（跨 toggle 仍错）。
+- **修**：`tierGiven = args?.tier != null && String(args.tier).trim() !== ''`；缺省时取 `getTier(sid)`（沿用），
+  且回执改写为「档位沿用「浅压24%」」；显式传入仍照常改档；从未登记 ⇒ 标准16%（兜底语义不变）。
+
+#### 缺陷②（v0.1.9 及以前）：**锚点失败痕在两条 return 路径上丢失**
+
+- **现象**：测试② 的回执只有「已执行但判定无需压缩（标准16% 档，保留 ~160k）」，**没有**「锚点未命中（text:not-found）⇒ 已按档位兜底」。
+- **根因**：`compactWithOwnRange` 里 `nothing-to-compact` 的**提前 return** 与 `official()` 兜底 return 都没带
+  `retainSource`/`anchorFailReason` ⇒ `setCompactVerify` 只能靠 `?? 'tier'` **猜**保留来源，锚点失败原因直接变 `null`
+  ⇒ m2 的回执渲染（`else if (v.anchorFailReason)`）拿不到东西。
+- **影响**：**降级链在模型可见面上断了一环**——模型以为锚点生效、实际已退档位（正是本项目列为大忌的静默降级）。
+- **修**：两条 return 都补 `retainSource` / `anchorFailReason` / `tier`（行为级断言直接调 `compactWithOwnRange` 验返回对象）。
+
+#### 一处虚惊（记录以免后人重查）：`rangeProbe` 的 `startIdx/endIdx` 是**被摘要区间**的边界
+
+测试① 的现场是 `anchorIdx:927` 而 `endIdx:815` —— 看起来"锚点在被压区间里"，我一度怀疑护栏失效。
+**实际正确**：`startIdx/endIdx` 记的是**被摘要（压掉）区间**在 surface 上的位置，保留区在其后
+⇒ `endIdx=815` 表示"815 之前被摘要、816 起原样保留"，锚点 927 落在保留区 ✓（`retainedTokens 40632 + shadowTokens 365356 = 405,988` 与量测总量吻合）。
+字段语义在 m3 源码注释中有写，但**字段名极易误读** ⇒ 本行留档。
+
+#### 验证
+
+- **663 断言全绿**（contract **516** / static 72 / report 54 / boot 21）；
+- 新增 6.28 段 **7 条**行为级断言（无一条是正则/源码级）：档位沿用（含落盘往返、显式改档、从未登记兜底）、
+  两条 return 路径的留痕、m3→m2 回执端到端；
+- **变异验证 3/3 CAUGHT**：M1 回退档位沿用 ⇒ 红 2 条；M2 回退"无需压缩"留痕 ⇒ 红 2 条；M3 回退 official 留痕 ⇒ 红 1 条。
+
+#### 教训
+
+- **"文档承诺"必须与"代码缺省语义"逐字对账**：卡片、README、工具 description 三处都写了「不传 = 沿用」，
+  而实现是「不传 = standard」。**同类缺陷的通用形态**：缺省值语义（carry vs reset）没有任何断言覆盖，
+  因为所有既有测试都显式传了 `tier`。
+- **提前 return 是留痕的高危区**：函数有多个出口时，新增字段很容易只加到主路径（本例 1 个字段漏在 2 条路径上）。
+  对策：让返回对象**形状统一**，并用行为级断言逐条出口验证。
+- **真机测试的价值再次被证明**：这两处在 656 条断言下全绿，只有真跑一次（还带真实落盘）才暴露。

@@ -1071,7 +1071,8 @@ ok('工具返回 scheduled=next-step（模型据此知道「可以继续干活�
 /* R15（用户要求「工具完成后进行检查，起码 agent 自己过一遍」）：工具只能登记，执行在下一步 ⇒
  * 结果必须带**自检契约**；否则「回 ok 但实际没执行」对模型完全不可见（2026-10-08 真机踩过）。 */
 ok('压缩工具结果带自检契约（下一步会有「压缩自检」回执 + 未执行时怎么办）',
-  /verify: `已登记，档位「\$\{textOf\(tier\)\}」/.test(ct) && /「压缩自检」回执/.test(ct) && /请再调用一次 compact_context/.test(ct),
+  /* R21.2：`verify` 模板改为「已登记，${沿用/档位}「…」」两态（不传 tier ⇒ 沿用）——断言随之对账。 */
+  /verify: `已登记，\$\{via === 'carry' \? `档位沿用「\$\{textOf\(tier\)\}」` : `档位「\$\{textOf\(tier\)\}」`\}/.test(ct) && /「压缩自检」回执/.test(ct) && /请再调用一次 compact_context/.test(ct),
   '缺自检契约 ⇒ 工具回 ok 但没执行时，模型无从察觉（真机踩过的盲区）');
 /* R16：档位是会话级持续选择 ⇒ 自检契约必须把「持续生效」也教给模型。 */
 ok('压缩工具自检契约说明档位**持续生效**（含强制线）',
@@ -3048,6 +3049,97 @@ console.log('\n== 6.27 R21.1：工具 spec 结构化自检（防静默不注册�
     && specC?.parameters?.keepFrom?.properties?.recentUser?.type === 'number'
     && specC?.parameters?.keepFrom?.properties?.text?.type === 'string',
     '再漏一次 = 工具整条不可用（模型调不了，教学还在喊它）');
+}
+
+/* ═══════════ 6.28 R21.2：真机发现的两处缺陷（档位沿用 / 锚点失败痕丢失） ═══════════
+ * 2026-10-15 真机多轮测试（本会话 614k 上下文）发现，**都是行为级、报告字段直接可证**：
+ *  ① **不传 `tier` 会重置档位**：卡片/文档都写「不传 = 沿用已登记档位（不是重置）」，但旧实现把
+ *     `args.tier == null` 也交给 normTier ⇒ 返回 standard ⇒ setTier **覆盖并落盘**。
+ *     真机实测：compact-tier.json 里本会话从 `heavy` 变成 `standard`（模型只传了 keepFrom）。
+ *  ② **锚点失败痕丢失**：`nothing-to-compact` 那条提前 return 没带 retainSource/anchorFailReason ⇒
+ *     verify 里 retainSource 靠 `?? 'tier'` 猜（值碰巧对、语义是猜的），anchorFailReason 变 null ⇒
+ *     回执只剩「已执行但判定无需压缩」，**降级链断了**（本项目大忌）。 */
+console.log('\n== 6.28 R21.2：档位沿用 + 锚点失败痕（真机缺陷回归）==');
+{
+  /* ---- ① 档位：不传 tier = 沿用（真工具 + 真落盘往返）---- */
+  const tmp212 = mkdtempSync(join(tmpdir(), 'dcp-r212-'));
+  const ctMod212 = await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href);
+  const mk212 = (dir) => {
+    let sp = null;
+    const api = ctMod212.createCompactTool({
+      svc: (k) => (k === 'tools' ? { register: () => {} } : null),
+      tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+      pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+      state: { m3: { compactToolDiag: { calls: 0 } } }, readCfg: () => ({ enabled: true }),
+      getDefineTool: () => (x) => { sp = x; return x; }, getRangeApi: rangeStub, pluginDir: dir,
+    });
+    api.ensure();
+    return { api, spec: () => sp };
+  };
+  const X212 = mk212(tmp212);
+  const run212 = (args) => X212.spec().execute(args, { agent: { session: { id: 'sess-r212' } } });
+  await run212({ tier: '浅压', action: 'set-tier' });                                   // 显式登记 浅压24%
+  const carried = await run212({ action: 'set-tier', keepFrom: { recentUser: 1 } });    // 不传 tier
+  ok('R21.2 行为级①：**不传 tier ⇒ 沿用**已登记档位（真机实测曾被静默重置成 标准16%）',
+    X212.api.getTier('sess-r212') === 'heavy' && /档位沿用/.test(String(carried?.verify ?? '')),
+    `tier=${X212.api.getTier('sess-r212')}（期望 heavy）verify=${String(carried?.verify ?? '').slice(0, 70)}…`);
+  const Y212 = mk212(tmp212);   // 新实例 = toggle 热换 ⇒ 从落盘读
+  ok('R21.2 行为级①：沿用还要**落盘保住原档位**（真机实测落盘文件被写成 standard）',
+    Y212.api.getTier('sess-r212') === 'heavy', `restored tier=${Y212.api.getTier('sess-r212')}（期望 heavy）`);
+  const changed = await run212({ tier: '深压', action: 'set-tier' });
+  ok('R21.2 行为级①：显式传 tier 时**照常改档**（沿用 ≠ 锁死）',
+    X212.api.getTier('sess-r212') === 'light' && /档位已登记为/.test(String(changed?.verify ?? '')),
+    `tier=${X212.api.getTier('sess-r212')}（期望 light）`);
+  ok('R21.2 行为级①：**从未登记**且不传 tier ⇒ 标准16%（兜底语义不变）',
+    X212.api.getTier('sess-r212-never') === 'standard', `tier=${X212.api.getTier('sess-r212-never')}`);
+  rmSync(tmp212, { recursive: true, force: true });
+
+  /* ---- ② 锚点失败痕：必须活过「无需压缩」与「官方兜底」两条路径，并出现在回执里 ---- */
+  const m3Mod212 = await import(pathToFileURL(join(PLUGIN, 'm3.compact.mjs')).href);
+  const mk3212 = (selResult, officialImpl) => {
+    const st = { m3: {} };
+    const api = m3Mod212.createM3Compaction({
+      state: st, log: () => {}, msg: (e) => String(e?.message ?? e), pick: (...a) => a.find((x) => x != null),
+      tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+      nfmt: (n) => String(n), errCodeOf: (e) => String(e?.code ?? e?.message ?? 'err'), schedule: () => {},
+      svc: () => null, M3: {}, effEnabled: () => true, criticalCapOf: () => 0.8,
+      resolveCompactionFor: () => ({ service: { compactIfNeeded: officialImpl ?? (async () => ({ shadowedTokenCount: 5 })), compactRegion: async () => ({ shadowedTokenCount: 5 }) }, via: 'stub' }),
+      publishHud: () => {}, recordHudAct: () => {}, formatAct: () => 'x', clearBriefed: () => {},
+      awaitRange: async () => ({
+        selectRange: () => selResult, isEndBoundaryError: () => false, prevEnd: () => null, MAX_WALK_BACK: 64,
+        RETAIN_RATIO: 0.16, retainBudgetTokens: () => 160000,
+      }),
+      getCompactTool: () => null, COMPACT_TIMEOUT_MS: 180000, SET_CAP: 200,
+      markOwnCompaction: () => {}, clearOwnCompaction: () => {},
+    });
+    return { api, st };
+  };
+  const ctx212 = (extra) => ({
+    forced: false, sig: 'sig-212', sid: 'sess-r212', window: 1000000,
+    measure: { ok: true, nodes: [], tokens: 0 }, tierName: 'standard',
+    retainOverride: null, anchorSeq: null, anchorFailReason: 'text:not-found', ...extra,
+  });
+  const P212 = mk3212({ ok: false, why: 'nothing-to-compact', firstIdx: 1, retainedTokens: 1234 });
+  const outNoNeed = await P212.api.compactWithOwnRange({ session: { surface: { nodes: [] } } }, { service: { compactIfNeeded: async () => null } }, ctx212());
+  ok('R21.2 行为级②：「无需压缩」提前 return 必须带 **retainSource + 锚点失败原因**（真机实测两者都丢）',
+    outNoNeed?.source === 'none' && outNoNeed?.retainSource === 'tier' && outNoNeed?.anchorFailReason === 'text:not-found',
+    `实际 ${JSON.stringify(outNoNeed)}`);
+  const P212b = mk3212({ ok: false, why: 'boundary-exhausted', firstIdx: 1 });
+  const outOfficial = await P212b.api.compactWithOwnRange({ session: { surface: { nodes: [] } } }, { service: { compactIfNeeded: async () => ({ shadowedTokenCount: 7 }) } }, ctx212({ retainedTokens: undefined }));
+  ok('R21.2 行为级②：**官方兜底**路径同样必须带 retainSource + 锚点失败原因',
+    outOfficial?.source === 'official' && outOfficial?.retainSource === 'tier' && outOfficial?.anchorFailReason === 'text:not-found',
+    `实际 ${JSON.stringify(outOfficial)}`);
+  /* 端到端（m3 产物 → m2 回执）：把 m3 真实返回的字段按 preStep 的写法拼成 verify，回执必须出现降级句。 */
+  const verify212 = {
+    at: new Date().toISOString(), sessionId: 'selfcheck-1', state: 'no-need', tier: outNoNeed.tier ?? 'standard',
+    retainBudget: outNoNeed.retainBudget, retainSource: outNoNeed.retainSource, anchorFailReason: outNoNeed.anchorFailReason,
+    rangeSource: 'none', skipWhy: outNoNeed.skipWhy, ms: 0,
+  };
+  const m2out = await mkM2({ m2: { skips: {}, injections: 0 }, m3: {} }, undefined, stubVerify(verify212))
+    .buildInjection({ agent, step: 1, turn: 1 });
+  ok('R21.2 端到端：锚点未命中 + 判定无需压缩 ⇒ 回执**必须**出现「锚点未命中（text:not-found）⇒ 已按档位兜底」',
+    /锚点未命中（text:not-found）⇒ 已按档位兜底/.test(m2out?.text ?? '') && /已执行但判定无需压缩/.test(m2out?.text ?? ''),
+    `实际：${String(m2out?.text ?? '').slice(0, 160)}`);
 }
 
 /* ═══════════ 汇总 ═══════════ */

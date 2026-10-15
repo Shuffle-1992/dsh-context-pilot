@@ -327,8 +327,15 @@ export function createCompactTool(deps) {
        *   · 'compact'（默认）——登记意图并压缩（原行为，向后兼容）；
        *   · 'set-tier'——**只登记档位，不登记压缩意图**（不压、不丢近端、零缓存成本）。 */
       const action = args?.action === 'set-tier' ? 'set-tier' : 'compact';
-      /* R16：档位是**会话级持久偏好**（智能压缩线与强制线都读它）；未选/非法 ⇒ standard 兜底。 */
-      const { tier, fallback, via } = normTier(args?.tier);
+      /* R16：档位是**会话级持久偏好**（智能压缩线与强制线都读它）；未选/非法 ⇒ standard 兜底。
+       * ⚠️ R21.2（2026-10-15 真机事故）：**「未选」必须与「非法」分开**——
+       * 旧实现把 `args.tier == null` 也丢进 normTier ⇒ 返回 standard ⇒ **每次只传 keepFrom 的调用
+       * 都会把会话档位重置成标准16%**（真机实测：落盘文件里 heavy → standard，静默发生，
+       * 而卡片上明明写着「不传 tier = 沿用已登记档位（不是重置）」）。 */
+      const tierGiven = args?.tier != null && String(args.tier).trim() !== '';
+      const { tier, fallback, via } = tierGiven
+        ? normTier(args.tier)
+        : { tier: getTier(sid), fallback: false, via: 'carry' };
       /* R21：语义锚点（可选）。缺省 ⇒ 清除旧锚点（"忘记重申"退化为按档位 = 安全方向）。 */
       const anchorNorm = normAnchor(args?.keepFrom);
       setTier(sid, tier, anchorNorm.anchor);
@@ -379,7 +386,7 @@ export function createCompactTool(deps) {
           ok: true,
           action: 'set-tier',
           tier,
-          verify: `档位已登记为「${textOf(tier)}」（保留窗口 × ${pctNow}%）${anchorNote}——**本次不压缩**。`
+          verify: `${via === 'carry' ? `档位沿用「${textOf(tier)}」` : `档位已登记为「${textOf(tier)}」`}（保留窗口 × ${pctNow}%）${anchorNote}——**本次不压缩**。`
             + '该档位此后对本会话的压缩（包括系统在强制线代替你执行的那次）持续生效，直到再次改选。'
             + '想在低占用时提前锁定档位，就用这条路径（零压缩成本）。',
         };
@@ -389,7 +396,7 @@ export function createCompactTool(deps) {
         action: 'compact',
         scheduled: 'next-step',
         tier,
-        verify: `已登记，档位「${textOf(tier)}」（保留窗口 × ${pctNow}%）${anchorNote}——该档位此后对本会话的压缩（含强制线）持续生效，直到再次改选。下一步开头会有一条「压缩自检」回执；若显示「未执行」，请再调用一次 compact_context，或直接告知用户。`,
+        verify: `已登记，${via === 'carry' ? `档位沿用「${textOf(tier)}」` : `档位「${textOf(tier)}」`}（保留窗口 × ${pctNow}%）${anchorNote}——该档位此后对本会话的压缩（含强制线）持续生效，直到再次改选。下一步开头会有一条「压缩自检」回执；若显示「未执行」，请再调用一次 compact_context，或直接告知用户。`,
       };
     } catch (e) {
       log('warn', `智能压缩 工具执行异常（吞）：${msg(e)}`);
