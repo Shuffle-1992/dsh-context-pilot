@@ -1643,7 +1643,9 @@ ok('懒安装不受 step 门控约束（先于注入调用）',
     const g = host.indexOf('await m2Ctl.buildInjection(payload);');
     /* R12：`step !== 1` 早退已随注入主体搬进 m2.inject.mjs ⇒ 宿主判据改为
      * 「懒安装必须早于注入调用」，模块侧另行钉住「非 step1 不注入」。 */
-    return s > 0 && g > 0 && s < g && /if \(step !== 1\) \{[\s\S]{0,900}?return \{ skip: 'not-step-1' \};/.test(m2src);
+    /* R30：`step !== 1` 分支里多了「反重复备注」子分支（本轮发过卡时在中步投一条短备注），
+     * 早退距离开口变远 ⇒ 窗口从 900 放宽到 2600（判据本身不变：**非 step1 仍必须早退**）。 */
+    return s > 0 && g > 0 && s < g && /if \(step !== 1\) \{[\s\S]{0,2600}?return \{ skip: 'not-step-1' \};/.test(m2src);
   })(),
   '懒安装仍在 step!==1 早退之后 ⇒ 首步即调工具时钩子永不安装');
 ok('注入分支内不再有任何 effort 安装/注册调用（耦合已断）',
@@ -3645,6 +3647,45 @@ console.log('\n== 6.34 R29：压缩后投影标注 + 手动压缩不误报「引
     /手动压缩（\/compact）/.test(tManual ?? '') && !/引擎抢先/.test(tManual ?? '')
     && /引擎自动压缩/.test(tAuto ?? '') && /引擎抢先：我方上次估计 33\.4% ＜ 我方线 75%/.test(tAuto ?? ''),
     `手动：${JSON.stringify(tManual)}｜自动：${JSON.stringify(tAuto)}`);
+}
+
+/* ═══════════ 6.35 R30：反重复备注（中步、仅在"本轮发过卡"且到点） ═══════════
+ * 真机取证（session-54597a24 会话日志，97 轮 / 3032 步）：插件注入 **108 次 / 97 轮**（卡确实只在轮首
+ * 一次），而模型写的决策行 t86 2 条 → t92 **25 条** → t95 **27 条** ⇒ **自我强化模式**，纯文案压不住。
+ * 本节钉住：① 只有"本轮发过卡"才投备注（没卡就没这要求，别乱提醒）；② 频率有界（step 2 起每 3 步）；
+ * ③ 回执优先（同一轮里若还有待读回执，先送回执）；④ 计数可观测。 */
+console.log('\n== 6.35 R30：反重复备注 ==');
+{
+  const mk30 = (ratio, st) => mkM2(st, () => ({ ok: true, used: Math.round(ratio * 1000000), total: 0, surface: 0, window: 1000000, ratio, basis: '下一请求预估', measure: {} }),
+    undefined, undefined, {
+      tierText: () => '浅压24%', renderBrief: () => 'stub', getTier: () => 'heavy', hasTier: () => true,
+      /* 桩必须**照真实现的闸门**：低于智能压缩线（minRatio）不返回卡——
+       * 真闸门在 compact-tool.renderCard 里（`ratio < minRatio ⇒ null`），桩若恒返回字符串就测不出"无卡"。 */
+      renderCard: ({ ratio: r, minRatio } = {}) => (Number.isFinite(r) && Number.isFinite(minRatio) && r < minRatio ? null : '压缩决策卡（stub）'),
+    });
+  const st30 = { m2: { skips: {}, injections: 0 }, m3: { policyCards: 0 } };
+  const api30 = mk30(0.59, st30);
+  const s1 = await api30.buildInjection({ agent, step: 1, turn: 5 });
+  const s2 = await api30.buildInjection({ agent, step: 2, turn: 5 });
+  const s3 = await api30.buildInjection({ agent, step: 3, turn: 5 });
+  const s5 = await api30.buildInjection({ agent, step: 5, turn: 5 });
+  const s2t6 = await api30.buildInjection({ agent, step: 2, turn: 6 });
+  ok('R30 行为级：本轮发过卡后，step 2 投「只需写一次」备注；step 3 不投（每 3 步一次）；step 5 再投',
+    s1?.card === true && /本轮决策行\*\*只需写一次\*\*/.test(s2?.text ?? '') && s2?.repeatNudge === true
+    && s3?.skip === 'not-step-1' && /只需写一次/.test(s5?.text ?? ''),
+    `step1.card=${s1?.card}｜step2=${JSON.stringify(String(s2?.text ?? '').slice(0, 40))}｜step3.skip=${s3?.skip}｜step5=${JSON.stringify(String(s5?.text ?? '').slice(0, 30))}`);
+  ok('R30 行为级：**新的一轮还没发卡**时 step 2 不投备注（没卡 = 没"落一行"的要求，别乱提醒）',
+    s2t6?.skip === 'not-step-1',
+    `实际 ${JSON.stringify(s2t6)}`);
+  const api30b = mk30(0.2, { m2: { skips: {}, injections: 0 }, m3: { policyCards: 0 } });   // 低于智能压缩线 ⇒ 不发卡
+  const b1 = await api30b.buildInjection({ agent, step: 1, turn: 9 });
+  const b2 = await api30b.buildInjection({ agent, step: 2, turn: 9 });
+  ok('R30 行为级：占用低于压缩线（无卡）⇒ 任何 step 都不投备注',
+    b1?.card === false && b2?.skip === 'not-step-1',
+    `实际 card=${b1?.card} step2=${JSON.stringify(b2)}`);
+  ok('R30 可观测：备注次数单独计数（事后可核对"投了几条"）',
+    st30.m2.repeatNudges === 2,
+    `实际 repeatNudges=${JSON.stringify(st30.m2.repeatNudges)}（应为 2：step2 与 step5 各一条）`);
 }
 
 /* ═══════════ 汇总 ═══════════ */

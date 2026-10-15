@@ -64,6 +64,32 @@ export function createM2Injection(deps) {
   /* measure 失败只报一次/会话（原先每次都 log，实测刷屏） */
   const measuredFailedOnce = new Set();
 
+  /* ═══════ R30（2026-10-15 真机取证）：决策行"每步重复"是**模型模式**，不是卡每步注入 ═══════
+   * 会话日志实测（session-54597a24，97 轮 / 3032 步）：插件注入 **108 次 / 97 轮**（≈1.1 次/轮，
+   * 卡确实只在轮首一次）；而模型写的决策行是 t86 2 条 → t92 **25 条** → t95 **27 条**（每轮 49-51 步），
+   * 即**随会话自我强化**。纯文案（R27 的「一轮只写一次」）压不住这种模式 ⇒ 在**重复发生的位置**
+   * （中步）放一条极短的系统备注。安全性沿用 R15.4：中步插入时上一步的 tool/result 已在 surface 里，
+   * 不会拆散 tool_use / tool_result。频率：step 2 起每 REPEAT_NUDGE_EVERY 步一次（不每步刷屏）。 */
+  const REPEAT_NUDGE_EVERY = 3;
+  const REPEAT_NUDGE_TEXT = '（系统备注：本轮决策行**只需写一次**——后续步骤不必重复贴；'
+    + '仅在真的改变决定（决定压缩 / 升或降档）时补一行。）';
+  /** sid → 本轮是否发过卡（有卡才有"落一行决策"的要求；有界化防长期累积）。 */
+  const cardTurnBySid = new Map();
+  const noteCardTurn = (sid, turn) => {
+    try {
+      cardTurnBySid.set(sid, turn);
+      while (cardTurnBySid.size > 64) cardTurnBySid.delete(cardTurnBySid.keys().next().value);
+    } catch { /* 吞 */ }
+  };
+  const repeatNudge = (sid, turn, step) => {
+    try {
+      if (!Number.isFinite(step) || step < 2) return null;
+      if (cardTurnBySid.get(sid) !== turn) return null;   // 本轮没发卡 ⇒ 没这个要求，别乱提醒
+      if ((step - 2) % REPEAT_NUDGE_EVERY !== 0) return null;
+      return REPEAT_NUDGE_TEXT;
+    } catch { return null; }
+  };
+
   /** 组装注入文本（纯信息，无行为指令）。 */
   const renderUsageText = (session) => {
     const mr = measureRatio(session); // B2：读取收敛
@@ -293,7 +319,22 @@ export function createM2Injection(deps) {
           }
         } catch { /* 判据不可用 ⇒ 保守允许提及（宁多一句话，也不误删教学） */ }
         const receiptMid = renderCompactReceipt(takeCompactReceipt(sidEarly), allowMid);
-        if (!receiptMid) return { skip: 'not-step-1' };
+        /* R30：回执优先；没有回执时，若本轮发过卡、且到了重复高发位置 ⇒ 投一条极短的反重复备注。 */
+        if (!receiptMid) {
+          const nudgeMid = repeatNudge(sidEarly, turn, step);
+          if (!nudgeMid) return { skip: 'not-step-1' };
+          const msgNudge = getCreateUserMessage()({
+            content: [{ type: 'text', text: nudgeMid }],
+            source: { kind: SOURCE_KIND, form: 'snapshot', sections: [{ name: SOURCE_KIND, text: nudgeMid }] },
+          });
+          state.m2.injections += 1;
+          state.m2.repeatNudges = (state.m2.repeatNudges ?? 0) + 1;
+          state.m2.lastText = nudgeMid;
+          state.m2.lastAt = new Date().toISOString();
+          log('info', `M2 反重复备注（轮 ${turn} 步 ${step}）：本轮已发卡且模型习惯每步贴决策行`);
+          schedule('m2-inject', 500);
+          return { message: msgNudge, text: nudgeMid, card: false, midStep: true, repeatNudge: true };
+        }
         const msgMid = getCreateUserMessage()({
           content: [{ type: 'text', text: receiptMid }],
           source: { kind: SOURCE_KIND, form: 'snapshot', sections: [{ name: SOURCE_KIND, text: receiptMid }] },
@@ -387,7 +428,7 @@ export function createM2Injection(deps) {
         source: { kind: SOURCE_KIND, form: 'snapshot', sections: [{ name: SOURCE_KIND, text: fullText }] },
       });
       state.m2.injections += 1;
-      if (card) state.m3.policyCards += 1;
+      if (card) { state.m3.policyCards += 1; noteCardTurn(sid, turn); }   // R30：记住"本轮发过卡"
       state.m2.lastText = fullText;
       state.m2.lastAt = new Date().toISOString();
       log('info', `M2 注入 turn=${turn} step=${step}${card ? ' ＋政策卡' : ''}${effNudge ? ' ＋换档提示' : ''}：${r.text}`);
