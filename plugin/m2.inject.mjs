@@ -203,10 +203,17 @@ export function createM2Injection(deps) {
     try {
       if (!v) return null;
       const parts = [];
-      /* R19（2026-10-15 用户要求）：档位说法统一为中文（深压8%/标准16%/浅压24%）——回执里不再出现英文 id。 */
+      /* R19（2026-10-15 用户要求）：档位说法统一为中文（深压8%/标准16%/浅压24%）——回执里不再出现英文 id。
+       * R22：**连兜底也不许回英文 id**——工具域没加载时改问范围域；两边都拿不到就**不显示档位段**
+       * （真机审计发现旧写法 `?? v.tier` 会在异常路径把 `heavy` 这类 id 送进模型可见文本）。 */
       if (v.tier) {
-        const tApi = getCompactToolApi?.() ?? null;
-        parts.push(`${tApi?.tierText?.(v.tier) ?? v.tier} 档`);
+        const label = (() => {
+          try {
+            return getCompactToolApi?.()?.tierText?.(v.tier)
+              ?? getRangeApi?.()?.tierText?.(v.tier) ?? null;
+          } catch { return null; }
+        })();
+        if (label) parts.push(`${label} 档`);
       }
       if (Number.isFinite(v.retainBudget) && v.retainBudget > 0) parts.push(`保留 ~${Math.round(v.retainBudget / 1000)}k`);
       /* R21：语义锚点的**实际结果必须在回执里可见**——否则模型以为锚点生效了、其实已退回档位

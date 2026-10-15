@@ -262,10 +262,18 @@ export function createCompactTool(deps) {
    * 展示文本全部由 compact-range.mjs 推导（叶子模块是唯一真相），此处只做**取用 + 兜底**。
    * 兜底只在模块未就绪时生效（宁可显示旧口径，也不让工具/卡片渲染失败）。 */
   const rangeApi = () => { try { return getRangeApi?.() ?? null; } catch { return null; } };
-  const labelOf = (t) => { try { return rangeApi()?.tierLabel?.(t) ?? String(t ?? ''); } catch { return String(t ?? ''); } };
+  /* R22（用户要求：行动/回执一律中文档位名）：范围域未加载时的**静态兜底**。
+   * ⚠️ 与 compact-range 的 `TIER_LABELS`/`TIERS` 是**两份真值** ⇒ contract 有一条「单源守卫」断言
+   * 逐项钉死二者相等（改一处漏一处当场红）。旧兜底是 `String(t)` ⇒ 异常路径会把 `standard16%`
+   * 这种"英文 id + 百分比"混进模型可见文本（真机审计抓到过）。 */
+  const TIER_FALLBACK = { light: { label: '深压', pct: 8 }, standard: { label: '标准', pct: 16 }, heavy: { label: '浅压', pct: 24 } };
+  const labelOf = (t) => {
+    try { return rangeApi()?.tierLabel?.(t) ?? TIER_FALLBACK[t]?.label ?? '档位'; }
+    catch { return TIER_FALLBACK[t]?.label ?? '档位'; }
+  };
   const pctOf = (t) => {
     try { const p = rangeApi()?.tierPct?.(t); if (Number.isFinite(p)) return p; } catch { /* 吞 */ }
-    return t === 'light' ? 8 : t === 'heavy' ? 24 : 16;
+    return TIER_FALLBACK[t]?.pct ?? 16;
   };
   const textOf = (t) => { try { return rangeApi()?.tierText?.(t) ?? `${labelOf(t)}${pctOf(t)}%`; } catch { return `${labelOf(t)}${pctOf(t)}%`; } };
   /* ═══ R21：语义锚点（A: recentUser 1..3 / B: text 片段）═══
@@ -385,7 +393,9 @@ export function createCompactTool(deps) {
         return {
           ok: true,
           action: 'set-tier',
-          tier,
+          /* R22（用户要求：行动/回执一律中文）：返回值也必须是**中文标签**——工具结果是模型直接读到的东西，
+           * 回英文 id 等于给模型"复述英文"的原料（真机审计发现过 `{"tier":"heavy"}`）。 */
+          tier: textOf(tier),
           verify: `${via === 'carry' ? `档位沿用「${textOf(tier)}」` : `档位已登记为「${textOf(tier)}」`}（保留窗口 × ${pctNow}%）${anchorNote}——**本次不压缩**。`
             + '该档位此后对本会话的压缩（包括系统在强制线代替你执行的那次）持续生效，直到再次改选。'
             + '想在低占用时提前锁定档位，就用这条路径（零压缩成本）。',
@@ -395,7 +405,7 @@ export function createCompactTool(deps) {
         ok: true,
         action: 'compact',
         scheduled: 'next-step',
-        tier,
+        tier: textOf(tier),
         verify: `已登记，${via === 'carry' ? `档位沿用「${textOf(tier)}」` : `档位「${textOf(tier)}」`}（保留窗口 × ${pctNow}%）${anchorNote}——该档位此后对本会话的压缩（含强制线）持续生效，直到再次改选。下一步开头会有一条「压缩自检」回执；若显示「未执行」，请再调用一次 compact_context，或直接告知用户。`,
       };
     } catch (e) {
@@ -455,7 +465,7 @@ export function createCompactTool(deps) {
           + `**${textOf('light')}**=保留窗口 × ${pctOf('light')}%（1M 窗口 ≈ ${kfmt(Math.round(1e6 * pctOf('light') / 100))}）——全新子任务/要预留大量空间；`
           + `**${textOf('standard')}**=× ${pctOf('standard')}%（≈${kfmt(Math.round(1e6 * pctOf('standard') / 100))}）——默认；`
           + `**${textOf('heavy')}**=× ${pctOf('heavy')}%（≈${kfmt(Math.round(1e6 * pctOf('heavy') / 100))}）——接下来仍要频繁引用近端一大段。`
-          + `**登记方式**：调 ${TOOL_NAME} 时带 \`tier\`（传中文「深压/标准/浅压」或英文 ${tierNames().join('/')} 均可）；**只想提前锁定档位、现在不压** ⇒ 加 \`action:'set-tier'\`（零压缩成本）。`
+          + `**登记方式**：调 ${TOOL_NAME} 时带 \`tier\`（**用中文档位名**，「浅压24%」这种完整写法也认）；**只想提前锁定档位、现在不压** ⇒ 加 \`action:'set-tier'\`（零压缩成本）。`
           + `**不传 tier = 沿用已登记档位；从未登记过才按 ${textOf('standard')}**（不是重置）。`,
         /* R21：把「语义锚点」教出去**必须与档位同段**——它是同一件事的更精确形态：
          * 模型知道新旧需求的边界，插件知道 token ⇒ 分工是「模型指位置、插件算预算」。
@@ -574,7 +584,7 @@ export function createCompactTool(deps) {
         /* R16.15（评审建议 2）：决策行只在**本卡出现时**要求——卡不出现的轮次没有提醒位，
          * 那些轮次要写决策行是「事实上不可执行」的要求（评审原文）。 */
         `• **本卡出现时，先落一行决策**（把「不动」也变成可检查的产物）：在回复正文里写`
-          + `\`压缩决策：压｜占用 ${pct}｜理由…\` 或 \`压缩决策：不压｜占用 ${pct}｜理由…｜tier 保持 <档位>\`（档位名见下方）。`,
+          + `\`压缩决策：压｜占用 ${pct}｜理由…\` 或 \`压缩决策：不压｜占用 ${pct}｜理由…｜tier 保持 <档位>\`（档位名见下方；**正文一律写中文名**，如「浅压24%」）。`,
         tierNow,
         `• 不依赖（换了话题/新子任务/上一阶段已收尾），或任务繁重需要预留空间：`
           + `**先在回复正文里用一句话说明你要压缩的理由**，**再**调用 ${TOOL_NAME}（可选 reason）。`
@@ -614,15 +624,18 @@ export function createCompactTool(deps) {
        * 每请求白烧 ≈1.5–2k token，且「哪份是权威」不明。此处压缩后不再重复长策略段。 */
       description:
         '请求压缩上下文以腾出空间。'
-        /* 用户要求（2026-10-08）的「先说，再调用」——description 每请求下发，是零额外成本的提醒位。 */
-        + '**调用本工具前，先在回复正文里用一句话说明你要压缩的理由**（用户看不到工具调用的理由），然后再调用。'
+        /* 用户要求（2026-10-08）的「先说，再调用」——description 每请求下发，是零额外成本的提醒位。
+         * R22（用户要求：行动前一律中文档位名）：这里明确"档位写中文名"，否则模型会在正文里
+         * 复述工具返回值里的英文 id（真机审计发现过 `{"tier":"heavy"}` 这种形态）。 */
+        + '**调用本工具前，先在回复正文里用一句话说明你要压缩的理由**（用户看不到工具调用的理由；'
+        + '档位一律**写中文名**，如「浅压24%」），然后再调用。'
         + '压缩在**你的下一个步骤开始前**执行，本轮不中断，调用后请直接继续当前任务、不要停下等它。'
         + '参数：`action`（默认 compact=登记并压缩；**set-tier=只登记档位、本次不压缩**）、'
         + '`tier`（三选一：深压8% / 标准16% / 浅压24%，**不传 = 沿用已登记档位**）、'
         + '`keepFrom`（可选，语义锚点：从你指定的那条需求起保留，比比例更准）、`reason`。'
-        + '档位是**会话级持久选择**：登记后对本会话之后的所有压缩（含强制线那次）持续生效，直到再次改选。'
+        + '档位是**会话级持久选择**（含强制线那次）。'
         + '**策略、当前档位与本轮数据（损失/趋势）见每轮注入的压缩决策卡**——按卡上的数字判断，不要凭空预测占用。'
-        + '工具返回后会给出自检契约；下一步开头的「压缩自检」回执可确认是否真的执行了。',
+        + '工具返回后会给出自检契约。',
       parameters: {
         /* ⚠️ 可选参数必须**省略** `required`——写成 `required: false` 会被 defineTool 拒绝：
          * 实测 `unsupported JSON schema: parameters.reason.required must be true when present`
@@ -644,7 +657,7 @@ export function createCompactTool(deps) {
         tier: {
           type: 'string',
           description: '（可选）压缩档位：深压8%（只保留窗口 × 8%）/ 标准16%（默认）/ 浅压24%（保留最多）。'
-            + '传中文「深压/标准/浅压」或英文 light/standard/heavy 均可。'
+            + '**用中文档位名**（「浅压24%」这种完整写法也认）；英文 id 仅作兼容，**别写进给用户看的正文**。'
             + '选档理由写在回复正文里；档位对本会话后续所有压缩持续生效。',
         },
         /* R21：语义锚点（用户场景：600k 里含新旧两个需求，新需求只在最后 6% ⇒ 按比例选档会白留旧内容）。
@@ -682,7 +695,7 @@ export function createCompactTool(deps) {
              * （additionalProperties:false ⇒ 多一个字段就整条工具调用失败：
              * `"value.verify" is not a declared property`）⇒ 加返回字段必须同时在这里声明。 */
             action: { type: 'string', description: '本次动作：compact（登记并压缩）或 set-tier（只登记档位，不压缩）。' },
-            tier: { type: 'string', description: '本次登记并持续生效的压缩档位（深压8%/标准16%/浅压24%；内部 id 为 light/standard/heavy）。' },
+            tier: { type: 'string', description: '本次生效的压缩档位，**中文标签**（如「浅压24%」）。' },
             verify: {
               type: 'string',
               description: '自检契约：next-step 压缩会有「压缩自检」回执；显示未执行就再调用一次或告知用户。',
@@ -789,5 +802,5 @@ export function createCompactTool(deps) {
     };
   }
 
-  return { TOOL_NAME, ensure, peekIntent, takeIntent, pending, getTier, hasTier, setTier, tierState, renderBrief, renderCard, diag, tierText: (t) => textOf(t), getAnchor, normAnchor };
+  return { TOOL_NAME, ensure, peekIntent, takeIntent, pending, getTier, hasTier, setTier, tierState, renderBrief, renderCard, diag, tierText: (t) => textOf(t), getAnchor, normAnchor, TIER_DISPLAY_FALLBACK: TIER_FALLBACK };
 }

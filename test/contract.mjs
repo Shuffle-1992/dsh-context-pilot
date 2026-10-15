@@ -623,7 +623,7 @@ ok('R16.13 文案：m5 为两种「非插件压缩」提供标签（不与「强
    * 现改为：① 断言行为意图（不压 + 无意图）；② **另用结构校验器对着 output.schema 验类型**。 */
   ok('R16.14 行为级：action=set-tier 只登记档位（不产生压缩意图；scheduled 不填）',
     rSet?.ok === true && rSet?.action === 'set-tier'
-      && rSet?.tier === 'heavy' && api14.peekIntent('sess-14') === null
+      && rSet?.tier === '浅压24%' && api14.peekIntent('sess-14') === null
       && !('scheduled' in (rSet ?? {}))
       && /本次不压缩/.test(String(rSet?.verify)),
     `实际：${JSON.stringify(rSet)} intent=${JSON.stringify(api14.peekIntent('sess-14'))}`);
@@ -2020,8 +2020,8 @@ const ctFix = ctMod2.createCompactTool({
 const ctRun = async (sid, reason) => (await ctFix.ensure(), ctSpec.execute({ reason }, { agent: mkAgent(sid) }));
 const rA = await ctRun('sid-A', 'A 会话请求');
 ok('工具登记成功（行为）', rA && rA.ok === true && rA.scheduled === 'next-step', `实际 ${JSON.stringify(rA)}`);
-ok('R16 工具结果带 tier 且在 output.schema 里已声明（R15.3 同类护栏）',
-  rA.tier === 'standard' && Object.keys(ctSpec.output.schema.properties).includes('tier'),
+ok('R16/R22 工具结果带 tier（**中文标签**）且在 output.schema 里已声明（R15.3 同类护栏）',
+  rA.tier === '标准16%' && Object.keys(ctSpec.output.schema.properties).includes('tier'),
   `实际 tier=${JSON.stringify(rA?.tier)}；未声明 ⇒ 宿主按 schema 拒掉整条调用（R15.3 同款事故）`);
 ok('R16 工具入参 schema 声明 tier（可选，枚举内文案），且**不在 required**（R7 教训）',
   Object.keys(ctSpec.parameters).includes('tier') && !String(ctSpec.parameters.tier).includes('required'),
@@ -2816,12 +2816,36 @@ console.log('\n== 6.24 R19：档位说法改中文（深压8%/标准16%/浅压24
   ok('R19 静态：展示面不再以英文为主（无 `**light**`、无 `light=深压`）',
     !/\*\*light\*\*/.test(ct) && !/light=深压/.test(ct) && !/`light` 深压/.test(ct),
     '仍以英文 id 作主展示 ⇒ 与用户要的说法不一致');
-  ok('R19 静态：工具 schema 展示中文，且保留「可传值」说明（否则模型不知道传什么）',
-    /深压8%/.test(ct) && /浅压24%/.test(ct) && /light\/standard\/heavy/.test(ct),
-    '要么丢掉可传值说明，要么仍以英文为主');
-  ok('R19 静态：压缩回执用共享格式化器（不再拼英文 id）',
-    /tApi\?\.tierText\?\.\(v\.tier\)/.test(m2src),
-    '回执仍出现 heavy 这类内部 id ⇒ 与教学口径不一致');
+  /* R22（用户要求：行动/回执一律中文档位名）：schema 里**以中文档位名为准**，
+   * 英文 id 只允许作为「兼容入参」被提及，不再作为对外返回值或展示标签。 */
+  ok('R22 静态：工具 schema 以**中文档位名**为准，英文 id 仅作兼容被提及',
+    /深压8%/.test(ct) && /浅压24%/.test(ct) && /用中文档位名/.test(ct) && /英文 id 仅作兼容/.test(ct)
+    && !/本次登记并持续生效的压缩档位（深压8%\/标准16%\/浅压24%；内部 id/.test(ct),
+    '要么丢掉可传值说明，要么仍以英文 id 作为对外返回值');
+  ok('R22 静态：压缩回执的档位标签只从中文格式化器取，**任何路径都不回退英文 id**',
+    /getCompactToolApi\?\.\(\)\?\.tierText\?\.\(v\.tier\)/.test(stripComments(m2src))
+    && /getRangeApi\?\.\(\)\?\.tierText\?\.\(v\.tier\)/.test(stripComments(m2src))
+    && !/\?\? v\.tier\b/.test(stripComments(m2src)),
+    '异常路径回退 v.tier ⇒ 模型可见文本里冒出 heavy 这类 id');
+  /* R22「单源守卫」：compact-tool 的静态兜底与 compact-range 的真值必须逐项相等
+   * （两份真值只有在被钉死相等时才允许存在；改一处漏一处当场红）。 */
+  {
+    const ctMod22 = await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href);
+    const rMod22 = await import(pathToFileURL(join(PLUGIN, 'compact-range.mjs')).href);
+    const api22 = ctMod22.createCompactTool({
+      svc: (k) => (k === 'tools' ? { register: () => {} } : null),
+      tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+      pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+      state: { m3: { compactToolDiag: { calls: 0 } } }, readCfg: () => ({ enabled: true }),
+      getDefineTool: () => (x) => x, getRangeApi: rangeStub,
+    });
+    const fb = api22.TIER_DISPLAY_FALLBACK ?? {};
+    const bad = rMod22.TIER_NAMES.filter((t) => fb[t]?.label !== rMod22.TIER_LABELS[t]
+      || fb[t]?.pct !== Math.round(rMod22.TIERS[t] * 100));
+    ok('R22 单源守卫：compact-tool 的展示兜底与 compact-range 的标签/比例**逐项相等**',
+      rMod22.TIER_NAMES.every((t) => fb[t]) && bad.length === 0,
+      `不一致：${JSON.stringify(bad.map((t) => `${t}: fallback=${JSON.stringify(fb[t])} 真值=${rMod22.TIER_LABELS[t]}/${Math.round(rMod22.TIERS[t] * 100)}%`))}`);
+  }
 
   /* 行为级：真跑 compact-tool，并注入**真实 range 模块**（= 生产同款接线） */
   const ctMod19 = await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href);
@@ -2851,13 +2875,14 @@ console.log('\n== 6.24 R19：档位说法改中文（深压8%/标准16%/浅压24
   const vAlias = await run19({ tier: '浅压', action: 'set-tier' });
   const vId = await run19({ tier: 'heavy', action: 'set-tier' });
   const vBad = await run19({ tier: 'nope', action: 'set-tier' });
-  ok('R19 行为级：`tier` 中英都能传（「浅压」→ 内部 id heavy；非法值兜底标准16%）',
-    vAlias?.tier === 'heavy' && /浅压24%/.test(vAlias?.verify ?? '') && vId?.tier === 'heavy'
-    && vBad?.tier === 'standard' && /标准16%/.test(vBad?.verify ?? ''),
+  ok('R22 行为级：`tier` 中英都能传（含卡片上的完整写法「浅压24%」）；对外回**中文标签**',
+    vAlias?.tier === '浅压24%' && /浅压24%/.test(vAlias?.verify ?? '') && vId?.tier === '浅压24%'
+    && vBad?.tier === '标准16%' && /标准16%/.test(vBad?.verify ?? ''),
     `alias=${vAlias?.tier} id=${vId?.tier} bad=${vBad?.tier}`);
-  ok('R19 行为级：对外仍回内部 id（改说法不破坏持久化与老会话兼容）',
-    vAlias?.tier === 'heavy' && vId?.tier === 'heavy',
-    '中文入参被原样落盘 ⇒ 老会话/持久化不兼容');
+  ok('R22 行为级：**对外一律中文标签，内部与持久化仍是 id**（改说法不破坏老会话兼容）',
+    vAlias?.tier === '浅压24%' && vId?.tier === '浅压24%' && !/[A-Za-z]/.test(String(vAlias?.tier))
+    && api19.tierText('heavy') === '浅压24%' && api19.getTier('sess-r19-never') === 'standard',
+    `out=${vAlias?.tier}（不得含英文字母）；内部 id 仍为 heavy/standard/light`);
 }
 
 /* ═══════════ 6.25 R20：卡片对称化 + 越线反向建议 ═══════════
@@ -3140,6 +3165,87 @@ console.log('\n== 6.28 R21.2：档位沿用 + 锚点失败痕（真机缺陷回�
   ok('R21.2 端到端：锚点未命中 + 判定无需压缩 ⇒ 回执**必须**出现「锚点未命中（text:not-found）⇒ 已按档位兜底」',
     /锚点未命中（text:not-found）⇒ 已按档位兜底/.test(m2out?.text ?? '') && /已执行但判定无需压缩/.test(m2out?.text ?? ''),
     `实际：${String(m2out?.text ?? '').slice(0, 160)}`);
+}
+
+/* ═══════════ 6.29 R22：档位说法全中文——**模型可见面英文 id 清零**（用户要求的机器化表达） ═══════════
+ * 用户原话：「模式行动前，不会再说 heavy 或 standard 等英文吧？而且前面修改的中文深压8% 或 标准16% 等」。
+ * 审计发现三条泄漏路径（都不是教学/卡片，而是**运行期产物**）：① 工具返回值 `{"tier":"heavy"}`；
+ * ② m2 回执的 `?? v.tier` 兜底；③ m3 HUD 行的 `?? 'standard'`。另有一个隐患：`canonicalTier` 不认
+ * 卡片上的完整写法「浅压24%」⇒ 模型照卡片回填会 unknown ⇒ **静默退回标准16%**。
+ * 本段把「模型可见文本里不得出现英文档位 id」变成可执行断言（逐段文本扫描，不是源码正则）。 */
+console.log('\n== 6.29 R22：档位说法全中文（模型可见面英文 id 清零）==');
+{
+  const ENG = /(^|[^A-Za-z])(light|standard|heavy)([^A-Za-z]|$)/;
+  const rMod29 = await import(pathToFileURL(join(PLUGIN, 'compact-range.mjs')).href);
+  ok('R22 纯函数：`canonicalTier` 接受卡片上的**完整中文写法**（「浅压24%」「深压8%」「标准16%」）',
+    rMod29.canonicalTier('浅压24%').tier === 'heavy' && rMod29.canonicalTier('浅压24%').known === true
+    && rMod29.canonicalTier('深压8%').tier === 'light' && rMod29.canonicalTier('标准16%').tier === 'standard',
+    `实际 ${JSON.stringify(['浅压24%', '深压8%', '标准16%'].map((x) => rMod29.canonicalTier(x)))}`
+    + ' —— 不认 ⇒ 模型照卡片回填会被当成 unknown，静默退回标准16%');
+
+  const tmp29 = mkdtempSync(join(tmpdir(), 'dcp-r22-'));
+  const ctMod29 = await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href);
+  let spec29 = null;
+  const api29 = ctMod29.createCompactTool({
+    svc: (k) => (k === 'tools' ? { register: () => {} } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { compactToolDiag: { calls: 0 } } }, readCfg: () => ({ enabled: true }),
+    getDefineTool: () => (x) => { spec29 = x; return x; }, getRangeApi: rangeStub, pluginDir: tmp29,
+  });
+  api29.ensure();
+  const run29 = (args, sid = 'sess-r22') => spec29.execute(args, { agent: { session: { id: sid } } });
+  const texts = [
+    ['工具 description', String(spec29.description ?? '')],
+    ['参数 tier 说明', String(spec29.parameters?.tier?.description ?? '')],
+    ['参数 keepFrom 说明', String(spec29.parameters?.keepFrom?.description ?? '')],
+    ['一次性教学 brief', api29.renderBrief({ criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000 }) ?? ''],
+    ['卡片·未登记', api29.renderCard({ ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, tierName: 'standard', tierDeclared: false, tierState: 'none', usedTokens: 500000, deltaTokens: 50000, turnsToLine: 5 }) ?? ''],
+    ['卡片·已登记+落盘恢复', api29.renderCard({ ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, tierName: 'heavy', tierDeclared: true, tierState: 'restored', usedTokens: 500000, deltaTokens: 10000, turnsToLine: 20 }) ?? ''],
+    ['卡片·越线', api29.renderCard({ ratio: 0.78, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, tierName: 'heavy', tierDeclared: true, tierState: 'declared' }) ?? ''],
+  ];
+  for (const [name, args] of [
+    ['回执·set-tier 显式', { action: 'set-tier', tier: '浅压' }],
+    ['回执·set-tier 沿用', { action: 'set-tier', keepFrom: { recentUser: 1 } }],
+    ['回执·compact', { reason: 'x', keepFrom: { text: '测试文本' } }],
+    ['回执·非法档位兜底', { action: 'set-tier', tier: 'nope' }],
+    ['回执·非法锚点', { action: 'set-tier', tier: '深压', keepFrom: { recentUser: 9 } }],
+  ]) {
+    const r = await run29(args);
+    texts.push([name, `${r?.verify ?? ''}｜tier=${r?.tier ?? ''}`]);
+  }
+  const leaks = texts.filter(([, t]) => ENG.test(t)).map(([n, t]) => `${n}→${String(t.match(ENG)?.[0]).trim()}`);
+  ok('R22 行为级：**模型可见的每一段文本**（description / 两个参数说明 / brief / 三种卡片 / 五种回执）都不含英文档位 id',
+    leaks.length === 0, `泄漏 ${leaks.length} 处：${JSON.stringify(leaks).slice(0, 300)}`);
+  /* 兜底路径：**范围域未加载**时也要保持中文（旧 `labelOf` 兜底是 `String(t)` ⇒ 会吐 `standard16%`，
+   * 这正是真机审计抓到的形态）。 */
+  const api29b = ctMod29.createCompactTool({
+    svc: (k) => (k === 'tools' ? { register: () => {} } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { compactToolDiag: { calls: 0 } } }, readCfg: () => ({ enabled: true }),
+    getDefineTool: () => (x) => x, getRangeApi: () => ({}),
+  });
+  api29b.ensure();
+  const degraded = [
+    ['brief（兜底路径）', api29b.renderBrief({ criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000 }) ?? ''],
+    ['card（兜底路径）', api29b.renderCard({ ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, tierName: 'heavy', tierDeclared: true, tierState: 'restored' }) ?? ''],
+  ];
+  const degLeaks = degraded.filter(([, t]) => ENG.test(t)).map(([n, t]) => `${n}→${String(t.match(ENG)?.[0]).trim()}`);
+  ok('R22 行为级：**范围域未加载**时 brief/card 仍不含英文 id（旧兜底会吐 `standard16%` 这类混合形态）',
+    degLeaks.length === 0, `泄漏 ${degLeaks.length} 处：${JSON.stringify(degLeaks).slice(0, 200)}`);
+  const rTier = await run29({ action: 'set-tier', tier: '浅压' });
+  ok('R22 行为级：工具返回值 `tier` 是**中文标签**（真机审计曾见 `{"tier":"heavy"}`）',
+    rTier?.tier === '浅压24%' && !/[A-Za-z]/.test(String(rTier?.tier)), `实际 ${JSON.stringify(rTier?.tier)}`);
+  rmSync(tmp29, { recursive: true, force: true });
+
+  /* 回执兜底：工具域缺失时**不许回退英文 id**（旧写法 `?? v.tier` 会把 heavy 送进模型可见文本）。 */
+  const vHeavy29 = { at: new Date().toISOString(), sessionId: 'selfcheck-1', state: 'executed', tier: 'heavy', retainBudget: 240000, shadowedTokens: 1000, rangeSource: 'own', ms: 5 };
+  const noApi29 = await mkM2({ m2: { skips: {}, injections: 0 }, m3: {} }, undefined, stubVerify(vHeavy29))
+    .buildInjection({ agent, step: 1, turn: 1 });
+  ok('R22 端到端：工具域缺失时回执不出现英文 id（退而问范围域 / 都拿不到就不显示档位段）',
+    /【压缩自检】/.test(noApi29?.text ?? '') && !ENG.test(noApi29?.text ?? ''),
+    `实际：${String(noApi29?.text ?? '').slice(0, 140)}`);
 }
 
 /* ═══════════ 汇总 ═══════════ */

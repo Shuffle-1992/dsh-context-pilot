@@ -97,8 +97,15 @@ const TIER_ALIASES = { 深压: 'light', 标准: 'standard', 浅压: 'heavy' };
 export function canonicalTier(input) {
   const raw = typeof input === 'string' ? input.trim() : '';
   if (Object.prototype.hasOwnProperty.call(TIERS, raw)) return { tier: raw, via: 'id', known: true };
-  const mapped = TIER_ALIASES[raw];
-  if (mapped) return { tier: mapped, via: 'alias', known: true };
+  const exact = TIER_ALIASES[raw];
+  if (exact) return { tier: exact, via: 'alias', known: true };
+  /* R22（用户要求：行动/回执一律中文档位名）：卡片、回执、工具返回值用的都是**带百分比的完整说法**
+   * （「深压8%」「标准16%」「浅压24%」）⇒ 模型极可能原样回填 `tier`。只支持两字词干会让这种回填
+   * 落到 `known:false` ⇒ **静默退回 standard**（最坏形态：模型以为选了浅压24%，实际按标准16% 压）。
+   * 故补一条**前缀匹配**：以中文档位词开头即视为该档。 */
+  for (const [label, id] of Object.entries(TIER_ALIASES)) {
+    if (raw.startsWith(label)) return { tier: id, via: 'alias', known: true };
+  }
   return { tier: raw, via: 'unknown', known: false };
 }
 

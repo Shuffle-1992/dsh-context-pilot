@@ -140,8 +140,10 @@ export function createM3Compaction(deps) {
       const ourLine = (() => { try { const c = criticalCapOf({ session: { id: sidE } }); return Number.isFinite(c) ? c : null; } catch { return null; } })();
       const preempted = Number.isFinite(lastSeen) && Number.isFinite(ourLine) && lastSeen < ourLine;
       const base = formatAct(kind === 'manual' ? 'engine-manual' : 'engine-auto', null);
-      /* R19：展示统一中文档位说法（这条 text 会进弹窗 tooltip ⇒ 属用户可见面）。 */
-      const stdText = (() => { try { return getCompactTool()?.tierText?.('standard') ?? 'standard'; } catch { return 'standard'; } })();
+      /* R19：展示统一中文档位说法（这条 text 会进弹窗 tooltip ⇒ 属用户可见面）。
+       * R22：兜底也**不许回英文 id**（旧写法 `?? 'standard'` 在工具域未加载时会把 id 写进 tooltip）
+       * ⇒ 退成中性的中文说法，宁可少给数值也不给英文。 */
+      const stdText = (() => { try { return getCompactTool()?.tierText?.('standard') ?? '默认档'; } catch { return '默认档'; } })();
       const text = base
         + (declared ? '' : ` · 系统代压（本会话未申报档位 ⇒ 按兜底 ${stdText}）`)
         + (preempted ? ` · 引擎抢先：我方上次估计 ${(Number(lastSeen) * 100).toFixed(1)}% ＜ 我方线 ${(Number(ourLine) * 100).toFixed(0)}%（引擎在 step 边界判定，排在插件之前）` : '')
