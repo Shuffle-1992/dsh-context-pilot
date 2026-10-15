@@ -2520,3 +2520,13 @@ m3.compactToolDiag = { calls:100, enabled:true, installed:false, intents:0 }
 - **提前 return 是留痕的高危区**：函数有多个出口时，新增字段很容易只加到主路径（本例 1 个字段漏在 2 条路径上）。
   对策：让返回对象**形状统一**，并用行为级断言逐条出口验证。
 - **真机测试的价值再次被证明**：这两处在 656 条断言下全绿，只有真跑一次（还带真实落盘）才暴露。
+
+#### 真机复现确认（v0.1.10 toggle 后，同一会话）
+
+| 检查 | 期望 | 实际（m1-report / compact-tier.json） | 判定 |
+| --- | --- | --- | --- |
+| 缺陷① 沿用 | 只传 `keepFrom` ⇒ 档位不重置 | `lastCompactTool = {action:'compact', tier:'heavy', **tierVia:'carry'}`, 工具回执「已登记，**档位沿用「浅压24%」**」；落盘本会话仍为 `tier:'heavy'` | ✅ |
+| 缺陷② 留痕 | 回执必须出现降级句 | `lastCompactVerify = {state:'no-need', tier:'heavy', retainBudget:240000, **retainSource:'tier'**, **anchorFailReason:'text:not-found'**, rangeSource:'none', skipWhy:'nothing-to-compact'}`；回执「已执行但判定无需压缩（浅压24% 档，保留 ~240k，**锚点未命中（text:not-found）⇒ 已按档位兜底**）」 | ✅ |
+| 收尾 | 不传 `keepFrom` ⇒ 清除锚点 | `set-tier`（不传 tier、不传 keepFrom）⇒ 回执「档位沿用「浅压24%」」，落盘 `anchor: null` | ✅ |
+
+（三级链条至此在真机上全通：主路径 `anchor` → 一级兜底 `text→recent-user` → 二级兜底 `→tier`，每一跳都有痕。）
