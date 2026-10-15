@@ -2770,3 +2770,41 @@ provider 下次实报后可能略降（保留策略 own，69000ms）。
 
 **附带（硬约束）**：`R16.15 三处教学合计 ≤ 3000 字符` 被本轮顶到 **3001**，靠去掉斜杠两侧空格压回 2999——
 该预算是硬约束 ⇒ **要加文案必须先减**（这次差点靠"改断言"绕过，选择了改文案）。
+
+### R28 非插件压缩的**失败原因**必须可见（2026-10-15）
+
+真机（`session-899bfaca`）：用户连试 **3 次 `/compact`**，UI 三次红字
+`Compaction could not produce a useful summary.`——查 DSH 源码，这是 `@deepseek-ai/dsh-command-compact`
+把手动压缩的闭集错误码翻成人话，对应 `ManualCompactionErrorCode = summary`
+（闭集：busy / cancelled / changed / **summary** / commit / persistence）。
+
+**我们记到了这三次**（`hud-acts.json`）：
+```
+19:45 · 手动压缩（/compact） · 失败
+19:45 · 手动压缩（/compact） · 失败
+19:46 · 手动压缩（/compact） · 失败
+```
+**但只有「失败」两个字**，两个缺口：
+1. **原因没进用户可见面** —— `error` 只落在内存态 `state.m3.lastEngineCompact.error`，面板行（也是
+   `hud-acts.json` 里唯一留存的东西）不写原因 ⇒ 事后无法回答"为什么压不动"；
+2. **这条路径不触发报告快照** —— `noteEngineCompaction` 里没有 `schedule(...)` ⇒ 真机上 19:45 的失败
+   直到我读报告时（19:41 的 boot 快照）都**没进报告**。
+
+**修法（R28）**：
+1. `COMPACT_FAIL_LABELS` + `failWhy(error)`：把 DSH 失败码翻成中文短语
+   （summary→摘要无法生成 / changed→选中历史已变化 / busy→有压缩在跑或会话非空闲 / cancelled→已取消 /
+   commit→提交未干净完成 / persistence→会话保存失败）；**认不出码 ⇒ 截断原文照抄，绝不编造**；
+2. 面板行改成 `… · 失败（摘要无法生成）`；记录同时留 `error`（原始）与 `reason`（中文短语）；
+3. 记录后**立刻 `schedule('engine-compact', 300)`** 请求一次报告快照（成功/失败都落）。
+
+**另据 DSH 事件 schema**（源码原文）：`compaction/end: { compactionId, sourceCommandId?, turn, error? }`
+—— **失败就是带 `error` 的 `compaction/end`** ⇒ 我们唯一的钩子（host.impl 的 `compaction/end` 分支）
+本来就是对的，缺的只是"把原因显示出来 + 落盘"。
+
+**验证**：**698 断言全绿**（contract **551** / static 72 / report 54 / boot 21）。R28 段 4 条行为级
+（映射 / 记录字段 / 未知码截断 / schedule 落快照）。**变异 3/3 CAUGHT**：M1 不翻译失败码 ⇒ 红 2；
+M2 不落快照 ⇒ 红 1；M3 记录不带 reason ⇒ 红 1。
+
+**诚实边界**：我们自己的压缩**也用同一个官方摘要后端**（自选范围仍由官方生成摘要）⇒
+`summary` 这类失败同样可能打到我们；差别在于 ① 我们**自己选范围**（区间更可控）、② 结果必须回报
+（回执明确「已执行 / 未执行（原因）」）、③ 失败也留痕。**不能承诺"我们压就一定成功"**。

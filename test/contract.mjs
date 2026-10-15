@@ -3532,6 +3532,53 @@ console.log('\n== 6.32 R27：决策卡去噪 + 决策行作用域 ==');
     `实际说明：${briefText27.slice(0, 200)}`);
 }
 
+/* ═══════════ 6.33 R28：非插件压缩的**失败原因**必须可见 ═══════════
+ * 真机（2026-10-15 session-899bfaca）：同一会话连试 3 次 `/compact` 全失败（DSH 码 `summary`），
+ * 我们记到了 3 条「手动压缩（/compact） · 失败」——但**只有「失败」两个字**：
+ * 原因只存在于内存态 `lastEngineCompact.error`，面板行（用户可见 + 落盘 hud-acts.json）没有；
+ * 且这条路径**不触发报告快照** ⇒ 事后无法回答"为什么压不动"。
+ * 本节钉住：① DSH 失败码 → 中文短语进面板行；② 记录带原始 error + 中文 reason（随 `...state.m3` 落盘）；
+ * ③ 认不出码时**截断原文照抄**（绝不编造）；④ 立刻 schedule 一次报告快照。 */
+console.log('\n== 6.33 R28：非插件压缩失败原因可见 ==');
+{
+  const m3Mod28 = await import(pathToFileURL(join(PLUGIN, 'm3.compact.mjs')).href);
+  const state28 = { m3: {} };
+  const acts28 = [];
+  const sched28 = [];
+  const api28 = m3Mod28.createM3Compaction({
+    state: state28, log: () => {}, msg: (e) => String(e), pick: (...a) => a.find((x) => x != null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    nfmt: (n) => String(n), errCodeOf: (e) => String(e?.code ?? 'err'), schedule: (t) => sched28.push(t),
+    svc: (k) => (k === 'sessionProjections'
+      ? { stateOf: () => ({ contextWindow: 1000000, pressureTokens: 333154, surfaceTokens: 224103, sampledSurfaceTokens: 223399 }) }
+      : k === 'tokenMeter' ? { measure: () => ({ totalTokens: 334525, surfaceTokens: 214686 }) } : null),
+    projectedFromPressure: () => ({ used: 333858, projected: 333858, reported: 333154, surface: 224103, sampled: 223399, basis: '下一请求预估(自算)' }),
+    M3: {}, effEnabled: () => true, criticalCapOf: () => 0.75,
+    resolveCompactionFor: () => ({ service: null, via: 'stub' }),
+    publishHud: () => {}, recordHudAct: (sid, t) => acts28.push({ sid, t }),
+    formatAct: (r) => '19:46 · ' + ({ 'engine-manual': '手动压缩（/compact）', 'engine-auto': '引擎自动压缩' }[r] ?? String(r)),
+    clearBriefed: () => {}, awaitRange: async () => null, getCompactTool: () => ({ hasTier: () => true, tierText: (t) => t }),
+    COMPACT_TIMEOUT_MS: 1000, SET_CAP: 10,
+  });
+  const sess28 = { id: 'session-899bfaca-47dc' };
+  const tSum = api28.noteEngineCompaction({ type: 'compaction/end', data: { compactionId: 'c1', sourceCommandId: 'cmd-x', error: 'summary: no usable summary' } }, sess28);
+  ok('R28 行为级：面板行把 DSH 失败码翻成中文短语（不再只有「失败」两个字），且**落盘到 hud-acts**',
+    /手动压缩（\/compact）/.test(tSum ?? '') && /失败（摘要无法生成）/.test(tSum ?? '')
+    && acts28.length === 1 && /摘要无法生成/.test(acts28[0].t),
+    `实际面板行：${JSON.stringify(tSum)}｜acts=${JSON.stringify(acts28)}`);
+  ok('R28 行为级：记录带 `ok:false` + 原始 `error` + 中文 `reason`（随 `...state.m3` 落盘，可事后回答"为什么失败"）',
+    state28.m3.lastEngineCompact?.ok === false && /summary/.test(state28.m3.lastEngineCompact?.error ?? '')
+    && state28.m3.lastEngineCompact?.reason === '摘要无法生成',
+    `实际 ${JSON.stringify(state28.m3.lastEngineCompact)}`);
+  const tUnknown = api28.noteEngineCompaction({ type: 'compaction/end', data: { compactionId: 'c2', sourceCommandId: 'cmd-y', error: 'X'.repeat(120) } }, sess28);
+  ok('R28 行为级：认不出的失败码 ⇒ **截断原文照抄**（绝不编造原因），长度有界',
+    /失败（X+…）/.test(tUnknown ?? '') && String(tUnknown).length < 160,
+    `实际 ${JSON.stringify(tUnknown)}`);
+  ok('R28 行为级：这条路径**立刻请求一次报告快照**（原来没有 schedule ⇒ 失败可能长时间不进报告）',
+    sched28.includes('engine-compact'),
+    `实际 schedule 调用：${JSON.stringify(sched28)}`);
+}
+
 /* ═══════════ 汇总 ═══════════ */
 console.log(`\n${'='.repeat(52)}`);
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);

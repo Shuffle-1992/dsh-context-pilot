@@ -125,6 +125,26 @@ export function createM3Compaction(deps) {
     } catch { return false; }
   };
 
+  /* ═══ R28（2026-10-15 真机：同一会话连试 3 次 `/compact` 全失败）═══
+   * 缺口：记录只知道「失败」，**不知道失败原因**；而原因只存在于内存态 `lastEngineCompact.error`
+   * ⇒ 面板那行（用户可见、且落盘 `hud-acts.json`）写着「失败」，事后无法回答"为什么压不动"。
+   * 修：把 DSH 的失败码翻成中文短语写进**面板行**与记录。
+   * `compaction/end.error?: string`（DSH 事件 schema 原文）；已知码来自 dsh-compaction 的
+   * `ManualCompactionErrorCode`（闭集）：summary / changed / busy / cancelled / commit / persistence。
+   * ⚠️ 认不出码 ⇒ **截断原文照抄**，绝不编造原因。 */
+  const COMPACT_FAIL_LABELS = {
+    summary: '摘要无法生成', changed: '选中历史已变化', busy: '有压缩在跑或会话非空闲',
+    cancelled: '已取消', commit: '提交未干净完成', persistence: '会话保存失败',
+  };
+  const failWhy = (raw) => {
+    const s = String(raw ?? '').trim();
+    if (!s) return '原因未提供';
+    const low = s.toLowerCase();
+    const hit = Object.keys(COMPACT_FAIL_LABELS).find((k) => low.includes(k));
+    if (hit) return COMPACT_FAIL_LABELS[hit];
+    return s.length > 48 ? `${s.slice(0, 48)}…` : s;
+  };
+
   /* ═══ R16.13：补记「非插件发起」的压缩（引擎自动 / `/compact` 命令）═══
    * 起因（用户实测）：另一会话中途被引擎自动压缩两次，插件面板/报告里一条记录都没有。
    * 取证：会话日志有 `compaction/start {turn:29, src:engine}`，而 hud-acts 里该 sid 只有旧记录。
@@ -168,14 +188,18 @@ export function createM3Compaction(deps) {
       const text = base
         + (declared ? '' : ` · 系统代压（本会话未申报档位 ⇒ 按兜底 ${stdText}）`)
         + (preempted ? ` · 引擎抢先：我方上次估计 ${(Number(lastSeen) * 100).toFixed(1)}% ＜ 我方线 ${(Number(ourLine) * 100).toFixed(0)}%（引擎在 step 边界判定，排在插件之前）` : '')
-        + (d.error ? ' · 失败' : (ratioAfter != null ? ` · 压后占用 ${(ratioAfter * 100).toFixed(1)}%` : ''));
+        + (d.error ? ` · 失败（${failWhy(d.error)}）` : (ratioAfter != null ? ` · 压后占用 ${(ratioAfter * 100).toFixed(1)}%` : ''));
       recordHudAct(sidE, text);
       publishHud({ hudLastAct: text });
       state.m3.engineCompacts = (state.m3.engineCompacts ?? 0) + 1;
+      /* R28：失败/成功都**立刻落一次报告快照**——原来这里没有 schedule ⇒ 引擎压缩（尤其失败）
+       * 可能长时间不进报告（真机：hud-acts 有 3 条失败，报告里一条都没有）。 */
+      schedule('engine-compact', 300);
       state.m3.lastEngineCompact = {
         at: new Date().toISOString(), sessionId: sidE, kind,
         sourceCommandId: src ?? null, ok: !d.error,
         error: d.error ? String(d.error).slice(0, 200) : null,
+        reason: d.error ? failWhy(d.error) : null,   // R28：中文短语（与面板行同源）
         ratioAfter, tierDeclared: declared, preempted: !!preempted,
         ourLastRatio: Number.isFinite(lastSeen) ? +(Number(lastSeen) * 100).toFixed(1) : null,
         ourLine: Number.isFinite(ourLine) ? +(Number(ourLine) * 100).toFixed(0) : null,
