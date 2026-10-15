@@ -715,9 +715,9 @@ ok('R16.14 接线：趋势数据（增量/触线轮数）由 m2 现算并注入�
     desc15.length <= 500, `实际 ${desc15.length} 字符`);
   ok('R16.15 预算：三处教学合计 ≤ 3000 字符（去重前 ≈3900）',
     total15 <= 3000, `实际合计 ${total15}（desc ${desc15.length} + brief ${brief15.length} + card ${card15.length}）`);
-  ok('R16.15 决策行：只在「本卡出现时」要求（与提醒通道对齐）',
-    /本卡出现时，先落一行决策/.test(card15),
-    '仍写「每轮留一行决策」⇒ 卡不出现的轮次要写却无提醒，无法执行');
+  ok('R16.15/R27 决策行：要求绑定**提醒通道**（卡每轮一张）且**一轮只写一次**',
+    /本轮开头先落一行决策/.test(card15) && /一轮只写一次/.test(card15),
+    '决策行要求与提醒通道脱钩（卡不出现却要求写）/ 或没写清"一轮只写一次" ⇒ 多步轮次里每步都贴一行');
   const cardDecl = api15.renderCard({ ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, tierName: 'heavy', tierDeclared: true }) ?? '';
   const cardUnd = api15.renderCard({ ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, tierName: 'standard', tierDeclared: false }) ?? '';
   ok('R16.15 卡给出**当前档位**（已登记 / 兜底两态可辨；R19 起用中文说法）',
@@ -2258,7 +2258,7 @@ console.log('\n== 6.20a R16 压缩档位（compact-range.mjs） ==');
 }
 console.log('\n== 6.20 工具后自检回执 + 思考强度可切性 ==');
 const m2Mod = await import(pathToFileURL(join(PLUGIN, 'm2.inject.mjs')).href);
-const mkM2 = (state, measure, takeVerify, rangeApi) => m2Mod.createM2Injection({
+const mkM2 = (state, measure, takeVerify, rangeApi, compactToolApi) => m2Mod.createM2Injection({
   state, log: () => {}, msg: (e) => String(e?.message ?? e), pick: (...a) => a.find((x) => x != null),
   schedule: () => {}, svc: () => null,
   tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
@@ -2268,7 +2268,7 @@ const mkM2 = (state, measure, takeVerify, rangeApi) => m2Mod.createM2Injection({
   measureRatio: measure ?? (() => ({ ok: true, used: 500000, surface: 300000, window: 1000000, ratio: 0.5, measure: {} })),
   /* R16.1：回执消费注入（生产环境是宿主的箭头包装 → m3Ctl.takeCompactVerify）。 */
   takeCompactVerify: takeVerify ?? (() => null),
-  getRangeApi: () => rangeApi ?? ({ RETAIN_RATIO: 0.16 }), getCompactToolApi: () => null, getEffortApi: () => null,
+  getRangeApi: () => rangeApi ?? ({ RETAIN_RATIO: 0.16 }), getCompactToolApi: () => compactToolApi ?? null, getEffortApi: () => null,
   getCreateUserMessage: () => () => ({ fake: 'user-message' }), SOURCE_KIND: 'context-pilot',
 });
 const agent = { session: { id: 'selfcheck-1' }, id: 'selfcheck-1' };
@@ -3465,6 +3465,71 @@ console.log('\n== 6.31 R24：占用口径对齐 DSH + 回执「压缩后占用�
     && /const mrA = result != null \? measureRatio\(agent\.session\) : mr;/.test(m3src)
     && /ratioAfter: ratioAfter != null \? \+\(ratioAfter \* 100\)\.toFixed\(1\) : null,/.test(m3src),
     '只在 own 分支取值 ⇒ 官方兜底/official 路径的回执没有占用读数');
+}
+
+/* ═══════════ 6.32 R27：决策卡去噪 + 决策行作用域（用户实测「每一步都出现一次」） ═══════════
+ * 用户截图：同一轮里每个步骤都出现一对 `档位决策：…` + `压缩决策：不压｜占用 ~57%｜理由…`。
+ * 机制：占用 ≥ 智能压缩线（默认 30%）的**每一轮**都发卡，而卡里写着「本卡出现时，先落一行决策」
+ * ⇒ 模型每轮回一行（多步轮次里就每步一行）。卡**不是能力**（工具/教学/用量行都不依赖它），
+ * 只是提醒位 ⇒ 改成**稀疏**注入：本会话首次越线 / 占用涨 ≥5pp / 隔 ≥20 轮，其余轮次只留用量行。 */
+console.log('\n== 6.32 R27：决策卡去噪 + 决策行作用域 ==');
+{
+  const ctMod27 = await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href);
+  const effMod27 = await import(pathToFileURL(join(PLUGIN, 'effort.mjs')).href);
+  let ratioNow = 0.57;
+  const seen27 = [];
+  const ctStub27 = {
+    tierText: (t) => ({ light: '深压8%', standard: '标准16%', heavy: '浅压24%' }[t] ?? null),
+    renderCard: () => '压缩决策卡（stub：本卡出现时，先落一行决策）',
+    renderBrief: () => '【插件说明】stub',
+    getTier: () => 'heavy', hasTier: () => true,
+  };
+  const state27 = { m2: { skips: {}, injections: 0 }, m3: { policyCards: 0 } };
+  const api27 = mkM2(state27,
+    () => ({ ok: true, used: Math.round(ratioNow * 1000000), total: 0, surface: 0, window: 1000000, ratio: ratioNow, basis: '下一请求预估', measure: {} }),
+    undefined, undefined, ctStub27);
+  const cardAt27 = async (turn) => {
+    const out = await api27.buildInjection({ agent, step: 1, turn });
+    seen27.push({ turn, ratio: ratioNow, card: out?.card === true, hasUsage: /Context usage before this turn/.test(out?.text ?? '') });
+    return out?.card === true;
+  };
+  const t1 = await cardAt27(1);
+  const t2 = await cardAt27(2);
+  const t3 = await cardAt27(3);
+  ok('R27 行为级：卡**照旧每轮一张**（它是「每轮开头落一次决策」的提醒位；稀疏化被用户口径否决）',
+    t1 === true && t2 === true && t3 === true && seen27.every((x) => x.hasUsage),
+    `实际序列 ${JSON.stringify(seen27.map((x) => `${x.turn}:${x.card ? '发' : '不发'}`))}`);
+
+  /* 措辞：决策行**按卡/按阶段**算，不按步骤算（用户反馈的直接来源）。 */
+  let spec27 = null;
+  const ct27 = ctMod27.createCompactTool({
+    svc: (k) => (k === 'tools' ? { register: (t) => { spec27 = t; } } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { compactToolDiag: {} } }, readCfg: () => ({ enabled: true }), getDefineTool: () => (s) => s,
+    getRangeApi: () => ({ tierText: () => '浅压24%' }), pluginDir: null,
+  });
+  await ct27.ensure();
+  const cardText27 = ct27.renderCard({ ratio: 0.57, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.24, retainTokens: 240000, usedTokens: 570000, tierName: 'heavy' }) ?? '';
+  const briefText27 = ct27.renderBrief({ criticalRatio: 0.75, retainRatio: 0.24, retainTokens: 240000 }) ?? '';
+  const effBrief27 = effMod27.createEffort({
+    svc: () => null,
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { effortDiag: {}, effortSkips: {} } }, readCfg: () => ({ enabled: true, effortEnabled: true, effortCooldownMs: 30000 }),
+    getDefineTool: () => (s) => s,
+  }).renderBrief({ ok: true, current: 'high', efforts: ['low', 'high', 'max'] }) ?? '';
+  ok('R27 文本级：卡里写明「一轮只写一次 / 中途改了决定再补一行 / 其余步骤不要重复」',
+    /本轮开头先落一行决策/.test(cardText27) && /一轮只写一次/.test(cardText27)
+    && /中途真的改了决定/.test(cardText27) && /其余步骤不要重复/.test(cardText27),
+    `实际卡：${cardText27.slice(0, 220)}`);
+  ok('R27 文本级：换档教学写明「每轮开头评估并落一行 / 中途真的换档再补一行 / 其余步骤不重复」',
+    /每轮开头评估一次并落一行档位决策/.test(effBrief27) && /一轮只写一次/.test(effBrief27)
+    && /中途真的换档（升\/降）时\*\*再补一行\*\*/.test(effBrief27),
+    `实际教学：${effBrief27.slice(0, 200)}`);
+  ok('R27 文本级：一次性说明保持「以卡为准」（卡仍每轮一张，承诺无需改口径）',
+    /以卡为准/.test(briefText27) && !/卡是稀疏的/.test(briefText27),
+    `实际说明：${briefText27.slice(0, 200)}`);
 }
 
 /* ═══════════ 汇总 ═══════════ */

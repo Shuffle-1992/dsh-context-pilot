@@ -340,7 +340,9 @@ export function createM2Injection(deps) {
        * 教配置值会让模型以为 80% 才触发（实际 75%）。与 pre-step/idle 门控同源。 */
       const effCrit = Math.min(M3.criticalRatio, criticalCapOf(agent));
       const sid = String(pick(agent.session.id, agent.sessionId, 'unknown'));
-      /* R16.14：先用**实测的每轮增量**算趋势，再渲染卡片（评审建议 2：把预测题变算术题）。 */
+      /* R16.14：先用**实测的每轮增量**算趋势，再渲染卡片（评审建议 2：把预测题变算术题）。
+       * R27（用户口径）：卡**照旧每轮一张**——它是「每轮开头落一次决策」的提醒位；
+       * 要改的是**决策行的作用域**（每轮开头一次 + 中途变更再一次），不是卡的频率（见卡内文案）。 */
       const card = renderPolicyCard(r.ratio, effCrit, r.window, trendOf(sid, r.ratio, r.window, effCrit)); // M3.5 通道2：政策卡（相关占用以上才出现）
       /* 智能思考：**独立门控**（effortEnabled），与压缩的 markerMinRatio 完全解耦——
        * 用户明确要求「全程允许」：低占用也必须能注入/换档（压缩的卡在低占用时是不注入的）。 */
