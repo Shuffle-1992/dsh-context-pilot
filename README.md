@@ -48,26 +48,19 @@ profile `package.json` 两处要改（以本机 `desktop` profile 为例）：
 | `test/` | 四套断言（contract / static / report / boot） |
 | `docs/` | 设计与交接文档（含 `docs/setup.md` 部署矩阵、`docs/hub-publishing.md` 上架清单） |
 
-> **交接说明**：本文是入口，读完 §1–§3 即可上手；深入内容在 [`docs/`](docs/)。
-> 创建 2026-10-05 · 最后更新 2026-10-12
+> **交接说明**：本文是入口，读完 §1–§3 即可上手；深入内容在 [`docs/`](docs/)。最后更新 **2026-10-15**。
 
-> **版本 v0.1.8**（2026-10-15）：**R21 语义锚点保留（`keepFrom`）**——三档比例是**按比例**留，
-> 而真实场景常是「**旧的旧需求很占地方、新需求只在最后几个百分点**」：按比例选档会白留一大截旧内容。
-> 现在模型可以直接**指位置**：`keepFrom:{recentUser:1}`（从最近第 1 条你的消息起全保留，可 1/2/3）或
-> `keepFrom:{text:'开头十来字'}`（按文本定位，可指向更早）。分工是「**模型给语义锚点、插件算 token 预算**」；
-> **锚点之后一律原样保留**（护栏：范围绝不越过锚点）。
-> **降级链**：`text` → `recentUser` → **现有三档** → 标准16%，每一跳都写进报告与「压缩自检」回执（绝不静默降级）。
-> 历史：**v0.1.7**（2026-10-15）R20 决策卡「对称化」+ 越线建议选深档（治「Agent 都爱用浅压24%」）；
-> **v0.1.6**（2026-10-15）R19 档位说法改中文（深压8% / 标准16% / 浅压24%；英文 id 退为内部/兼容值，中英都能传）；
-> **v0.1.5**（2026-10-13）R18.2 撤回留痕（关开关也能在报告里看到「工具已退出清单」）；
-> **v0.1.4**（2026-10-13）R18.1 隐藏/恢复落报告（含「按函数体取文本」的断言写法修正）；
-> **v0.1.3**（2026-10-13）**R18 单档模型「零注入 + 工具静默」**（排除 Default 后 ≤1 档 ⇒ 不注入换档文本、
-> 工具从该会话清单收起，省 ~417 字符/请求；切多档当轮恢复；并修掉「开关关闭后工具仍在下发」与「开关翻转晚一步」）；
-> **v0.1.2**（2026-10-12）R17 用户手动改档的轮首知情；**v0.1.1**（2026-10-10）**包名统一为 `dsh-context-pilot`**（去掉 `@local/` 前缀，符合 DSH Plugin Hub 上架基础项：
-> 根清单可被市场识别、`dsh.bundle.patch` 声明、README 含安装命令、MIT LICENSE），另含 R16.13–R16.19 的修复：
-> 引擎压缩补记、教学分工去重、`set-tier` schema 类型事故、档位跨热换持久化、档位落盘有界化、
-> 引擎 step 边界抢先（动态余量 + 取证）、**压缩记录跨会话根治**（权威会话 id 取自槽位 props）；
-> v0.1.0（2026-10-08）首个 GitHub 发布。`plugin/package.json` 与根 `package.json` 的 `version` 即版本号。
+**当前版本 `v0.1.8`** · 逐版本历史与实证记录见 [`docs/milestones.md`](docs/milestones.md)。
+
+### 最近更新（v0.1.6 → v0.1.8）
+
+| 版本 | 更新 | 为什么值得知道 |
+| --- | --- | --- |
+| **v0.1.8** | **语义锚点保留 `keepFrom`** | 压缩不再只能"按比例留"：可以让模型**指位置**——`keepFrom:{recentUser:1}`（从最近第 1 条你的消息起）或 `{text:'开头十来字'}`，插件据此算预算，并保证**锚点之后一律原样保留**。典型收益：600k 里新需求只占 6% 时，从"留 240k（白留旧内容）"变成"留 ~44k" |
+| **v0.1.7** | **决策卡「对称化」+ 越线反向建议** | 卡片原先只给"多留的好处" ⇒ 等于在劝模型选浅压24%。现两个方向都给数字（丢多少 / 压后占用 / 距线轮数），越线时明确建议选**深压8% 或 标准16%**（越线选浅压会"压了等于没压"） |
+| **v0.1.6** | **档位说法改中文** | 三档统一为 **深压8% / 标准16% / 浅压24%**（百分比由常量推导，不写死）；英文 id 退为内部/兼容值，`tier` **中英都能传**，老会话与落盘档位**零迁移** |
+
+更早的更新（R18 单档模型零注入、R17 改档轮首知情、R16 档位与教学去重、R5 保留范围自选…）见 [`docs/milestones.md`](docs/milestones.md)。
 
 ---
 
@@ -76,26 +69,26 @@ profile `package.json` 两处要改（以本机 `desktop` profile 为例）：
 ```
 每轮任务前 → 读上下文用量（tokenMeter.measure）→ 注入「窗口 / 已用 / 占比」到 prompt
            ｜ 压缩档位（R16）：深压8% / 标准16%（默认）/ 浅压24%
-           ｜ —— Agent 调 compact_context(tier=…) 选档，会话级持续生效；不选 = standard
+           ｜ —— Agent 调 compact_context(tier=…) 选档，会话级持续生效；不选 = 标准16%
            → 占用达「智能压缩线」时附决策卡，模型自行判断是否压缩并选档
            → 模型【先在正文里说一句理由，再】调用工具 compact_context（可选 tier）
            → 下一步的 pre-step 执行压缩（按档位自算保留范围）→ 之后所有步骤跑在压缩后的上下文上
            → 占用达「强制压缩线」时插件在 pre-step 无条件发起压缩
               ｜ 档位同样由 Agent 事先选定的 tier 决定（Agent 选过浅压24% 就按 24% 保留）；
-              ｜ 没选过 = standard 兜底；只有自算失败/压完仍在线上，才落到 DSH 官方 overflow 收口
+              ｜ 没选过 = 标准16% 兜底；只有自算失败/压完仍在线上，才落到 DSH 官方 overflow 收口
 
 可选（智能思考开关）：
           读当前模型的思考强度档位 → 注入给 Agent → Agent 按难度自行换档
           （【先说一句理由，再】调用 set_reasoning_effort，本次任务内立即生效，任务不中断）
 ```
 
-### 1.1 最近几个版本带来的实质改进
+### 1.1 关键机制：各自解决什么问题
 
 | 改进 | 内容 | 为什么重要 |
 | --- | --- | --- |
 | **压缩改「工具触发」**（R4） | 模型调用 `compact_context` ⇒ 登记意图 ⇒ **下一步 pre-step** 执行 ⇒ 本轮无缝继续 | 彻底删掉「伪造用户消息拉起会话」那套（`maybeResumeAfterMarker` / `sessionController.prompt` / `agent.followup` 在代码里**零出现**）。压缩与「叫醒」解耦：工具调用本身就保证有下一步，**不需要叫醒** |
 | **保留范围「自己算」**（R5+R16） | 保留预算由**会话档位**决定（R16 三档，见下一行）⇒ 调公开方法 `compactRegion`；边界不合法则逐节点回退；失败或压完仍越线才**沿用官方 overflow** 兜底 | 引擎 `context-overflow` 写死 `retainTokens = 0`：真机实测在**只有 53% 占用**时把 surface 从 **1117 节点 / 367,794 token** 砍到 **4 节点 / 8,603 token**（影子化 97.7%）。现在近端细节留得住，且**整段没超预算时什么都不会压** |
-| **语义锚点保留（R21）** | `compact_context` 可选参数 `keepFrom`：`{recentUser:1\|2\|3}`（从最近第 N 条**你的消息**起全保留）或 `{text:'开头十来字'}`（按文本定位，可指向更早）。**模型给语义锚点（它知道新旧需求的边界）、插件算 token 预算（它知道 seq/token）**；预留 = 锚点→末尾 token + 余量（`max(8k, 10%)`，夹 `[40k, 窗口×50%]`），并用 `keepFromSeq` **护栏保证范围绝不越过锚点** | 三档是**按比例**留，而常见场景是「旧需求很占地方、新需求只在最后几个百分点」⇒ 按比例会白留一大截旧内容（既是浪费，也是降智源）。**降级链 `text → recentUser → 三档 → 标准16%`，每一跳都写进报告与「压缩自检」回执**（静默降级是大忌）|
+| **语义锚点保留（R21）** | `keepFrom`：`{recentUser:1\|2\|3}`（从最近第 N 条**你的消息**起）或 `{text:'开头十来字'}`（按文本定位）。**模型指位置、插件算预算**；预算 = 锚点→末尾 token + 余量，且 `keepFromSeq` **护栏保证范围绝不越过锚点** | 三档只能按比例留，而常见形态是「旧需求占地方、新需求只在最后几个百分点」⇒ 白留旧内容（浪费 + 降智源）。降级链 `text → recentUser → 三档 → 标准16%`，每跳都留痕 |
 | **压缩档位（R16）** | `compact_context` 可选参数 `tier`：**深压8% / 标准16%（默认）/ 浅压24%**；**会话级持续生效**（含强制线，未选 = 标准16% 兜底）；范围计算/边界保护三档完全一致，夹取 `[40k, 窗口×50%]` | 把「不可靠的自由度」换成「有界的选择」：模型只在语义档位里挑，不接触会「切坏 tool 对」的底层参数；选档理由照旧写在正文（先说再调用）；回执带档位与保留预算，Agent 能确认选档真的生效 |
 | **换档改「工具」**（R2/R3） | 模型调用 `set_reasoning_effort` ⇒ **下一步请求即用新档位** | 替代「写文本标记、等用户再发一条消息才生效」——旧方案要求用户参与才能生效 |
 | **「先说，再调用」**（R6） | 两个工具的 description + 一次性说明 + 决策卡都要求：**先在回复正文里用一句话说明理由，再调用工具** | 工具调用对用户是**静默的**（只显示「调用了某工具」）。理由写进正文，用户才看得出为什么压、为什么换档 |
@@ -376,7 +369,7 @@ node docs/reference/tools/session-records.cjs --find <会话 id 片段> --from 1
 | **智能压缩线** | `markerMinRatio` | 0.2 | 占用达此值时注入决策卡，模型可自行决定压缩（**决策卡门槛**，与已退役的文本标记无关） |
 | **强制压缩线** | `criticalRatio` | 0.85 | 占用达此值无条件**发起**压缩（先按**会话档位**自算保留范围，官方 overflow 兜底/收口）；**生效值 = min(配置, 引擎阈值 − 5pp)**（内置 80% ⇒ 75%） |
 | 强制压缩冷却(秒) | `sweepMinIntervalMs` | 600 | 两次强制压缩的最小间隔（存储为 ms） |
-| （无面板字段） | — | — | **压缩档位**（R16）：`tier` = 深压8% / 标准16% / 浅压24%，**Agent 经工具选档、会话级持续生效**（含强制线），预算夹取 `[40k, 窗口×50%]`；**语义锚点**（R21）：`keepFrom` = `{recentUser:1\|2\|3}` 或 `{text:'开头十来字'}`，**锚点之后一律原样保留**（护栏 `keepFromSeq`），降级链 `text → recentUser → 三档 → 标准16%`；两者都取代引擎 `context-overflow` 的 `retainTokens = 0`（R5）；见 [`docs/r5-retention-range-design.md`](docs/r5-retention-range-design.md)、[`docs/r21-semantic-anchor-design.md`](docs/r21-semantic-anchor-design.md) 与 milestones 的 R16/R21 节 |
+| （无面板字段） | — | — | **压缩档位**（R16）：`tier` = 深压8% / 标准16% / 浅压24%（会话级、含强制线，夹 `[40k, 窗口×50%]`）；**语义锚点**（R21）：`keepFrom` 指位置、锚点之后原样保留。两者都取代引擎的 `retainTokens = 0`（R5）。详见 [R5](docs/r5-retention-range-design.md) / [R21](docs/r21-semantic-anchor-design.md) 设计文档 |
 
 > **R7 删除的两个字段**：`marker`（压缩标记）与 `armedTtlMs`（标记有效期）——随 marker 通道整体退役。
 > 压缩改由工具 `compact_context` 在轮内触发，回复尾行文本标记既无教学也无执行路径。
@@ -419,6 +412,7 @@ node docs/reference/tools/session-records.cjs --find <会话 id 片段> --from 1
 | [`docs/api-notes.md`](docs/api-notes.md) | 已验证的官方 API + 修正记录 |
 | [`docs/cross-repo-sync.md`](docs/cross-repo-sync.md) | 与 `dsh-browser-kit` 的同步清单 |
 | [`docs/r1*`–`r7*.md`](docs/) | 各里程碑的设计/审查文档（R1 智能思考调查与设计、R2 换档改工具、R3 解耦、R4 压缩工具化、R5 保留范围、R7 审查加固） |
+| [`docs/r18-single-tier-suppression-design.md`](docs/r18-single-tier-suppression-design.md) · [`docs/r21-semantic-anchor-design.md`](docs/r21-semantic-anchor-design.md) | R18 单档模型「零注入 + 工具静默」、R21 语义锚点（`keepFrom`：模型指位置、插件算预算）的设计文档 |
 | [`docs/compaction-failure-diagnosis.md`](docs/compaction-failure-diagnosis.md) | 压缩全线失效定位（provider×model 锐化） |
 | [`docs/d1-module-split-brief.md`](docs/d1-module-split-brief.md) | D1 模块切分任务书 |
 | [`docs/reference/README.md`](docs/reference/README.md) | 第三方（DSH 官方）抽取材料来源与许可 + 统一取证工具 |
