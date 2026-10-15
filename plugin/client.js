@@ -728,6 +728,9 @@ window.__ModuleLoader__.load({
 								 * 就永远到不了 tooltip（用户实测重启后显示 0 次的另一半根因）。 */
 								lastSwitch: e && e.lastSwitch ? e.lastSwitch : null,
 								switchCount: e && Number.isFinite(e.switchCount) ? e.switchCount : 0,
+								/* R23：host 侧统一给的「中文(id)」显示名（如 高(high)）——
+								 * 客户端**不自己维护档位名映射**（避免第二份真值）。 */
+								currentLabel: e && typeof e.currentLabel === "string" ? e.currentLabel : "",
 							}
 							: null);
 					} catch { /* 吞 */ }
@@ -805,7 +808,7 @@ window.__ModuleLoader__.load({
 			 * ✔ title 只放**稳定内容**；剩余秒数本就有火花显色动画承担（进度即信息），不再进 title。 */
 			const tip = [
 				`模型：${shown.provider}/${shown.model}`,
-				`当前档位：${effort}${pendingNow ? "（已选，下一步生效）" : ""}`,
+				`当前档位：${(hostInfo && hostInfo.currentLabel) || effort}${pendingNow ? "（已选，下一步生效）" : ""}`,
 				cooling ? "换档冷却中（剩余时间见火花显色，从下往上）" : "换档冷却：已就绪",
 				ls ? `最近切换：${ls.from} → ${ls.to}（${ls.at}）` : "最近切换：本会话还没有",
 				`会话切换次数：${(hostInfo && hostInfo.switchCount) || 0} 次`,

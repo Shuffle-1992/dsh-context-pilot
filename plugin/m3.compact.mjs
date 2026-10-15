@@ -413,6 +413,17 @@ export function createM3Compaction(deps) {
        * 降级链：text 锚点 → recentUser 锚点 → 失败退 tier（三档兜底）。
        * 工具侧只登记声明、不解析——因为锚点会随新消息移动，只有压缩这一刻的位置才算数。 */
       const anchorWant = (() => { try { return tool?.getAnchor?.(sid) ?? null; } catch { return null; } })();
+      /* R23（用户要求「显示一律中文」）：锚点的**中文**描述——回执里显示
+       * 「语义锚点（从最近第 1 条你的消息起）」/「语义锚点（按文本「…」定位）」。
+       * ⚠️ 旧写法直接 slice `anchor:` 后的内部 token（`recent-user`/`text`）⇒ 模型可见文本里露出英文。 */
+      const anchorLabelOf = (want) => {
+        try {
+          if (!want || typeof want !== 'object') return null;
+          if (want.text) return `按文本「${String(want.text).slice(0, 12)}」定位`;
+          if (want.recentUser) return `从最近第 ${Number(want.recentUser)} 条你的消息起`;
+          return '你指定的位置';
+        } catch { return null; }
+      };
       let anchorInfo = null;
       if (anchorWant) {
         try {
@@ -481,8 +492,10 @@ export function createM3Compaction(deps) {
         trigger,
         tier: out.tier ?? tierName,
         retainBudget: out.retainBudget ?? null,
-        /* R21：保留来源（anchor:* = 语义锚点生效；tier = 三档兜底）+ 锚点失败原因（写了才有痕）。 */
+        /* R21：保留来源（anchor:* = 语义锚点生效；tier = 三档兜底）+ 锚点失败原因（写了才有痕）。
+         * R23：`anchorLabel` = 锚点的中文描述（回执直接用它，不再显示 `recent-user`/`text` 这类内部 token）。 */
         retainSource: out.retainSource ?? (out.retainBudget != null ? 'tier' : null),
+        anchorLabel: out.retainSource && String(out.retainSource).startsWith('anchor:') ? anchorLabelOf(anchorWant) : null,
         anchorFailReason: out.anchorFailReason ?? null,
         rangeSource,
         shadowedTokens: result?.shadowedTokenCount ?? null,

@@ -217,9 +217,11 @@ export function createM2Injection(deps) {
       }
       if (Number.isFinite(v.retainBudget) && v.retainBudget > 0) parts.push(`保留 ~${Math.round(v.retainBudget / 1000)}k`);
       /* R21：语义锚点的**实际结果必须在回执里可见**——否则模型以为锚点生效了、其实已退回档位
-       * （静默降级是本项目大忌）。生效说来源，未命中说原因。 */
+       * （静默降级是本项目大忌）。生效说来源，未命中说原因。
+       * R23：来源用**中文描述**（`anchorLabel`，如「从最近第 1 条你的消息起」）——
+       * 旧写法 slice 出内部 token `recent-user`/`text` ⇒ 模型可见文本里露英文。 */
       if (typeof v.retainSource === 'string' && v.retainSource.startsWith('anchor:')) {
-        parts.push(`保留来源：语义锚点（${v.retainSource.slice('anchor:'.length)}）`);
+        parts.push(`保留来源：语义锚点（${v.anchorLabel || '你指定的位置'}）`);
       } else if (v.anchorFailReason) {
         parts.push(`锚点未命中（${String(v.anchorFailReason)}）⇒ 已按档位兜底`);
       }

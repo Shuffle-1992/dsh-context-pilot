@@ -411,9 +411,9 @@ ok('R16.8 时机教学（回执侧）：压缩自检回执含「压缩后换档�
   /* read() 需要 requestHeader 提供 provider/model，否则提前 return（统计恢复读不到）。 */
   const agentP = { session: { id: sidP, requestHeader: () => ({ config: { provider: 'deepseek-account', model: 'deepseek-flash', reasoningEffort: 'high' } }) }, id: sidP };
   const payload = await inst2.hudPayload(agentP, sidP);
-  ok('R16.7b 行为级：重启后 hudPayload 恢复计数与最近切换（slot 合并落盘）',
-    payload?.switchCount === 1 && payload?.lastSwitch?.to === 'max',
-    `实际 switchCount=${JSON.stringify(payload?.switchCount)} lastSwitch=${JSON.stringify(payload?.lastSwitch)}`);
+  ok('R16.7b 行为级：重启后 hudPayload 恢复计数与最近切换（slot 合并落盘；R23 起显示名为「中文(id)」）',
+    payload?.switchCount === 1 && payload?.lastSwitch?.to === '最高(max)' && payload?.currentLabel === '高(high)',
+    `实际 switchCount=${JSON.stringify(payload?.switchCount)} lastSwitch=${JSON.stringify(payload?.lastSwitch)} currentLabel=${JSON.stringify(payload?.currentLabel)}`);
   rmSync(tmpStats, { recursive: true, force: true });
 }
 ok('R16.10 静态：传了 sid 时不得回退到 agents[0]（跨会话串数据的根源）',
@@ -450,13 +450,13 @@ ok('R16.10 静态：传了 sid 时不得回退到 agents[0]（跨会话串数据
     mergeConfig: () => {}, M3: { effortEnabled: true, criticalRatio: 0.75 }, getEffortApi: () => effApi10, getReportBase: () => null,
   });
   const hudB = await m5Api10.buildHudResponse('sess-B');
-  ok('R16.10 行为级：问 B 会话说必须回 B 的统计（不借第一个 agent）',
-    hudB?.effort?.switchCount === 2 && hudB?.effort?.lastSwitch?.to === 'low',
-    `实际 switchCount=${JSON.stringify(hudB?.effort?.switchCount)} lastSwitch=${JSON.stringify(hudB?.effort?.lastSwitch)}（应为 2 / to=low）`);
+  ok('R16.10 行为级：问 B 会话说必须回 B 的统计（不借第一个 agent；R23 起档位显示名「中文(id)」）',
+    hudB?.effort?.switchCount === 2 && hudB?.effort?.lastSwitch?.to === '低(low)',
+    `实际 switchCount=${JSON.stringify(hudB?.effort?.switchCount)} lastSwitch=${JSON.stringify(hudB?.effort?.lastSwitch)}（应为 2 / to=低(low)）`);
   const hudA = await m5Api10.buildHudResponse('sess-A');
   ok('R16.10 行为级：问 A 会话说回 A 的统计（两会话互不串）',
-    hudA?.effort?.switchCount === 1 && hudA?.effort?.lastSwitch?.to === 'high',
-    `实际 switchCount=${JSON.stringify(hudA?.effort?.switchCount)} lastSwitch=${JSON.stringify(hudA?.effort?.lastSwitch)}（应为 1 / to=high）`);
+    hudA?.effort?.switchCount === 1 && hudA?.effort?.lastSwitch?.to === '高(high)',
+    `实际 switchCount=${JSON.stringify(hudA?.effort?.switchCount)} lastSwitch=${JSON.stringify(hudA?.effort?.lastSwitch)}（应为 1 / to=高(high)）`);
   const hudX = await m5Api10.buildHudResponse('sess-不存在的会话');
   ok('R16.10 行为级：匹配不到 agent 的会话不得借第一个 agent 的统计',
     hudX?.effort?.switchCount === 0 && hudX?.effort?.lastSwitch === null,
@@ -1670,7 +1670,7 @@ ok('注入文本出口走模块（host 不再内联文案）',
 const effBrief = /function renderBrief\(eff\) \{([\s\S]*?)\n  \}/.exec(effort)?.[1] ?? '';
 ok('解析出 renderBrief（教学文本函数）', effBrief.length > 0, '未找到教学文本函数');
 for (const [name, re] of [
-  ['① 当前值', /当前思考强度档位：' \+ eff\.current/],
+  ['① 当前值', /当前思考强度档位：' \+ effortLabel\(eff\.current\)/],
   ['② 可选档', /本模型可选 ' \+ opts/],
   ['③ 工具名+调用方式', /TOOL_NAME \+ '（参数 effort=<档位>）/],
   /* R16.12：判据从自指式（「需要更深推理时」）改为**可核对的触发表**。 */
@@ -1873,8 +1873,9 @@ ok('会话中途打开开关会补注册（懒注册）',
   /registerTool\(\);\s*\n\s*return true;/.test(effort),
   '只在加载时注册一次 ⇒ 中途打开开关后工具不可用');
 // 工具必须**不抛错**（抛错会中断本轮；这里只想"告知 + 不换"）
-ok('工具非法档返回结构化错误而非抛错（抛错会中断本轮）',
-  /return \{ ok: false, error: `档位 "\$\{want\}" 不在当前模型的可选集内。`, options: chk\.options \};/.test(effort),
+ok('工具非法档返回结构化错误而非抛错（抛错会中断本轮；R23 起错误文案与可选集都是「中文(id)」）',
+  /error: `档位「\$\{effortLabel\(wantInput\)\}」不在当前模型的可选集内。`/.test(effort)
+  && /options: \(chk\.options \?\? \[\]\)\.map\(effortLabel\)/.test(effort),
   '非法档抛错 ⇒ 中断模型本轮（应当返回错误让模型自行纠正）');
 /* R3-S8：output 收敛为 4 字段。原先 ok/effort/applied/error/options/cooling/remainSec 七字段，
  * 其中 cooling + remainSec 语义重叠（且都可由 error 文案承担）⇒ 冷却剩余秒数改写入 error。 */
@@ -2061,8 +2062,8 @@ console.log('\n== 6e. 空可选集不得一刀否决（D1 真缺陷）==');
 ok('checkEffort 把**空数组**当「取不到」而非「可选集为空」（不否决）',
   /const options = Array\.isArray\(eff\?\.efforts\) && eff\.efforts\.length > 0 \? eff\.efforts : null;/.test(effort),
   '空数组被当成有效可选集 ⇒ 一刀否决全部档位（真缺陷，已修）');
-ok('checkEffort 与 renderBrief 用同一判据（length 而非 isArray）',
-  /Array\.isArray\(eff\.efforts\) && eff\.efforts\.length \? eff\.efforts\.join\('\/'\) : null/.test(effort),
+ok('checkEffort 与 renderBrief 用同一判据（length 而非 isArray；两处的**显示**都走 effortLabels）',
+  /Array\.isArray\(eff\.efforts\) && eff\.efforts\.length \? effortLabels\(eff\.efforts\) : null/.test(effort),
   '两处判据不一致 ⇒ 教学说有可选档、校验却全否决');
 
 /* ═══ R11 解耦第三刀：M5 HUD 域 ═══ */
@@ -2335,14 +2336,26 @@ for (const [st, must] of [
     `A：${String(outA?.text ?? '').slice(0, 90)} | B：${String(outB?.text ?? '').slice(0, 90)}`);
 }
 
-/* 思考强度：可选项必须**每轮可见**（原先只在会话最早的一次性教学里） */
+/* 思考强度：可选项必须**每轮可见**（原先只在会话最早的一次性教学里）；R23 起一律「中文(id)」显示 */
 const suffixWithOpts = effApi.renderSuffix({ ok: true, current: 'high', efforts: ['off', 'low', 'high', 'max'] }) ?? '';
-ok('每轮后缀列出**可选档位**（不只当前档 ⇒ 时刻可切）',
-  /思考强度 high/.test(suffixWithOpts) && /可选 off\/low\/high\/max/.test(suffixWithOpts) && /set_reasoning_effort/.test(suffixWithOpts),
+ok('每轮后缀列出**可选档位**（不只当前档 ⇒ 时刻可切）；R23 起显示名统一「中文(id)」',
+  /思考强度 高\(high\)/.test(suffixWithOpts) && /可选 关闭\(off\)\/低\(low\)\/高\(high\)\/最高\(max\)/.test(suffixWithOpts)
+  && /set_reasoning_effort/.test(suffixWithOpts),
   `实际：${JSON.stringify(suffixWithOpts)}`);
 ok('取不到可选集时不编造（保持纯档位后缀）',
-  (effApi.renderSuffix({ ok: true, current: 'high', efforts: null }) ?? '') === '思考强度 high',
+  (effApi.renderSuffix({ ok: true, current: 'high', efforts: null }) ?? '') === '思考强度 高(high)',
   '凭空写可选集 ⇒ 教错档位');
+ok('R23 纯函数：未知档位**原样显示 id**（不编造中文；档位集合由模型/适配器决定）',
+  effApi.effortLabel('weird-tier') === 'weird-tier' && effApi.effortLabel('max') === '最高(max)'
+  && effApi.effortLabels(['low', 'max']) === '低(low)/最高(max)',
+  `实际 ${effApi.effortLabel('weird-tier')} / ${effApi.effortLabels(['low', 'max'])}`);
+ok('R23 纯函数：入参兼容「中文(id)」「纯中文」「原始 id」——一律回到原始 id',
+  effApi.parseEffortInput('高(high)') === 'high' && effApi.parseEffortInput('高') === 'high'
+  && effApi.parseEffortInput('high') === 'high'
+  && effApi.parseEffortInput('关闭', ['off', 'low', 'high', 'max']) === 'off'
+  && effApi.parseEffortInput('关掉啦') === '关掉啦',
+  `实际 ${JSON.stringify(['高(high)', '高', 'high', '关闭', '关掉啦'].map((x) => effApi.parseEffortInput(x, ['off', 'low', 'high', 'max'])))}`
+  + ' —— 显示改成中英后模型会照抄回来，不兼容就是白跑一趟');
 const effBriefNow = effApi.renderBrief({ ok: true, current: 'high', efforts: ['off', 'low', 'high', 'max'] }) ?? '';
 ok('思考强度教学改为「按需可多次」（删掉「1-2 次为宜」的抑制性措辞）',
   !/1-2 次/.test(effBriefNow) && /阶段变化/.test(effBriefNow) && /可以切多次/.test(effBriefNow) && /冷却/.test(effBriefNow),
@@ -2531,14 +2544,14 @@ ok('R17 静态：后缀必须紧跟档位值说明「用户刚改档」',
     `实际 current=${JSON.stringify(effA?.current)} pending=${JSON.stringify(effA?.pending)} pendingChanged=${JSON.stringify(effA?.pendingChanged)}`
     + ' —— 变异：改回只读 header 时这里给出 high（模型以为用户没动档）');
   const sufA = apiA.renderSuffix(effA) ?? '';
-  ok('R17 行为级：后缀点明「用户刚把档位从 high 调到 max」并写清本步骤即生效',
-    /用户刚把档位从 high 调到 max/.test(sufA) && /本步骤的请求即用它/.test(sufA),
+  ok('R17/R23 行为级：后缀点明「用户刚把档位从 高(high) 调到 最高(max)」并写清本步骤即生效',
+    /用户刚把档位从 高\(high\) 调到 最高\(max\)/.test(sufA) && /本步骤的请求即用它/.test(sufA),
     `实际后缀：${JSON.stringify(sufA)}`);
 
   const apiB = mkApi17({ lastUsed: sel17('high'), pending: null });
   const effB = await apiB.read(ag17('high'));
-  ok('R17 行为级：无 pending 时后缀与旧版**逐字一致**（零回归，token 不涨）',
-    (apiB.renderSuffix(effB) ?? '') === '思考强度 high（可选 off/low/high/max，需要时先说再调用 set_reasoning_effort）',
+  ok('R17/R23 行为级：无 pending 时后缀形状稳定（R23 起档位显示「中文(id)」，其余逐字不变）',
+    (apiB.renderSuffix(effB) ?? '') === '思考强度 高(high)（可选 关闭(off)/低(low)/高(high)/最高(max)，需要时先说再调用 set_reasoning_effort）',
     `实际：${JSON.stringify(apiB.renderSuffix(effB))}`);
 
   const apiC = mkApi17('absent');
@@ -2683,8 +2696,8 @@ console.log('\n== 6.23 R18：单档静默 + 工具可见性 + 开关撤回 ==');
     gateApi.renderSuffix(one) === null && gateApi.renderBrief(one) === null
     && gateApi.renderNudge(one, { agent: ag18, turn: 3, userText: '帮我排查根因' }) === null,
     `suffix=${JSON.stringify(gateApi.renderSuffix(one))} brief=${JSON.stringify(gateApi.renderBrief(one))}`);
-  ok('R18 行为级：多档 ⇒ 三处与今天**逐字一致**（零回归）',
-    gateApi.renderSuffix(four) === '思考强度 off（可选 off/low/high/max，需要时先说再调用 set_reasoning_effort）'
+  ok('R18/R23 行为级：多档 ⇒ 三处都有内容（R23 起档位显示「中文(id)」）',
+    gateApi.renderSuffix(four) === '思考强度 关闭(off)（可选 关闭(off)/低(low)/高(high)/最高(max)，需要时先说再调用 set_reasoning_effort）'
     && typeof gateApi.renderBrief(four) === 'string'
     && typeof gateApi.renderNudge(four, { agent: ag18, turn: 3, userText: '帮我排查根因' }) === 'string',
     `suffix=${JSON.stringify(gateApi.renderSuffix(four))}`);
@@ -3246,6 +3259,82 @@ console.log('\n== 6.29 R22：档位说法全中文（模型可见面英文 id �
   ok('R22 端到端：工具域缺失时回执不出现英文 id（退而问范围域 / 都拿不到就不显示档位段）',
     /【压缩自检】/.test(noApi29?.text ?? '') && !ENG.test(noApi29?.text ?? ''),
     `实际：${String(noApi29?.text ?? '').slice(0, 140)}`);
+}
+
+/* ═══════════ 6.30 R23：锚点来源 + 思考强度**显示**全中文（用户要求） ═══════════
+ * 用户原话：「如果是 keepFrom:{text:'…'} 或 keepFrom:{recentUser:N}，应该怎么显示的？思考强度的改成
+ * 中英文，比如低(low)」。
+ * 现状审计：① 回执把 `anchor:` 后的**内部 token**（`recent-user`/`text`）直接显示给模型；
+ *          ② 思考强度的用量行后缀/一次性教学/错误文案/HUD tooltip 全是裸英文 id。
+ * 本节把两件事钉住：锚点用中文描述（含 N 与文本片段）；档位显示统一「中文(id)」，且入参兼容回填。 */
+console.log('\n== 6.30 R23：锚点来源与思考强度显示全中文 ==');
+{
+  const bare = (t) => String(t ?? '').replace(/[\u4e00-\u9fa5]+[（(][A-Za-z0-9_.-]+[)）]/g, '');   // 去掉「中文(id)」后剩下的才是裸 id
+  const BARE_LEVEL = /(^|[^A-Za-z])(off|none|minimal|low|medium|mid|high|max|maximum|xhigh|ultra)([^A-Za-z]|$)/;
+
+  /* ---- ① 锚点来源：中文描述，绝不显示内部 token ---- */
+  const vAnchor = {
+    at: new Date().toISOString(), sessionId: 'selfcheck-1', state: 'executed', tier: 'heavy',
+    retainBudget: 40000, retainSource: 'anchor:recent-user', anchorLabel: '从最近第 1 条你的消息起',
+    shadowedTokens: 365000, rangeSource: 'own', ms: 24000,
+  };
+  const outAnchor = await mkM2({ m2: { skips: {}, injections: 0 }, m3: {} }, undefined, stubVerify(vAnchor))
+    .buildInjection({ agent, step: 1, turn: 1 });
+  ok('R23 端到端：锚点生效时回执写**中文描述**（「从最近第 1 条你的消息起」），不出现 `recent-user` 这类内部 token',
+    /保留来源：语义锚点（从最近第 1 条你的消息起）/.test(outAnchor?.text ?? '')
+    && !/recent-user|anchor:/.test(outAnchor?.text ?? ''),
+    `实际：${String(outAnchor?.text ?? '').slice(0, 150)}`);
+  const vText = {
+    at: new Date().toISOString(), sessionId: 'selfcheck-1', state: 'executed', tier: 'standard',
+    retainBudget: 100000, retainSource: 'anchor:text', anchorLabel: '按文本「上下文600k 新旧两需求」定位',
+    shadowedTokens: 1000, rangeSource: 'own', ms: 900,
+  };
+  const outText = await mkM2({ m2: { skips: {}, injections: 0 }, m3: {} }, undefined, stubVerify(vText))
+    .buildInjection({ agent, step: 1, turn: 1 });
+  ok('R23 端到端：`text` 锚点同样用中文描述（含被定位的文本片段）',
+    /保留来源：语义锚点（按文本「[^」]+」定位）/.test(outText?.text ?? '') && !/anchor:text/.test(outText?.text ?? ''),
+    `实际：${String(outText?.text ?? '').slice(0, 150)}`);
+  const vOld = {
+    at: new Date().toISOString(), sessionId: 'selfcheck-1', state: 'executed', tier: 'standard',
+    retainBudget: 160000, retainSource: 'anchor:recent-user', shadowedTokens: 1, rangeSource: 'own', ms: 1,
+  };
+  const outOld = await mkM2({ m2: { skips: {}, injections: 0 }, m3: {} }, undefined, stubVerify(vOld))
+    .buildInjection({ agent, step: 1, turn: 1 });
+  ok('R23 端到端：缺 `anchorLabel`（旧回执/降级）时退**中文**兜底，仍不露内部 token',
+    /保留来源：语义锚点（你指定的位置）/.test(outOld?.text ?? '') && !/recent-user/.test(outOld?.text ?? ''),
+    `实际：${String(outOld?.text ?? '').slice(0, 150)}`);
+  ok('R23 接线：m3 产出锚点中文描述（含 recentUser 的 N 与 text 片段），并写进 verify',
+    /const anchorLabelOf = \(want\) =>/.test(m3src) && /从最近第 \$\{Number\(want\.recentUser\)\} 条你的消息起/.test(m3src)
+    && /按文本「\$\{String\(want\.text\)\.slice\(0, 12\)\}」定位/.test(m3src)
+    && /anchorLabel: out\.retainSource/.test(m3src),
+    'm3 不给中文描述 ⇒ 回执只能显示内部 token 或空');
+
+  /* ---- ② 思考强度显示：模型可见文本里不许有裸英文档位 ---- */
+  const effMod23 = await import(pathToFileURL(join(PLUGIN, 'effort.mjs')).href);
+  const effApi23 = effMod23.createEffort({
+    svc: () => null,
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { effortSkips: {}, effortDiag: {}, effortSwitches: 0, effortReasserts: 0, effortHooks: 0 } },
+    readCfg: () => ({ enabled: true, effortEnabled: true, effortCooldownMs: 30000 }),
+    getDefineTool: () => (spec) => spec,
+  });
+  const effState = { ok: true, current: 'high', efforts: ['off', 'low', 'high', 'max'], pending: true, pendingFrom: 'low', pendingChanged: true, provider: 'p', model: 'm' };
+  const ag23 = { id: 'sid-r23', sessionId: 'sid-r23', session: { id: 'sid-r23' } };
+  const texts23 = [
+    ['用量行后缀', effApi23.renderSuffix(effState) ?? ''],
+    ['一次性教学', effApi23.renderBrief(effState) ?? ''],
+    ['换档提醒', effApi23.renderNudge(effState, { agent: ag23, turn: 3, userText: '帮我彻底排查根因' }) ?? ''],
+  ];
+  const leaks23 = texts23.filter(([, t]) => BARE_LEVEL.test(bare(t)))
+    .map(([n, t]) => `${n}→${String(BARE_LEVEL.exec(bare(t))?.[0]).trim()}`);
+  ok('R23 行为级：用量行后缀 / 一次性教学 / 换档提醒**都**只以「中文(id)」出现档位（剥掉中英混合再扫）',
+    leaks23.length === 0 && /高\(high\)/.test(texts23[0][1]) && /最高\(max\)/.test(texts23[0][1]),
+    `泄漏 ${leaks23.length} 处：${JSON.stringify(leaks23).slice(0, 240)}`);
+  ok('R23 端到端：工具回执/错误文案也用「中文(id)」（源码接线）',
+    /verify: `下一次请求起生效为 \$\{effortLabel\(want\)\}/.test(effort)
+    && /error: `档位「\$\{effortLabel\(wantInput\)\}」不在当前模型的可选集内。`/.test(effort),
+    '工具回执露英文 id ⇒ 模型照抄进正文（正是本次要根治的形态）');
 }
 
 /* ═══════════ 汇总 ═══════════ */

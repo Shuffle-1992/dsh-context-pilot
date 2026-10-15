@@ -54,6 +54,44 @@
 /** 换档工具名（用户 2026-10-08 指定；取代 R1 的文本标记方案）。 */
 export const TOOL_NAME = 'set_reasoning_effort';
 
+/* ═══ R23：思考强度**显示**统一「中文(id)」（用户要求，例：低(low)） ═══
+ * 分层原则（与 R22 压缩档位同款）：
+ *   · **对外 / 模型可见** = `effortLabel(id)`（「高(high)」「最高(max)」）；
+ *   · **内部与 API 参数** = 原始 id（`checkEffort` 校验、pending 写入、llm 配置一律用 id，**绝不写中文**）；
+ *   · 映射不到的未知档位 ⇒ **原样显示 id**（不编造中文——档位集合由模型/适配器决定，插件不该猜）。
+ * ⚠️ 显示改成中英后，模型很可能把「高(high)」照抄回 `effort` 参数 ⇒ `parseEffortInput` 兼容回填，
+ *    否则会被判「不在可选集内」（可见失败，不是静默，但仍是模型白跑一趟）。 */
+export const EFFORT_LABELS = {
+  none: '关闭', off: '关闭', minimal: '最低', low: '低', medium: '中', mid: '中',
+  high: '高', max: '最高', maximum: '最高', xhigh: '超高', ultra: '超高',
+};
+/** 单个档位的显示名：`低(low)`；未知档位原样返回 id。 */
+export function effortLabel(id) {
+  const raw = String(id ?? '').trim();
+  if (!raw) return '';
+  const l = EFFORT_LABELS[raw.toLowerCase()];
+  return l ? `${l}(${raw})` : raw;
+}
+/** 一组档位的显示名（`低(low)/高(high)/最高(max)`）。 */
+export function effortLabels(list) {
+  return (Array.isArray(list) ? list : []).map(effortLabel).filter(Boolean).join('/');
+}
+/**
+ * 入参归一：接受原始 id、`中文(id)`、纯中文标签 —— 一律回到**原始 id**。
+ * @param {string} input 模型给的 effort
+ * @param {string[]} [options] 该模型的可选集（用于消歧：如「关闭」同时对应 none/off 时优先取可选集里的那个）
+ */
+export function parseEffortInput(input, options) {
+  const s = String(input ?? '').trim();
+  if (!s) return '';
+  const m = /^([^()（）]*)[（(]\s*([^()（）]+?)\s*[)）]\s*$/.exec(s);
+  if (m && String(m[2]).trim()) return String(m[2]).trim();   // 「高(high)」⇒ high
+  const hits = Object.entries(EFFORT_LABELS).filter(([, l]) => l === s).map(([id]) => id);
+  if (!hits.length) return s;                                  // 当作原始 id
+  const opt = Array.isArray(options) ? options : [];
+  return hits.find((id) => opt.includes(id)) ?? hits[0];       // 「高」⇒ high；歧义时优先可选集内
+}
+
 /* R16.7：换档统计持久化需要 fs/path。m5.hud.mjs 已有同款先例（hud-acts.json），
  * static 护栏只查「模块存在」不限制叶子模块的 node 内建 import ⇒ 合法。 */
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
@@ -169,7 +207,7 @@ export function createEffort(deps) {
       /* ⚠️ 这里的 `reason` 是**内部**字段名，由工具层映射成已声明的 `error`（见 runTool：`error: chk.reason`）。
        * R15.3 记一笔：把它「顺手统一」成 `error` 会让工具返回 `error: undefined` —— 错误信息静默丢失，
        * 而 output.schema 校验照样通过（我的变异脚本正是这样逃逸的）⇒ 内部字段名 ≠ 声明字段名。 */
-      return { ok: false, options, reason: `档位不在当前模型的可选集内（可选 ${options.join('/')}）` };
+      return { ok: false, options, reason: `档位不在当前模型的可选集内（可选 ${effortLabels(options)}）` };
     }
     return { ok: true, options };
   };
@@ -411,12 +449,14 @@ export function createEffort(deps) {
       if (!enabled()) return { ok: false, error: '智能思考未开启（用户在设置里关闭了该功能）。' };
       const agent = exec?.agent;
       if (!agent) return { ok: false, error: '无 agent 作用域，无法换档。' };
-      const want = String(args?.effort ?? '').trim();
-      if (!want) return { ok: false, error: 'effort 参数为空。' };
+      const wantInput = String(args?.effort ?? '').trim();
+      if (!wantInput) return { ok: false, error: 'effort 参数为空。' };
       const sid = sidOf(agent);
       if (!sid) return { ok: false, error: '无法解析会话 id。' };
       const eff = await read(agent);
       if (!eff?.ok) return { ok: false, error: `无法读取当前模型档位信息（${eff?.error ?? '未知'}）。` };
+      /* R23：入参兼容「中文(id)」与纯中文（显示改成中英后模型会照抄回来）——内部一律回到原始 id。 */
+      const want = parseEffortInput(wantInput, eff.efforts);
       const chk = checkEffort(eff, want);
       if (!chk.ok) {
         bumpSkip('invalid');
@@ -425,7 +465,11 @@ export function createEffort(deps) {
         };
         log('warn', `智能思考 工具拒绝：${chk.reason}`);
         schedule('effort', 400);
-        return { ok: false, error: `档位 "${want}" 不在当前模型的可选集内。`, options: chk.options };
+        return {
+          ok: false,
+          error: `档位「${effortLabel(wantInput)}」不在当前模型的可选集内。`,
+          options: (chk.options ?? []).map(effortLabel),
+        };
       }
       /* 幂等：与期望档位相同 ⇒ 直接成功（不消耗冷却） */
       if (bySid.get(sid)?.want === want) {
@@ -433,7 +477,7 @@ export function createEffort(deps) {
         /* R15：回读 + 自检契约（同 accepted 分支，理由见那里）。 */
         return {
           ok: true,
-          effort: want,
+          effort: effortLabel(want),
           applied: 'already',
           verify: '该会话已是此档位；下一步的用量行后缀会显示当前实际档位，可据此自检。',
         };
@@ -447,7 +491,7 @@ export function createEffort(deps) {
         log('info', `智能思考 工具被冷却拒绝（还剩 ${remainSec}s）`);
         schedule('effort', 400);
         return {
-          ok: false, options: chk.options ?? undefined,
+          ok: false, options: chk.options ? chk.options.map(effortLabel) : undefined,
           error: `换档冷却中，还需 ${remainSec} 秒。冷却用于避免频繁换档反复打断前缀缓存。`,
         };
       }
@@ -473,9 +517,9 @@ export function createEffort(deps) {
        *    与压缩那个「回 ok 但没执行」是同一类盲区。 */
       return {
         ok: true,
-        effort: want,
+        effort: effortLabel(want),
         applied: 'next-request',
-        verify: `下一次请求起生效为 ${want}；下一步的用量行后缀会显示当前实际档位——若仍显示旧档位，说明未生效，请告知用户。`,
+        verify: `下一次请求起生效为 ${effortLabel(want)}；下一步的用量行后缀会显示当前实际档位——若仍显示旧档位，说明未生效，请告知用户。`,
       };
     } catch (e) {
       log('warn', `智能思考 工具执行异常（吞）：${msg(e)}`);
@@ -503,7 +547,8 @@ export function createEffort(deps) {
         effort: {
           type: 'string',
           required: true,
-          description: '目标档位。必须在该模型的可选集内（可选集见首次注入的说明或当前用量行）；换档理由请同时写在回复正文里。',
+          description: '目标档位。必须在该模型的可选集内（可选集见首次注入的说明或当前用量行；'
+            + '用**原始档位名**如 `high`，也可照抄显示名如 `高(high)`）。换档理由请同时写在回复正文里。',
         },
       },
       output: {
@@ -770,7 +815,7 @@ export function createEffort(deps) {
        * ⚠️ 这里返回 null **不等于**「讲过了」——宿主只在真注入时才 `remember(effBriefedBySid)`
        * ⇒ 切到多档模型的那一轮，教学会**当轮**重新出现（目标③的另一半靠这条现成语义）。 */
       if (!canSwitch(eff).canSwitch) return null;
-      const opts = Array.isArray(eff.efforts) && eff.efforts.length ? eff.efforts.join('/') : null;
+      const opts = Array.isArray(eff.efforts) && eff.efforts.length ? effortLabels(eff.efforts) : null;
       /* R16.12（用户反馈「Agent 切换档位的意愿不高」）：原教学只有**自指式**判据
        * （「需要更深推理时升档」）——「需不需要」交给模型自己判 ⇒ 等于没有触发条件；
        * 而压缩那条教学有**外部可观测**触发（占用 % + 强制线），所以它被调用得多。
@@ -781,7 +826,7 @@ export function createEffort(deps) {
        *      旧文本只强调「唯一硬约束是冷却」，读起来像劝退；
        *   ③ 保留用户要求的「先说再调用」与自检回执两条。 */
       return [
-        '【智能思考（本会话仅此一次）】当前思考强度档位：' + eff.current + (opts ? '（本模型可选 ' + opts + '）' : '（可选档位未取到）') + '。',
+        '【智能思考（本会话仅此一次）】当前思考强度档位：' + effortLabel(eff.current) + (opts ? '（本模型可选 ' + opts + '）' : '（可选档位未取到）') + '。',
         '**先说，再调用**：切换前先在回复正文里用一句话说明理由'
           + '（用户看不到工具调用的理由），然后调 ' + TOOL_NAME + '（参数 effort=<档位>）——本次任务内立即生效，任务与上下文不中断。',
         '**什么时候该切（命中任一条就当场评估一次，别默认不动）**：',
@@ -793,11 +838,11 @@ export function createEffort(deps) {
         /* R16.14（评审建议 3，与压缩侧同款）：**「不切」也要留一行**——评审原文：
          * 「只有例外路径（调用）才需要理由。『不压』零成本、零证据 ⇒ 沉默稳定胜出。」
          * 把沉默变成可检查产物，正是这两项功能共同缺的那一环。 */
-        '**阶段变化时留一行档位决策**（含「不变」）：`档位决策：保持 high｜理由…` 或 `档位决策：降 low｜理由…`——'
+        '**阶段变化时留一行档位决策**（含「不变」）：`档位决策：保持 高(high)｜理由…` 或 `档位决策：降 低(low)｜理由…`——'
           + '「不变」是合法结论，但**要写出来**，否则用户无法区分「评估后决定不切」与「根本没看」。',
         '**成本很低，别怕动它**：换档只打断一次前缀缓存（若刚压缩过上下文，缓存已重置 ⇒ 与压缩同轮切只付一次）；'
           + '被冷却拒绝**不影响任务**，按返回的剩余秒数稍后重试即可。',
-        '每次切换后**下一步的用量行后缀**会显示当前实际档位（例：`思考强度 max`）——那就是你的自检回执；'
+        '每次切换后**下一步的用量行后缀**会显示当前实际档位（例：`思考强度 最高(max)`）——那就是你的自检回执；'
           + '若下次请求后仍显示旧档位，说明未生效，请在正文里说明并告知用户。',
       ].join('');
     } catch {
@@ -822,18 +867,18 @@ export function createEffort(deps) {
        * 而一次性教学在长会话/压缩之后早已不在近端；每轮后缀只报当前档 ⇒ 模型每轮看不到「有哪些选择」。
        * 成本：约 +8 token/轮；换来的是「每一轮都能当场决定要不要切」。
        * 取不到可选集时不编造（保持纯档位后缀）。 */
-      const opts = Array.isArray(eff.efforts) && eff.efforts.length ? eff.efforts.join('/') : null;
+      const opts = Array.isArray(eff.efforts) && eff.efforts.length ? effortLabels(eff.efforts) : null;
       /* R17（2026-10-12 用户实测「手动改档后模型本轮读到的还是旧档」）：用户改档发生在**上一轮结束之后**，
        * 模型无从得知；只把新值报出来还不够——它会把新档当成「一直如此」，从而错过用户
        * 「这轮要更用力」的意图。故 pendingChanged 时**紧跟在档位值后面**点明「用户刚调过 + 本步骤即生效」。
        * 位置必须紧跟档位值（而不是塞在句尾）：这是模型本轮唯一的知情点，越前越不会被略读。 */
       const parts = [];
       if (eff.pendingChanged) {
-        parts.push('**用户刚把档位从 ' + (eff.pendingFrom ?? '(默认)') + ' 调到 ' + eff.current
+        parts.push('**用户刚把档位从 ' + effortLabel(eff.pendingFrom ?? '(默认)') + ' 调到 ' + effortLabel(eff.current)
           + '**，本步骤的请求即用它');
       }
       if (opts) parts.push('可选 ' + opts + '，需要时先说再调用 ' + TOOL_NAME);
-      return '思考强度 ' + eff.current + (eff.adapterDefault ? '(默认)' : '')
+      return '思考强度 ' + effortLabel(eff.current) + (eff.adapterDefault ? '(默认)' : '')
         + (parts.length ? '（' + parts.join('；') + '）' : '');
     } catch {
       return null;
@@ -882,8 +927,8 @@ export function createEffort(deps) {
        * 否则会话前几轮会被最小间隔规则误挡（用户第 3 轮就说「排查根因」也不提示）。 */
       const last = s.nudgeAtTurn ?? null;
       const gap = last === null ? Infinity : turn - last;
-      const opts = Array.isArray(eff.efforts) && eff.efforts.length ? eff.efforts.join('/') : '';
-      const tail = '（当前 ' + eff.current + (opts ? '，可选 ' + opts : '')
+      const opts = Array.isArray(eff.efforts) && eff.efforts.length ? effortLabels(eff.efforts) : '';
+      const tail = '（当前 ' + effortLabel(eff.current) + (opts ? '，可选 ' + opts : '')
         + '；先说一句理由再调 ' + TOOL_NAME + '，不需要则忽略）';
       const text = String(ctx?.userText ?? '');
       /* ①② 用户意图（间隔 NUDGE_MIN_GAP 轮，防每轮重复）。 */
@@ -940,7 +985,7 @@ export function createEffort(deps) {
       cooldownUntil: until > Date.now() ? until : 0,
       cooldownTotalMs: cap,
       lastSwitch: ls ? {
-        from: ls.from ?? '(默认)', to: ls.to,
+        from: effortLabel(ls.from ?? '(默认)'), to: effortLabel(ls.to),
         at: new Date(ls.at).toLocaleTimeString('zh-CN', { hour12: false }),
       } : null,
       switchCount: s?.switchCount ?? 0,
@@ -948,8 +993,9 @@ export function createEffort(deps) {
     /* R18：把判据也交给面板——单档模型下插件会**静默**（不注入文本、隐藏工具），
      * 用户看到「开关开着却不提档位」会疑惑，必须给一个可解释的读数。 */
     const gate = eff?.ok ? canSwitch(eff) : null;
-    if (!eff?.ok) return { ...(eff ?? {}), ...stats, gate: null };
-    return { ...eff, ...stats, gate };
+    if (!eff?.ok) return { ...(eff ?? {}), ...stats, currentLabel: null, gate: null };
+    /* R23：面板 tooltip 也要中文+id（`currentLabel`），与用量行/工具回执同一口径。 */
+    return { ...eff, ...stats, currentLabel: effortLabel(eff.current), gate };
   }
 
   /** 取证快照（宿主报告用；只读，不暴露内部 Map）。 */
@@ -980,6 +1026,8 @@ export function createEffort(deps) {
 
   return {
     TOOL_NAME, read, ensure, renderBrief, renderSuffix, renderNudge, hudPayload, diag, setPersistForTest,
+    /* R23：档位显示名 / 入参归一（宿主与测试都从这里取，避免第二份映射）。 */
+    effortLabel, effortLabels, parseEffortInput,
     /* R18 新增出口：判据（文本出口与工具可见性共用）、收敛入口（宿主 pre-step 调）、
      * 清扫（测试与应急用）、工具注册态（测试断言用）。 */
     canSwitch, reconcile, sweepRestricts,
