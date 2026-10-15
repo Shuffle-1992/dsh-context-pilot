@@ -221,7 +221,7 @@ export function createM2Injection(deps) {
         })();
         if (label) parts.push(`${label} 档`);
       }
-      if (Number.isFinite(v.retainBudget) && v.retainBudget > 0) parts.push(`保留 ~${Math.round(v.retainBudget / 1000)}k`);
+      if (Number.isFinite(v.retainBudget) && v.retainBudget > 0) parts.push(`保留预算 ~${Math.round(v.retainBudget / 1000)}k`);
       /* R21：语义锚点的**实际结果必须在回执里可见**——否则模型以为锚点生效了、其实已退回档位
        * （静默降级是本项目大忌）。生效说来源，未命中说原因。
        * R23：来源用**中文描述**（`anchorLabel`，如「从最近第 1 条你的消息起」）——
@@ -232,11 +232,15 @@ export function createM2Injection(deps) {
         parts.push(`锚点未命中（${String(v.anchorFailReason)}）⇒ 已按档位兜底`);
       }
       const head = parts.length ? `（${parts.join('，')}）` : '';
-      /* R24（用户实测「插件说回到 ~24%、DSH 显示 40%」）：把**压缩后的真实占用**念出来。
-       * 模型此前只能从档位名/保留预算推断 ⇒ 真机把「浅压24% 档，保留 ~240k」读成「回到 24%」。
-       * 口径与 DSH 表盘一致（`projectedTokens ?? pressureTokens`，见 m3.measureRatio 的 R24 注释）。 */
+      /* R24/R26（用户实测「插件说回到 ~24%、DSH 显示 40%」+ 追问「下次会不会又误读成 24%」）：
+       * 把**压缩后的真实占用**念出来，并且**显式消歧**——因为同一句里还带着「浅压24% 档」「保留预算 ~240k」
+       * 两个含 24 的数字，模型当初就是从这儿挑走"24%"的。两个数同时出现时必须写清"谁是谁"。
+       * 口径与 DSH 表盘一致（见 core.mjs#projectedFromPressure / m3.measureRatio 的 R24 注释）；
+       * 该数是**压缩那一刻**的 provider 锚定投影 ⇒ provider 下次实报后可能略降（真机 51% → 40%），
+       * 每轮用量行的 used 会随之更新——所以这里预先说明，避免模型下一轮看到差值又去猜。 */
       const after = Number.isFinite(v.ratioAfter)
-        ? `压缩后占用 ≈${Math.round(v.ratioAfter * 100)}%${Number.isFinite(v.usedAfter) ? `（${Math.round(v.usedAfter / 1000)}k）` : ''}`
+        ? `**压缩后占用 ≈${Math.round(v.ratioAfter * 100)}%${Number.isFinite(v.usedAfter) ? `（${Math.round(v.usedAfter / 1000)}k）` : ''}**`
+          + '——档位名里的百分比是**保留预算比例、不是占用**；provider 下次实报后可能略降'
         : null;
       if (v.state === 'executed') {
         const k = Number.isFinite(v.shadowedTokens) ? `省 ~${(v.shadowedTokens / 1000).toFixed(1)}K token` : '已执行';

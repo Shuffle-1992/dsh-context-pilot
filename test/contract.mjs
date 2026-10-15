@@ -2258,7 +2258,7 @@ console.log('\n== 6.20a R16 压缩档位（compact-range.mjs） ==');
 }
 console.log('\n== 6.20 工具后自检回执 + 思考强度可切性 ==');
 const m2Mod = await import(pathToFileURL(join(PLUGIN, 'm2.inject.mjs')).href);
-const mkM2 = (state, measure, takeVerify) => m2Mod.createM2Injection({
+const mkM2 = (state, measure, takeVerify, rangeApi) => m2Mod.createM2Injection({
   state, log: () => {}, msg: (e) => String(e?.message ?? e), pick: (...a) => a.find((x) => x != null),
   schedule: () => {}, svc: () => null,
   tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
@@ -2268,7 +2268,7 @@ const mkM2 = (state, measure, takeVerify) => m2Mod.createM2Injection({
   measureRatio: measure ?? (() => ({ ok: true, used: 500000, surface: 300000, window: 1000000, ratio: 0.5, measure: {} })),
   /* R16.1：回执消费注入（生产环境是宿主的箭头包装 → m3Ctl.takeCompactVerify）。 */
   takeCompactVerify: takeVerify ?? (() => null),
-  getRangeApi: () => ({ RETAIN_RATIO: 0.16 }), getCompactToolApi: () => null, getEffortApi: () => null,
+  getRangeApi: () => rangeApi ?? ({ RETAIN_RATIO: 0.16 }), getCompactToolApi: () => null, getEffortApi: () => null,
   getCreateUserMessage: () => () => ({ fake: 'user-message' }), SOURCE_KIND: 'context-pilot',
 });
 const agent = { session: { id: 'selfcheck-1' }, id: 'selfcheck-1' };
@@ -3440,9 +3440,26 @@ console.log('\n== 6.31 R24：占用口径对齐 DSH + 回执「压缩后占用�
   };
   const out24 = await mkM2({ m2: { skips: {}, injections: 0 }, m3: {} }, undefined, stubVerify(v24))
     .buildInjection({ agent, step: 1, turn: 1 });
-  ok('R24 端到端：压缩回执念出**压缩后占用**（DSH 口径百分比 + 绝对值）——模型不再从档位名猜「回到 24%」',
-    /压缩后占用 ≈41%（408k）/.test(out24?.text ?? ''),
-    `实际：${String(out24?.text ?? '').slice(0, 220)}`);
+  ok('R24 端到端：压缩回执念出**压缩后占用**（DSH 口径百分比 + 绝对值）+ **显式消歧**（档位名里的百分比不是占用）——模型不再从档位名猜「回到 24%」',
+    /压缩后占用 ≈41%（408k）/.test(out24?.text ?? '')
+    && /档位名里的百分比是\*\*保留预算比例、不是占用\*\*/.test(out24?.text ?? '')
+    && /保留预算 ~240k/.test(out24?.text ?? '') && !/保留 ~240k/.test(out24?.text ?? ''),
+    `实际：${String(out24?.text ?? '').slice(0, 260)}`);
+  /* R26（用户追问「下次 75% 压完显示 40%，Agent 能准确知道是 40% 吗」）：
+   * 用**真机那一帧**（压缩后 51%＝投影 509,616；档位仍是「浅压24%」）验回执不会再把两个 24 混淆。 */
+  const v26 = {
+    at: new Date().toISOString(), sessionId: 'selfcheck-1', state: 'executed', trigger: 'pressure',
+    tier: 'heavy', retainBudget: 240000, retainSource: 'tier', rangeSource: 'own',
+    shadowedTokens: 243337, ratioAfter: 0.509616, usedAfter: 509616, ms: 69000,
+  };
+  const out26 = await mkM2({ m2: { skips: {}, injections: 0 }, m3: {} }, undefined, stubVerify(v26),
+    { RETAIN_RATIO: 0.16, tierText: () => '浅压24%' })
+    .buildInjection({ agent, step: 1, turn: 1 });
+  ok('R26 端到端：真机帧 ⇒ 回执写「压缩后占用 ≈51%（510k）」而**不是**把「浅压24%」当占用（并预告下次实报可能略降）',
+    /压缩后占用 ≈51%（510k）/.test(out26?.text ?? '')
+    && /浅压24% 档/.test(out26?.text ?? '')
+    && /provider 下次实报后可能略降/.test(out26?.text ?? ''),
+    `实际：${String(out26?.text ?? '').slice(0, 260)}`);
   ok('R24 接线：m3 在**每条路径**上取值（executed 测、no-need 用当前值）并写进 verify',
     /ratioAfter: ratioAfter != null \? ratioAfter : null,/.test(m3src) && /usedAfter,/.test(m3src)
     && /const mrA = result != null \? measureRatio\(agent\.session\) : mr;/.test(m3src)
