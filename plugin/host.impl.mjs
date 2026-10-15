@@ -473,7 +473,7 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
       recordSessionEvent(event, session);
       /* R16.13：补记非插件发起的压缩（引擎自动 / `/compact`）。判定与去重全在 m3 域内
        * （sourceCommandId=context-pilot 与「自己的压缩在飞」都跳过）——这里只做转发。 */
-      if (event?.type === 'compaction/end') m3Ctl?.noteEngineCompaction?.(event, session);
+      if (event?.type === 'compaction/end') m3Ctl?.noteEngineCompaction?.(event, session); else m2Ctl?.noteSessionEvent?.(session, event); // R31：决策行重复检测（只读，不触发压缩）
     } catch (e) {
       log('warn', `session/event 处理异常（吞）：${msg(e)}`);
     }

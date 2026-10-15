@@ -3649,43 +3649,66 @@ console.log('\n== 6.34 R29：压缩后投影标注 + 手动压缩不误报「引
     `手动：${JSON.stringify(tManual)}｜自动：${JSON.stringify(tAuto)}`);
 }
 
-/* ═══════════ 6.35 R30：反重复备注（中步、仅在"本轮发过卡"且到点） ═══════════
- * 真机取证（session-54597a24 会话日志，97 轮 / 3032 步）：插件注入 **108 次 / 97 轮**（卡确实只在轮首
- * 一次），而模型写的决策行 t86 2 条 → t92 **25 条** → t95 **27 条** ⇒ **自我强化模式**，纯文案压不住。
- * 本节钉住：① 只有"本轮发过卡"才投备注（没卡就没这要求，别乱提醒）；② 频率有界（step 2 起每 3 步）；
- * ③ 回执优先（同一轮里若还有待读回执，先送回执）；④ 计数可观测。 */
-console.log('\n== 6.35 R30：反重复备注 ==');
+/* ═══════════ 6.35 R31：**检测到重复才注入**反重复备注 ═══════════
+ * R30 用固定节拍（step 2/5/8…）压"模型每步重复写决策行"——有效但打扰守规矩的会话（只要本轮发过卡
+ * 就会收到备注）。用户要求改成「监测到反复写才注入」。
+ * 检测源：会话事件（DSH 事件自带 `data.turn` / `data.step`；`assistant/message` 的 `content` 里
+ * `type:'text'` 块才是正文 ⇒ **reasoning 里提到"压缩决策："不算**）。
+ * 本节钉住：① 只写 1 条 ⇒ 完全不打扰；② 同轮 ≥2 条 ⇒ 认定重复并投备注；③ 投过之后退避（再写满 3 条）；
+ * ④ 每轮上限 4 条；⑤ reasoning 不算；⑥ 新轮重置；⑦ 计数进 state（报告可见）；⑧ 宿主转发接线。 */
+console.log('\n== 6.35 R31：检测到重复才注入 ==');
 {
-  const mk30 = (ratio, st) => mkM2(st, () => ({ ok: true, used: Math.round(ratio * 1000000), total: 0, surface: 0, window: 1000000, ratio, basis: '下一请求预估', measure: {} }),
+  const mk31 = (st) => mkM2(st, () => ({ ok: true, used: 590000, total: 0, surface: 0, window: 1000000, ratio: 0.59, basis: '下一请求预估', measure: {} }),
     undefined, undefined, {
       tierText: () => '浅压24%', renderBrief: () => 'stub', getTier: () => 'heavy', hasTier: () => true,
-      /* 桩必须**照真实现的闸门**：低于智能压缩线（minRatio）不返回卡——
-       * 真闸门在 compact-tool.renderCard 里（`ratio < minRatio ⇒ null`），桩若恒返回字符串就测不出"无卡"。 */
       renderCard: ({ ratio: r, minRatio } = {}) => (Number.isFinite(r) && Number.isFinite(minRatio) && r < minRatio ? null : '压缩决策卡（stub）'),
     });
-  const st30 = { m2: { skips: {}, injections: 0 }, m3: { policyCards: 0 } };
-  const api30 = mk30(0.59, st30);
-  const s1 = await api30.buildInjection({ agent, step: 1, turn: 5 });
-  const s2 = await api30.buildInjection({ agent, step: 2, turn: 5 });
-  const s3 = await api30.buildInjection({ agent, step: 3, turn: 5 });
-  const s5 = await api30.buildInjection({ agent, step: 5, turn: 5 });
-  const s2t6 = await api30.buildInjection({ agent, step: 2, turn: 6 });
-  ok('R30 行为级：本轮发过卡后，step 2 投「只需写一次」备注；step 3 不投（每 3 步一次）；step 5 再投',
-    s1?.card === true && /本轮决策行\*\*只需写一次\*\*/.test(s2?.text ?? '') && s2?.repeatNudge === true
-    && s3?.skip === 'not-step-1' && /只需写一次/.test(s5?.text ?? ''),
-    `step1.card=${s1?.card}｜step2=${JSON.stringify(String(s2?.text ?? '').slice(0, 40))}｜step3.skip=${s3?.skip}｜step5=${JSON.stringify(String(s5?.text ?? '').slice(0, 30))}`);
-  ok('R30 行为级：**新的一轮还没发卡**时 step 2 不投备注（没卡 = 没"落一行"的要求，别乱提醒）',
-    s2t6?.skip === 'not-step-1',
-    `实际 ${JSON.stringify(s2t6)}`);
-  const api30b = mk30(0.2, { m2: { skips: {}, injections: 0 }, m3: { policyCards: 0 } });   // 低于智能压缩线 ⇒ 不发卡
-  const b1 = await api30b.buildInjection({ agent, step: 1, turn: 9 });
-  const b2 = await api30b.buildInjection({ agent, step: 2, turn: 9 });
-  ok('R30 行为级：占用低于压缩线（无卡）⇒ 任何 step 都不投备注',
-    b1?.card === false && b2?.skip === 'not-step-1',
-    `实际 card=${b1?.card} step2=${JSON.stringify(b2)}`);
-  ok('R30 可观测：备注次数单独计数（事后可核对"投了几条"）',
-    st30.m2.repeatNudges === 2,
-    `实际 repeatNudges=${JSON.stringify(st30.m2.repeatNudges)}（应为 2：step2 与 step5 各一条）`);
+  const st31 = { m2: { skips: {}, injections: 0 }, m3: { policyCards: 0 } };
+  const api31 = mk31(st31);
+  const sess31 = { id: 'sess-31' };
+  const agent31 = { session: { id: 'sess-31' }, id: 'sess-31' };
+  const msg31 = (turn, step, text) => ({ type: 'assistant/message', data: { turn, step, message: { content: [{ type: 'text', text }] } } });
+  const at31 = async (step, turn) => api31.buildInjection({ agent: agent31, step, turn });
+
+  api31.noteSessionEvent(sess31, msg31(1, 1, '压缩决策：不压｜占用 59%｜理由：空间充足。'));
+  const a1 = await at31(2, 1);
+  ok('R31 行为级：本轮**只写一次**决策行（守规矩）⇒ 完全不注入（用户要求的"监测到才注入"）',
+    a1?.skip === 'not-step-1',
+    `实际 ${JSON.stringify(a1)}`);
+  api31.noteSessionEvent(sess31, msg31(1, 2, '压缩决策：不压｜占用 60%｜理由：空间充足。'));
+  const a2 = await at31(3, 1);
+  ok('R31 行为级：同轮累计 ≥2 条 ⇒ 认定"重复"并注入备注（落在重复之后的下一步）',
+    a2?.repeatNudge === true && /本轮决策行\*\*只需写一次\*\*/.test(a2?.text ?? ''),
+    `实际 ${JSON.stringify(String(a2?.text ?? '').slice(0, 60))}`);
+  const a3 = await at31(4, 1);
+  ok('R31 行为级：投过之后**退避**——紧接着的步骤不再重复投（避免自己变成噪声源）',
+    a3?.skip === 'not-step-1',
+    `实际 ${JSON.stringify(a3)}`);
+  for (const s of [3, 4, 5]) api31.noteSessionEvent(sess31, msg31(1, s, '档位决策：保持 高(high)｜理由：x'));
+  const a4 = await at31(6, 1);
+  ok('R31 行为级：退避期后再写满 3 条 ⇒ 再提醒一次（每轮上限 4 条）',
+    a4?.repeatNudge === true,
+    `实际 ${JSON.stringify(String(a4?.text ?? '').slice(0, 40))}`);
+
+  const st31b = { m2: { skips: {}, injections: 0 }, m3: { policyCards: 0 } };
+  const api31b = mk31(st31b);
+  api31b.noteSessionEvent(sess31, { type: 'assistant/message', data: { turn: 1, step: 1, message: { content: [{ type: 'reasoning', text: '我在盘算：压缩决策：不压……' }] } } });
+  const b1 = await api31b.buildInjection({ agent: agent31, step: 2, turn: 1 });
+  ok('R31 行为级：`reasoning` 块里的「压缩决策：」**不算**重复写（只数正文 text 块）',
+    b1?.skip === 'not-step-1' && !st31b.m2.decisionRepeat,
+    `实际 ${JSON.stringify(b1)}｜decisionRepeat=${JSON.stringify(st31b.m2.decisionRepeat)}`);
+
+  api31.noteSessionEvent(sess31, msg31(2, 1, '压缩决策：不压｜占用 61%｜理由：x'));
+  const c1 = await at31(2, 2);
+  ok('R31 行为级：**新轮重置**计数（上一轮的 6 条不会让新轮一开始就被打扰）',
+    c1?.skip === 'not-step-1',
+    `实际 ${JSON.stringify(c1)}｜rec=${JSON.stringify(st31.m2.decisionRepeat?.['sess-31'])}`);
+  ok('R31 可观测：检测计数（本轮条数/轮次）与投递次数都进 state（报告可见，可事后核对）',
+    st31.m2.decisionRepeat?.['sess-31']?.turn === 2 && st31.m2.repeatNudges === 2,
+    `实际 ${JSON.stringify({ rec: st31.m2.decisionRepeat?.['sess-31'], nudges: st31.m2.repeatNudges })}`);
+  ok('R31 接线：宿主把 `session/event` 转发给 m2（**只读检测**，不触发任何压缩）',
+    /m2Ctl\?\.noteSessionEvent\?\.\(session, event\)/.test(host) && /noteSessionEvent \}/.test(m2src),
+    '不转发 ⇒ 检测恒为空、备注永不触发（静默失效）');
 }
 
 /* ═══════════ 汇总 ═══════════ */

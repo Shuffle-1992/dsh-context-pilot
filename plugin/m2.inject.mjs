@@ -64,28 +64,58 @@ export function createM2Injection(deps) {
   /* measure 失败只报一次/会话（原先每次都 log，实测刷屏） */
   const measuredFailedOnce = new Set();
 
-  /* ═══════ R30（2026-10-15 真机取证）：决策行"每步重复"是**模型模式**，不是卡每步注入 ═══════
-   * 会话日志实测（session-54597a24，97 轮 / 3032 步）：插件注入 **108 次 / 97 轮**（≈1.1 次/轮，
-   * 卡确实只在轮首一次）；而模型写的决策行是 t86 2 条 → t92 **25 条** → t95 **27 条**（每轮 49-51 步），
-   * 即**随会话自我强化**。纯文案（R27 的「一轮只写一次」）压不住这种模式 ⇒ 在**重复发生的位置**
-   * （中步）放一条极短的系统备注。安全性沿用 R15.4：中步插入时上一步的 tool/result 已在 surface 里，
-   * 不会拆散 tool_use / tool_result。频率：step 2 起每 REPEAT_NUDGE_EVERY 步一次（不每步刷屏）。 */
-  const REPEAT_NUDGE_EVERY = 3;
+  /* ═══════ R31（2026-10-15 用户要求）：**检测到重复才注入**反重复备注 ═══════
+   * R30 用固定节拍（step 2/5/8…）压"模型每步重复写决策行"——有效，但**打扰守规矩的会话**：
+   * 只要本轮发过卡，即使模型只写了一次也会收到备注。用户要求改成「**监测到反复写才注入**」。
+   * 检测数据来自会话事件（DSH 事件每个都自带 `data.turn` / `data.step`，真机实测）：
+   *   `assistant/message` 的 `data.message.content` 里 **`type:'text'` 块** = 模型正文；
+   *   **不数 `reasoning` 块**（思考里提到"压缩决策："不算重复写）、不数 tool-call。
+   * 判定：同一轮内累计 **≥2 条** ⇒ 认定"重复"；只写 1 条 ⇒ **完全不打扰**。
+   * 频率：首次重复投一条；此后**再写满 NUDGE_REARM_DELTA 条**才再提醒；每轮上限 NUDGE_PER_TURN_CAP。
+   * 安全性沿用 R15.4：中步插入时上一步的 tool/result 已在 surface 里，不拆散 tool_use / tool_result。 */
+  const NUDGE_REARM_DELTA = 3;
+  const NUDGE_PER_TURN_CAP = 4;
   const REPEAT_NUDGE_TEXT = '（系统备注：本轮决策行**只需写一次**——后续步骤不必重复贴；'
     + '仅在真的改变决定（决定压缩 / 升或降档）时补一行。）';
-  /** sid → 本轮是否发过卡（有卡才有"落一行决策"的要求；有界化防长期累积）。 */
-  const cardTurnBySid = new Map();
-  const noteCardTurn = (sid, turn) => {
-    try {
-      cardTurnBySid.set(sid, turn);
-      while (cardTurnBySid.size > 64) cardTurnBySid.delete(cardTurnBySid.keys().next().value);
-    } catch { /* 吞 */ }
+  /** 只取正文 text 块（不数 reasoning / tool-call）。 */
+  const assistantTextOf = (event) => {
+    const c = event?.data?.message?.content;
+    if (!Array.isArray(c)) return '';
+    return c.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('\n');
   };
-  const repeatNudge = (sid, turn, step) => {
+  const DECISION_RE = /压缩决策：|档位决策：/g;
+  /** 事件入口（宿主转发 `session/event`）：统计"本轮写了多少条决策行"。**只读**，不触发任何压缩。 */
+  const noteSessionEvent = (session, event) => {
     try {
-      if (!Number.isFinite(step) || step < 2) return null;
-      if (cardTurnBySid.get(sid) !== turn) return null;   // 本轮没发卡 ⇒ 没这个要求，别乱提醒
-      if ((step - 2) % REPEAT_NUDGE_EVERY !== 0) return null;
+      if (event?.type !== 'assistant/message') return null;
+      const d = event.data ?? {};
+      const sid = String(pick(session?.id, session?.header?.id, d.sessionId, ''));
+      if (!sid) return null;
+      const n = (assistantTextOf(event).match(DECISION_RE) ?? []).length;
+      if (!n) return null;
+      const bySid = state.m2.decisionRepeat = state.m2.decisionRepeat ?? {};
+      const rec = bySid[sid] ?? { turn: null, count: 0, lastStep: null };
+      if (rec.turn !== d.turn) { rec.turn = d.turn ?? null; rec.count = 0; }   // 新轮重置
+      rec.count += n;
+      rec.lastStep = Number.isFinite(d.step) ? d.step : rec.lastStep;
+      bySid[sid] = rec;
+      const keys = Object.keys(bySid);
+      if (keys.length > 64) delete bySid[keys[0]];   // 有界化（防长期累积）
+      return rec;
+    } catch { return null; }
+  };
+  /** 是否该投反重复备注：**只在检测到重复之后**（同轮 ≥2 条），带退避与每轮上限。 */
+  const repeatNudge = (sid, turn) => {
+    try {
+      const rec = state.m2.decisionRepeat?.[sid];
+      if (!rec || rec.turn !== turn) return null;          // 本轮没检测到决策行
+      if ((rec.count ?? 0) < 2) return null;               // 只写一次 = 守规矩 ⇒ 不打扰
+      const bySid = state.m2.nudged = state.m2.nudged ?? {};
+      const nd = bySid[sid] ?? { turn: null, count: 0, n: 0 };
+      if (nd.turn !== turn) { nd.turn = turn; nd.count = 0; nd.n = 0; }
+      if (nd.n >= NUDGE_PER_TURN_CAP) return null;
+      if (nd.n > 0 && rec.count - nd.count < NUDGE_REARM_DELTA) return null;
+      nd.count = rec.count; nd.n += 1; bySid[sid] = nd;
       return REPEAT_NUDGE_TEXT;
     } catch { return null; }
   };
@@ -319,9 +349,9 @@ export function createM2Injection(deps) {
           }
         } catch { /* 判据不可用 ⇒ 保守允许提及（宁多一句话，也不误删教学） */ }
         const receiptMid = renderCompactReceipt(takeCompactReceipt(sidEarly), allowMid);
-        /* R30：回执优先；没有回执时，若本轮发过卡、且到了重复高发位置 ⇒ 投一条极短的反重复备注。 */
+        /* R30/R31：回执优先；没有回执时，**仅在检测到本轮重复写决策行**（≥2 条）时才投反重复备注。 */
         if (!receiptMid) {
-          const nudgeMid = repeatNudge(sidEarly, turn, step);
+          const nudgeMid = repeatNudge(sidEarly, turn);
           if (!nudgeMid) return { skip: 'not-step-1' };
           const msgNudge = getCreateUserMessage()({
             content: [{ type: 'text', text: nudgeMid }],
@@ -428,7 +458,7 @@ export function createM2Injection(deps) {
         source: { kind: SOURCE_KIND, form: 'snapshot', sections: [{ name: SOURCE_KIND, text: fullText }] },
       });
       state.m2.injections += 1;
-      if (card) { state.m3.policyCards += 1; noteCardTurn(sid, turn); }   // R30：记住"本轮发过卡"
+      if (card) state.m3.policyCards += 1;
       state.m2.lastText = fullText;
       state.m2.lastAt = new Date().toISOString();
       log('info', `M2 注入 turn=${turn} step=${step}${card ? ' ＋政策卡' : ''}${effNudge ? ' ＋换档提示' : ''}：${r.text}`);
@@ -443,5 +473,5 @@ export function createM2Injection(deps) {
   /** 取证出口（宿主报告/调试用）：一次性说明的两张「已讲」表规模。 */
   const diag = () => ({ briefed: briefedBySid.size, effBriefed: effBriefedBySid.size, teachWarned });
 
-  return { renderUsageText, retentionTeach, renderPolicyCard, renderBrief, clearBriefed, buildInjection, diag };
+  return { renderUsageText, retentionTeach, renderPolicyCard, renderBrief, clearBriefed, buildInjection, diag, noteSessionEvent };
 }
