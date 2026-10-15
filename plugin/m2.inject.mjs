@@ -78,8 +78,10 @@ export function createM2Injection(deps) {
     seg.push(`window ${window != null ? nfmt(window) : '?'}`);
     /* R24：`used` 现为 **DSH 表盘口径**（projectedTokens ?? pressureTokens，见 m3.measureRatio 注释），
      * 并在括号里点明它来自哪一档 —— 用户/模型不会再看到「插件 24% vs DSH 40%」这种自相矛盾。
-     * 启发式节点总和（totalTokens）与 provider 口径**按设计不同**，差得明显时才附上（避免噪声）。 */
-    seg.push(`used ${used != null ? nfmt(used) : '?'}${pct ? ` (${pct}${basis ? `, ${basis}` : ''})` : ''}`);
+     * 启发式节点总和（totalTokens）与 provider 口径**按设计不同**，差得明显时才附上（避免噪声）。
+     * R29：大压缩后投影会**系统性偏高**（旧 provider 报撑着的"非 surface 开销"没同步缩小，
+     * 真机 13.1% vs 真实约 2.4%）⇒ 这种时候附一句「provider 待刷新」，免得把 13% 当"现在有多大"。 */
+    seg.push(`used ${used != null ? nfmt(used) : '?'}${pct ? ` (${pct}${basis ? `, ${basis}` : ''}${mr.stale ? '，provider 待刷新' : ''})` : ''}`);
     if (surface != null) seg.push(`surface ${nfmt(surface)}`);
     if (total != null && used != null && Math.abs(total - used) / Math.max(used, 1) >= 0.05) {
       seg.push(`heuristic total ${nfmt(total)}`);

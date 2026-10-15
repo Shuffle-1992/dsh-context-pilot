@@ -1275,7 +1275,7 @@ ok('错误文案与引擎源码逐字一致（引擎改文案时这里先响）'
 
 /* ---- host 接线 ---- */
 ok('host 把 measure 本体带进自选范围（不二次测量、不猜节点）——R24/R25 起 used 走 DSH 表盘口径',
-  /return \{ ok: true, used, total, surface, window, ratio, basis, projected, reported, measure: m\.value \};/.test(m3src)
+  /return \{ ok: true, used, total, surface, window, ratio, basis, projected, reported, sampled: proj\.sampled, stale, measure: m\.value \};/.test(m3src)
   && /const proj = projectedFromPressure\(pressureRec\);/.test(m3src)
   && /api\.selectRange\(\{ session: agent\.session, measurement: measure, retainTokens: budget, keepFromSeq:/.test(ctOwnRange),
   '没带 measure ⇒ 只能退化成官方路径，自选范围形同未接');
@@ -3577,6 +3577,74 @@ console.log('\n== 6.33 R28：非插件压缩失败原因可见 ==');
   ok('R28 行为级：这条路径**立刻请求一次报告快照**（原来没有 schedule ⇒ 失败可能长时间不进报告）',
     sched28.includes('engine-compact'),
     `实际 schedule 调用：${JSON.stringify(sched28)}`);
+}
+
+/* ═══════════ 6.34 R29：压缩后投影偏高要标注 + 手动压缩不得标「引擎抢先」 ═══════════
+ * 真机（2026-10-15 19:54 `session-899bfaca`）：手动 `/compact` 成功后
+ *   ① 记录写成「手动压缩（/compact） · **引擎抢先**：我方上次估计 33.4% ＜ 我方线 75%…」——**误报**：
+ *      用户主动压的，没有"抢先"；该标注只对引擎自动压缩成立。
+ *   ② 表盘 13.1%（131,440）而当前 surface 只剩 6,185（真实约 2.4%）——投影公式里旧 provider 报的
+ *      "非 surface 开销"（350,476 − 225,221 = 125,255）没同步缩小 ⇒ 偏高，需标注「provider 待刷新」。 */
+console.log('\n== 6.34 R29：压缩后投影标注 + 手动压缩不误报「引擎抢先」 ==');
+{
+  const m3Mod29 = await import(pathToFileURL(join(PLUGIN, 'm3.compact.mjs')).href);
+  const pfp29 = (await import(pathToFileURL(join(PLUGIN, 'core.mjs')).href)).projectedFromPressure;
+  const mk29 = (pressure, measure) => m3Mod29.createM3Compaction({
+    state: { m3: {} }, log: () => {}, msg: (e) => String(e), pick: (...a) => a.find((x) => x != null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    nfmt: (n) => String(n), errCodeOf: (e) => String(e?.code ?? 'err'), schedule: () => {},
+    svc: (k) => (k === 'sessionProjections' ? { stateOf: () => pressure } : k === 'tokenMeter' ? { measure: () => measure } : null),
+    projectedFromPressure: pfp29,
+    M3: {}, effEnabled: () => true, criticalCapOf: () => 0.75, resolveCompactionFor: () => ({ service: null, via: 'stub' }),
+    publishHud: () => {}, recordHudAct: () => {}, formatAct: () => '', clearBriefed: () => {},
+    awaitRange: async () => null, getCompactTool: () => null, COMPACT_TIMEOUT_MS: 1000, SET_CAP: 10,
+  });
+  const after29 = mk29(
+    { contextWindow: 1000000, pressureTokens: 350476, surfaceTokens: 6185, sampledSurfaceTokens: 225221 },
+    { totalTokens: 131633, surfaceTokens: 6234 },
+  ).measureRatio({ id: 's' });
+  ok('R29 行为级：大压缩后 `stale=true`（surface 比 provider 上报时缩水 >50%），数仍是表盘口径 131,440',
+    after29.ok && after29.used === 131440 && after29.stale === true,
+    `实际 ${JSON.stringify({ used: after29.used, stale: after29.stale, surface: after29.surface })}`);
+  const normal29 = mk29(
+    { contextWindow: 1000000, pressureTokens: 333154, surfaceTokens: 224103, sampledSurfaceTokens: 223399 },
+    { totalTokens: 334525, surfaceTokens: 214686 },
+  ).measureRatio({ id: 's' });
+  ok('R29 行为级：正常（未压缩）时不标 stale（避免每轮噪声）',
+    normal29.stale === false && normal29.used === 333858,
+    `实际 ${JSON.stringify({ used: normal29.used, stale: normal29.stale })}`);
+  const line29 = mkM2({ m2: { skips: {}, injections: 0 }, m3: {} },
+    () => ({ ok: true, used: 131440, total: 131633, surface: 6234, window: 1000000, ratio: 0.13144, basis: '下一请求预估(自算)', stale: true, measure: {} }))
+    .renderUsageText({ id: 's' });
+  const line29b = mkM2({ m2: { skips: {}, injections: 0 }, m3: {} },
+    () => ({ ok: true, used: 333858, total: 334525, surface: 224103, window: 1000000, ratio: 0.333858, basis: '下一请求预估(自算)', stale: false, measure: {} }))
+    .renderUsageText({ id: 's' });
+  ok('R29 端到端：用量行在 stale 时附「provider 待刷新」，正常时不附',
+    /provider 待刷新/.test(line29?.text ?? '') && !/provider 待刷新/.test(line29b?.text ?? ''),
+    `stale：${JSON.stringify(String(line29?.text).slice(0, 140))}｜正常：${JSON.stringify(String(line29b?.text).slice(0, 120))}`);
+
+  /* 手动压缩不得标「引擎抢先」：ratioHist 放 33.4% 让它"本该"被判抢先，但 kind=manual ⇒ 不标。 */
+  const st29 = { m3: { ratioHist: { 'sess-29': [{ at: 1, ratio: 0.334 }] } } };
+  const api29 = m3Mod29.createM3Compaction({
+    state: st29, log: () => {}, msg: (e) => String(e), pick: (...a) => a.find((x) => x != null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    nfmt: (n) => String(n), errCodeOf: (e) => String(e?.code ?? 'err'), schedule: () => {},
+    svc: (k) => (k === 'sessionProjections'
+      ? { stateOf: () => ({ contextWindow: 1000000, pressureTokens: 350476, surfaceTokens: 6185, sampledSurfaceTokens: 225221 }) }
+      : k === 'tokenMeter' ? { measure: () => ({ totalTokens: 131633, surfaceTokens: 6234 }) } : null),
+    projectedFromPressure: pfp29,
+    M3: {}, effEnabled: () => true, criticalCapOf: () => 0.75, resolveCompactionFor: () => ({ service: null, via: 'stub' }),
+    publishHud: () => {}, recordHudAct: () => {},
+    formatAct: (r) => '19:54 · ' + ({ 'engine-manual': '手动压缩（/compact）', 'engine-auto': '引擎自动压缩' }[r] ?? String(r)),
+    clearBriefed: () => {}, awaitRange: async () => null, getCompactTool: () => null,
+    COMPACT_TIMEOUT_MS: 1000, SET_CAP: 10,
+  });
+  const tManual = api29.noteEngineCompaction({ type: 'compaction/end', data: { compactionId: 'c29', sourceCommandId: 'cmd-abc' } }, { id: 'sess-29' });
+  const tAuto = api29.noteEngineCompaction({ type: 'compaction/end', data: { compactionId: 'c30', turn: 47 } }, { id: 'sess-29' });
+  ok('R29 行为级：**手动** `/compact` 不再标「引擎抢先」（真机误报），但**引擎自动**仍标',
+    /手动压缩（\/compact）/.test(tManual ?? '') && !/引擎抢先/.test(tManual ?? '')
+    && /引擎自动压缩/.test(tAuto ?? '') && /引擎抢先：我方上次估计 33\.4% ＜ 我方线 75%/.test(tAuto ?? ''),
+    `手动：${JSON.stringify(tManual)}｜自动：${JSON.stringify(tAuto)}`);
 }
 
 /* ═══════════ 汇总 ═══════════ */

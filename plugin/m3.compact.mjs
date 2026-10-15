@@ -77,8 +77,15 @@ export function createM3Compaction(deps) {
     const reported = proj.reported;
     const used = proj.used ?? total;   // 连 provider 数据都没有 ⇒ 退化为本地启发式（并标明退化）
     const basis = proj.used != null ? proj.basis : '本地启发式(退化)';
+    /* ═══ R29（2026-10-15 真机：手动 `/compact` 后表盘 13.1%，而 surface 只剩 6.2K ≈ 2.4%）═══
+     * 投影公式 `provider实报 + (当前 surface − 上报时 surface)` **假设"非 surface 开销"不变**；
+     * 大压缩后 surface 骤降、而那份旧开销（本例 350,476 − 225,221 = 125,255）仍在分子里
+     * ⇒ 投影**系统性偏高**，要等 provider 实报新 prompt 才回落。此处只**标注**（`stale`），
+     * 供显示层加一句「provider 待刷新」；⚠️ 不参与判定（方向偏高 = 保守）。 */
+    const stale = proj.reported != null && proj.sampled != null && proj.surface != null
+      && proj.sampled > 0 && proj.surface < proj.sampled * 0.5;
     const ratio = window && used != null ? used / window : null;
-    return { ok: true, used, total, surface, window, ratio, basis, projected, reported, measure: m.value };
+    return { ok: true, used, total, surface, window, ratio, basis, projected, reported, sampled: proj.sampled, stale, measure: m.value };
   };
 
   /* ═══ R16.18：比例历史（动态余量的输入） ═══
@@ -179,7 +186,9 @@ export function createM3Compaction(deps) {
         } catch { return null; }
       })();
       const ourLine = (() => { try { const c = criticalCapOf({ session: { id: sidE } }); return Number.isFinite(c) ? c : null; } catch { return null; } })();
-      const preempted = Number.isFinite(lastSeen) && Number.isFinite(ourLine) && lastSeen < ourLine;
+      /* R29（2026-10-15 真机误报）：`preempted` 只对**引擎自动**压缩成立——手动 `/compact` 是用户
+       * 主动压的，标「引擎抢先」纯属误报（19:54 那条：手动压缩却被写成"引擎抢先…排在插件之前"）。 */
+      const preempted = kind === 'engine' && Number.isFinite(lastSeen) && Number.isFinite(ourLine) && lastSeen < ourLine;
       const base = formatAct(kind === 'manual' ? 'engine-manual' : 'engine-auto', null);
       /* R19：展示统一中文档位说法（这条 text 会进弹窗 tooltip ⇒ 属用户可见面）。
        * R22：兜底也**不许回英文 id**（旧写法 `?? 'standard'` 在工具域未加载时会把 id 写进 tooltip）
