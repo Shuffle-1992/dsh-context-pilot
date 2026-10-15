@@ -13,7 +13,7 @@
 | 附带：`cordis-plugin` / `context-compression` / `context-management` / `reasoning-effort` / `dsh` / `deepseek` / `llm-agent` | ✅ 共 9 个 | 同上 |
 | `dsh-skill` / `agent-skills` | ⛔ **不需要** | 这两个是 **Skill 包** 用的；本插件是 **Cordis Bundle**，加了反而误导 |
 | **README 有可直接复制的安装命令** | ✅ 已补（README「安装」段） | `dsh plugin --profile web add github:Shuffle-1992/dsh-context-pilot`（**git 规格**；本项目不分发 npm，见 §2） |
-| **package.json 的 name / version 准确** | ✅ `dsh-context-pilot` / `0.1.6` | 根与 `plugin/` 两份清单同版本；与 git tag `v0.1.6` 一致 |
+| **package.json 的 name / version 准确** | ✅ `dsh-context-pilot` / `0.1.7` | 根与 `plugin/` 两份清单同版本；与 git tag `v0.1.7` 一致 |
 | **Bundle 分发需 `dsh.bundle.patch`** | ✅ 根与 `plugin/` 两处都有，指向**同一份**生产 patch | 根 → `./plugin/cordis.patch.yml`；`plugin/package.json` → `./cordis.patch.yml` |
 | **许可证** | ✅ MIT（`LICENSE`） | 原仓库无 license 字段；如需换协议只改 `LICENSE` + 两处 `package.json` 的 `license` |
 | 仓库元数据（repository / homepage / bugs / keywords / author） | ✅ 已补 | 根 `package.json` |
@@ -60,6 +60,7 @@ $j | Select-Object full_name, private, visibility, license, homepage, topics
    git tag v0.1.4 && git push origin v0.1.4     # ✅ 已推（R18.1：隐藏/恢复落报告，真机可取证）
    git tag v0.1.5 && git push origin v0.1.5     # ✅ 已推（R18.2：撤回也留痕，关开关在报告里可见）
    git tag v0.1.6 && git push origin v0.1.6     # ✅ 已推（R19：档位说法改中文 深压8%/标准16%/浅压24%）
+   git tag v0.1.7 && git push origin v0.1.7     # ✅ 已推（R20：决策卡对称化 + 越线建议选深档）
    ```
    > 建 GitHub Release 页面需仓库写权限的 API/网页操作（本机无 `gh`、无 token），由用户完成。
 2. **按所选市场提交**：填仓库 URL + 包名 `dsh-context-pilot`；若市场要求 Bundle 清单，

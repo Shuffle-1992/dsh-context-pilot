@@ -467,15 +467,38 @@ export function createCompactTool(deps) {
               : tierDeclared === true ? '（已登记）' : '（兜底，本会话从未登记）')
           + `——目录里的「现行生效」说的是**保留 token 数**，不是档位说法。**`
         : '';
-      /* R16.16（评审三条剩余项之一/二）：① 趋势行存在时，「若预计…」这句改为指向趋势行
-       * （两处口径不一致）；② 损失数字并列「若先声明 heavy 会少丢多少」，把 set-tier 的收益变数字。 */
+      /* R20（用户要求「卡片对称化」）：**多留与少留两个方向都变数字**。
+       * 原实现只在 used > 当前预算 时给一句「若先声明浅压24% 少丢多少」——**只量化了多留的好处**，
+       * 从不说多留的代价（压后占用更高 ⇒ 更早再压一次，而每次压缩都要付摘要 LLM + 缓存重置）。
+       * 用户观察到的「Agent 都爱用浅压24%」正是这个单向偏差 + 激励不对称的产物
+       * （与 R16.12「不切档没有可见代价」同型，方向相反：这里是「多留没有可见代价」）。 */
+      const critR = Number(criticalRatio) || 0.8;
       const trendExists = trend !== '';
-      const gainLine = (used != null && Number.isFinite(t) && t > 0 && used > t && Number.isFinite(bHeavy) && bHeavy > 0)
-        ? `**若先声明「${textOf('heavy')}」（保留 ${kfmt(bHeavy)}）：只丢 ~${kfmt(Math.max(0, used - bHeavy))}**`
-          + `（比当前档位少丢 ~${kfmt(Math.max(0, bHeavy - t))}）——这就是「先 \`set-tier\` 再压」的量化收益。`
-        : '';
-      const overLine = ratio >= (Number(criticalRatio) || 0.8)
-        ? `**当前占用 ${pct} 已越强制线 ⇒ 立刻用 \`action:'set-tier'\` 声明档位**，避免下一次强制压缩仍按兜底档执行。`
+      const afterOf = (b) => {
+        if (!Number.isFinite(b) || b <= 0 || !Number.isFinite(win) || win <= 0) return null;
+        const pctAfter = b / win;
+        const leftTokens = Math.max(0, (critR - pctAfter) * win);
+        const turns = (Number.isFinite(delta) && delta > 0) ? Math.floor(leftTokens / delta) : null;
+        return { pctAfter, turns };
+      };
+      const dirLine = (used != null && Number.isFinite(t) && t > 0 && used > t
+        && Number.isFinite(bHeavy) && Number.isFinite(bLight)) ? (() => {
+        const seg = (label, budget, tail) => {
+          const a = afterOf(budget);
+          return `${label}（留 ${kfmt(budget)}）⇒ 丢 ~${kfmt(Math.max(0, used - budget))}`
+            + (a ? `、压后占用 ≈${(a.pctAfter * 100).toFixed(0)}%${a.turns != null ? `（距 ${crit} ≈${a.turns} 轮）` : ''}` : '')
+            + (tail ? `，${tail}` : '');
+        };
+        return `**两个方向都算给你（选一个）**：${seg(textOf('heavy'), bHeavy, '近端保真最好')}；`
+          + `${seg(textOf('light'), bLight, `腾出的空间最多，但近端只剩 ${kfmt(bLight)}（后续可能要重读文件）`)}。`
+          + `**代价对称**：多留 ⇒ 压后占用高、下次压缩来得更早；少留 ⇒ 余量大、但摘要更早。`;
+      })() : '';
+      /* R20（用户要求「越线反向建议」）：越线场景**必须建议更深的档**——
+       * 原实现只说「立刻声明档位」而不说选哪档，模型顺手选浅压24% ⇒ 压完仍在线上
+       * ⇒ 走「追加官方 overflow 收口」再压一次（m3 里确有这条路径）= 白多压一轮。 */
+      const overLine = ratio >= critR
+        ? `**当前占用 ${pct} 已越强制线 ⇒ 立刻用 \`action:'set-tier'\` 声明「${textOf('light')}」或「${textOf('standard')}」**`
+          + `——越线时选「${textOf('heavy')}」往往**压了等于没压**（压完仍在线之上 ⇒ 还会触发一次官方 overflow 收口 = 白多压一轮）。`
         : (trendExists
           ? `**当前占用 ${pct} 尚在强制线之下**——**按上方趋势行判断**是否需要现在声明档位（越线那一刻的自动压缩就按它执行）。`
           : `**当前占用 ${pct} 尚在强制线之下**——若预计任务会推高占用，趁还在 ${crit} 强制线之下时选定档位，越线那一刻的自动压缩就按它执行。`);
@@ -495,10 +518,10 @@ export function createCompactTool(deps) {
           + `**不传 tier = 沿用已登记档位**（不是重置）。${overLine}`
           + `（现行生效：${keep}。）`,
         loss,
-        gainLine,
+        dirLine,
         trend,
         /* R16.14/15（评审建议 4）：讲清代压代价，替代原先那句替不作为背书的「无需操作」。 */
-        `• 依赖（要引用之前的路径/结论/报错现场/长推理链）：不要调用（或改用 heavy）。`
+        `• 依赖（要引用之前的路径/结论/报错现场/长推理链）：不要调用（或改用 ${textOf('heavy')}）。`
           + `**但「不压」的代价不是零**：占用达 ${crit} 时**系统会代替你压缩**——时机由系统选、按**那一刻**生效的档位执行、`
           + `摘要会把**当时已过期的事实**（旧版本号/旧结论）写进概要。`,
         `• 调用前自检：本轮关键产物（文件路径、决策、未落盘的结论）先写入文件或本回复正文，再调用。`,

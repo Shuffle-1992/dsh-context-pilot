@@ -816,9 +816,10 @@ ok('R16.14 接线：趋势数据（增量/触线轮数）由 m2 现算并注入�
   ok('R16.16 卡片：趋势行存在时不再重复「若预计会推高」（口径统一）',
     /按上方趋势行判断/.test(cardTrend16) && !/若预计任务会推高占用/.test(cardTrend16),
     '趋势行与「若预计」并存 ⇒ 两种口径（评审剩项二）');
-  ok('R16.16 卡片：并列给出「先声明 浅压24% 能少丢多少」（把 set-tier 收益变数字）',
-    /若先声明「浅压24%」（保留 240k）：只丢 ~/.test(cardTrend16) && /少丢 ~/.test(cardTrend16),
-    '只给当前档位的损失 ⇒ set-tier 的收益仍是抽象（评审剩项三）');
+  ok('R16.16/R20 卡片：**两个方向都变数字**（多留的收益 + 少留的余量，不再单向劝导）',
+    /两个方向都算给你/.test(cardTrend16) && /浅压24%（留 240k）⇒ 丢 ~/.test(cardTrend16)
+      && /深压8%（留 80k）⇒ 丢 ~/.test(cardTrend16) && /代价对称/.test(cardTrend16),
+    '只给多留的好处 ⇒ 卡片本身在劝模型选浅压（R20 实测偏差）');
   rmSync(tmp16, { recursive: true, force: true });
 }
 
@@ -1308,6 +1309,9 @@ const ctApi = (await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href
   svc: () => null, tryOf: () => ({ value: undefined, error: null }), pick: (...a) => a.find((x) => x != null),
   msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {}, state: { m3: {} },
   readCfg: () => ({ enabled: true }), getDefineTool: () => null,
+  /* R19/R20：展示面走 compact-range 的标签助手 ⇒ 必须注入真实模块（否则掉进英文兜底，
+   * 断言会「通过」但测的是兜底路径——与 4 个 compact-tool 桩同类的虚假信心）。 */
+  getRangeApi: rangeStub,
 });
 const effApi = (await import(pathToFileURL(join(PLUGIN, 'effort.mjs')).href)).createEffort({
   svc: () => null, tryOf: () => ({ value: undefined, error: null }), pick: (...a) => a.find((x) => x != null),
@@ -2240,8 +2244,8 @@ console.log('\n== 6.20a R16 压缩档位（compact-range.mjs） ==');
     /尚在强制线之下/.test(cardBelow) && !/本次已越线/.test(cardBelow)
       && /已越强制线/.test(cardAbove)
       /* R16.15（评审建议 5）：越线后不再只给「改档下一轮起生效」这句**无法行动**的信息，
-       * 改为可执行的补救动作（立刻 set-tier 声明档位）。 */
-      && /立刻用 `action:'set-tier'` 声明档位/.test(cardAbove),
+       * 改为可执行的补救动作；R20 起**还要求指明选哪一档**（见下一条 R20 断言）。 */
+      && /立刻用 `action:'set-tier'` 声明「深压8%」或「标准16%」/.test(cardAbove),
     `未越线卡：${cardBelow.slice(0, 80)}… | 已越线卡：${cardAbove.slice(0, 80)}…`);
 }
 console.log('\n== 6.20 工具后自检回执 + 思考强度可切性 ==');
@@ -2848,6 +2852,36 @@ console.log('\n== 6.24 R19：档位说法改中文（深压8%/标准16%/浅压24
   ok('R19 行为级：对外仍回内部 id（改说法不破坏持久化与老会话兼容）',
     vAlias?.tier === 'heavy' && vId?.tier === 'heavy',
     '中文入参被原样落盘 ⇒ 老会话/持久化不兼容');
+}
+
+/* ═══════════ 6.25 R20：卡片对称化 + 越线反向建议 ═══════════
+ * 用户同意（2026-10-15）后实现，针对「Agent 都爱用浅压24%」的**结构性成因**：
+ *   ① 卡片原先只量化**多留的好处**（「若先声明浅压24% 少丢多少」），从不说多留的代价
+ *      （压后占用更高 ⇒ 更早再压一次，而每次压缩都要付摘要 LLM + 缓存重置）；
+ *   ② 越线时只说「立刻声明档位」而不说选哪档 —— 顺手选浅压 ⇒ 压完仍在线上
+ *      ⇒ 走「追加官方 overflow 收口」再压一次（m3 里确有这条路径）= 白多压一轮。 */
+console.log('\n== 6.25 R20：卡片对称化 + 越线反向建议 ==');
+{
+  const cardOver20 = ctApi.renderCard({ ratio: 0.8, minRatio: 0.2, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, usedTokens: 800000, deltaTokens: 50000 }) ?? '';
+  const cardUnder20 = ctApi.renderCard({ ratio: 0.5, minRatio: 0.2, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, usedTokens: 500000, deltaTokens: 50000 }) ?? '';
+  ok('R20 静态：卡片改为**双方向**数字（含压后占用与距线轮数），单方向建议已删',
+    /const dirLine = /.test(ct) && /const afterOf = /.test(ct) && !/若先声明「\$\{textOf\('heavy'\)\}」（保留/.test(ct),
+    '仍是单方向劝导 ⇒ 「Agent 都爱用浅压」的结构性成因没消除');
+  ok('R20 行为级：两个方向都给出「丢多少 + 压后占用 + 距线轮数」',
+    /两个方向都算给你/.test(cardOver20) && /浅压24%（留 240k）⇒ 丢 ~/.test(cardOver20)
+      && /深压8%（留 80k）⇒ 丢 ~/.test(cardOver20) && /压后占用 ≈/.test(cardOver20) && /代价对称/.test(cardOver20),
+    `实际：${cardOver20.slice(0, 160)}…`);
+  ok('R20 行为级：越线卡**指明选更深的档**并解释「压了等于没压」（白多压一轮）',
+    /已越强制线/.test(cardOver20) && /声明「深压8%」或「标准16%」/.test(cardOver20)
+      && /压了等于没压/.test(cardOver20) && /白多压一轮/.test(cardOver20),
+    '越线仍不指明档位 ⇒ 选浅压会触发官方 overflow 收口再压一次');
+  ok('R20 行为级：未越线卡不出现越线建议（随占用状态自适应仍成立）',
+    /尚在强制线之下/.test(cardUnder20) && !/已越强制线/.test(cardUnder20),
+    '未越线却报越线 ⇒ 会误导模型立刻声明深档');
+  /* R19 收尾：卡片里**不应再出现任何英文档位 id**（含「不要调用（或改用 heavy）」这类边角）。 */
+  ok('R19/R20：决策卡内不出现英文档位 id（展示面彻底中文）',
+    !/\blight\b/.test(cardOver20) && !/\bstandard\b/.test(cardOver20) && !/\bheavy\b/.test(cardOver20),
+    '卡片里仍有英文 id ⇒ 展示面中英混杂');
 }
 
 /* ═══════════ 汇总 ═══════════ */
