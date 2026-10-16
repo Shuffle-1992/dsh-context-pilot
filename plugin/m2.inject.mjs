@@ -319,11 +319,17 @@ export function createM2Injection(deps) {
         })();
         if (label) parts.push(`${label} 档`);
       }
+      /* R39/R40：预算的**口径必须随来源标注**——
+       * · 档位路径：报档位承诺（真实口径），折算过就点明「真实口径 ×N」；
+       * · 锚点路径：锚点是**位置承诺**（之后原样保留），**不折算**（折算会越过锚点）⇒ 标成
+       *   「锚点之后原样保留 ~Xk（启发式；表盘 ≈ ×N）」，避免与档位的真实口径数字混淆。 */
+      const isAnchorSrc = typeof v.retainSource === 'string' && v.retainSource.startsWith('anchor:');
       if (Number.isFinite(v.retainBudget) && v.retainBudget > 0) {
-        /* R39：档位预算现在是**真实口径**（范围选择用折算后的启发式预算）——折算过就点明，否则
-         * 模型看到"保留预算 240k"与"实际保留了多少"对不上会再次误读。 */
-        const fNote = Number.isFinite(v.retainFactor) && v.retainFactor > 1.05 ? `（真实口径 ×${v.retainFactor}）` : '';
-        parts.push(`保留预算 ~${Math.round(v.retainBudget / 1000)}k${fNote}`);
+        const f = Number.isFinite(v.retainFactor) && v.retainFactor > 1.05 ? v.retainFactor : null;
+        const k = Math.round(v.retainBudget / 1000);
+        parts.push(isAnchorSrc
+          ? `锚点之后原样保留 ~${k}k${f ? `（启发式口径；表盘 ≈ ×${f}）` : ''}`
+          : `保留预算 ~${k}k${f ? `（真实口径 ×${f}）` : ''}`);
       }
       /* R21：语义锚点的**实际结果必须在回执里可见**——否则模型以为锚点生效了、其实已退回档位
        * （静默降级是本项目大忌）。生效说来源，未命中说原因。

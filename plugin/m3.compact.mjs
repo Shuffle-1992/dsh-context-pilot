@@ -419,9 +419,12 @@ export function createM3Compaction(deps) {
         try {
           result = await compaction.service.compactRegion(sel.start, end, agent, sig);
         } finally { clearOwnCompaction(); }
-        /* R39：`retainBudget` 报**档位承诺**（真实口径，回执用它）；实际交给范围选择的是折算后的
-         * `retainBudgetHeur`（启发式口径），两者都留痕（否则"为什么保留量比档位小"无从解释）。 */
-        return { result, source: 'own', retainBudget: tierBudget, retainBudgetHeur: tierBudgetHeur, retainFactor, retainSource, anchorSeq: useAnchor ? anchorSeq ?? null : null, anchorFailReason: useAnchor ? null : (anchorFailReason ?? null), walkBacks, tier: tierInfo.tier, range: { start: sel.start, end } };
+        /* R39/R40：报**实际生效的那个预算**——
+         * · 档位路径：报档位承诺（**真实口径**，实际交给范围选择的是折算后的 `retainBudgetHeur`）；
+         * · **锚点路径：报锚点预算（启发式口径）且不折算**——锚点是**位置承诺**（"之后一律原样保留"），
+         *   按真实口径去缩它就会越过锚点 ⇒ 违背 R21 护栏「宁可多留，绝不丢新需求」。
+         *   （R39 第一版把这里无条件写成 `tierBudget` ⇒ 锚点生效时回执误报"档位预算 240k"，已修。） */
+        return { result, source: 'own', retainBudget: useAnchor ? anchorBudget : tierBudget, retainBudgetHeur: useAnchor ? anchorBudget : tierBudgetHeur, retainFactor, retainSource, anchorSeq: useAnchor ? anchorSeq ?? null : null, anchorFailReason: useAnchor ? null : (anchorFailReason ?? null), walkBacks, tier: tierInfo.tier, range: { start: sel.start, end } };
       } catch (e) {
         /* 末端不合法 ⇒ 回退一个 surface 节点重试（零副作用、零 LLM 成本，见文件头）。 */
         if (api.isEndBoundaryError(e)) {

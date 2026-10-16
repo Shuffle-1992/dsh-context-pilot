@@ -3923,6 +3923,26 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
   ok('R39 端到端：回执点明「保留预算 ~240k（真实口径 ×1.4）」（否则模型看到保留量与预算对不上会再误读）',
     /保留预算 ~240k（真实口径 ×1\.4）/.test(out39?.text ?? ''),
     `实际：${String(out39?.text ?? '').slice(0, 200)}`);
+
+  /* R40（用户追问「keepFrom 也符合新机制吧？」）：锚点路径**不走折算**（位置承诺 ⇒ 折算会越过锚点），
+   * 但口径必须标出来；且**不能误报成档位预算**（R39 第一版就是无条件报 tierBudget）。 */
+  const v40 = {
+    at: new Date().toISOString(), sessionId: 'selfcheck-1', state: 'executed', trigger: 'pressure',
+    tier: 'heavy', retainBudget: 95000, retainFactor: 1.5, retainSource: 'anchor:recent-user',
+    anchorLabel: '从最近第 1 条你的消息起', rangeSource: 'own',
+    shadowedTokens: 300000, ratioAfter: 0.24, usedAfter: 240000, ms: 40000,
+  };
+  const out40 = await mkM2({ m2: { skips: {}, injections: 0 }, m3: {} }, undefined, stubVerify(v40),
+    { RETAIN_RATIO: 0.24, tierText: () => '浅压24%' }).buildInjection({ agent, step: 1, turn: 1 });
+  ok('R40 端到端：锚点生效 ⇒ 回执报**锚点保留量**并标启发式口径，**不误报档位预算**',
+    /锚点之后原样保留 ~95k（启发式口径；表盘 ≈ ×1\.5）/.test(out40?.text ?? '')
+    && !/保留预算 ~240k/.test(out40?.text ?? '')
+    && /语义锚点（从最近第 1 条你的消息起）/.test(out40?.text ?? ''),
+    `实际：${String(out40?.text ?? '').slice(0, 240)}`);
+  ok('R40 单源守卫：m3 自选范围回报的预算**随来源切换**（锚点报锚点、档位报档位承诺）',
+    /retainBudget: useAnchor \? anchorBudget : tierBudget/.test(m3src)
+    && /retainBudgetHeur: useAnchor \? anchorBudget : tierBudgetHeur/.test(m3src),
+    '无条件报 tierBudget ⇒ 锚点生效时回执报的是档位承诺（R39 的回归）');
   ok('R39 接线：宿主把 `summarizeBreakdown`（可见组成单源）注入 m3',
     /summarizeBreakdown, \/\/ R39/.test(host) && /summarizeBreakdown,/.test(m3src),
     'm3 拿不到可见组成 ⇒ 折算因子恒为 1（静默失效）');
