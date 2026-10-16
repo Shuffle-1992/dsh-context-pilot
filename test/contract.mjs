@@ -3951,6 +3951,21 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
     && !/保留预算 ~240k/.test(out40?.text ?? '')
     && /语义锚点（从最近第 1 条你的消息起）/.test(out40?.text ?? ''),
     `实际：${String(out40?.text ?? '').slice(0, 260)}`);
+  /* R44（真机发现）：`recentUser:1` 的锚点段只有 1.4k 启发式，被 MIN 下限抬到 40k ⇒
+   * 回执若只说"锚点之后原样保留 ~40k"，会被读成"那段有 40k" ⇒ 必须显式说明「下限保护」。 */
+  const v44 = { ...v40, anchorTokens: 1431, anchorClamped: true };
+  const out44 = await mkM2({ m2: { skips: {}, injections: 0 }, m3: {} }, undefined, stubVerify(v44),
+    { RETAIN_RATIO: 0.24, tierText: () => '浅压24%' }).buildInjection({ agent, step: 1, turn: 1 });
+  ok('R44 端到端：锚点预算被**下限抬起**时，回执必须说明「锚点段实际只有 ~1.4k」',
+    /锚点之后原样保留 ~95k（启发式口径；\*\*下限保护\*\*：锚点段实际只有 ~1\.4k，为防丢新需求抬到 ~95k；\*\*表盘 ≈ 143k\*\*（×1\.5））/
+      .test(out44?.text ?? ''),
+    `实际：${String(out44?.text ?? '').slice(0, 300)}`);
+  const out44b = await mkM2({ m2: { skips: {}, injections: 0 }, m3: {} }, undefined,
+    stubVerify({ ...v40, anchorTokens: 60000, anchorClamped: false }),
+    { RETAIN_RATIO: 0.24, tierText: () => '浅压24%' }).buildInjection({ agent, step: 1, turn: 1 });
+  ok('R44 反例：**没被夹取**时不得出现「下限保护」（该句必须是有条件的）',
+    !/下限保护/.test(out44b?.text ?? '') && /锚点之后原样保留 ~95k/.test(out44b?.text ?? ''),
+    `实际：${String(out44b?.text ?? '').slice(0, 260)}`);
   ok('R40 单源守卫：m3 自选范围回报的预算**随来源切换**（锚点报锚点、档位报档位承诺）',
     /retainBudget: useAnchor \? anchorBudget : tierBudget/.test(m3src)
     && /retainBudgetHeur: useAnchor \? anchorBudget : tierBudgetHeur/.test(m3src),

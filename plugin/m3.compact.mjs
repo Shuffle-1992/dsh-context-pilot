@@ -425,8 +425,11 @@ export function createM3Compaction(deps) {
          * · 档位路径：报档位承诺（**真实口径**，实际交给范围选择的是折算后的 `retainBudgetHeur`）；
          * · **锚点路径：报锚点预算（启发式口径）且不折算**——锚点是**位置承诺**（"之后一律原样保留"），
          *   按真实口径去缩它就会越过锚点 ⇒ 违背 R21 护栏「宁可多留，绝不丢新需求」。
-         *   （R39 第一版把这里无条件写成 `tierBudget` ⇒ 锚点生效时回执误报"档位预算 240k"，已修。） */
-        return { result, source: 'own', retainBudget: useAnchor ? anchorBudget : tierBudget, retainBudgetHeur: useAnchor ? anchorBudget : tierBudgetHeur, retainFactor, retainSource, anchorSeq: useAnchor ? anchorSeq ?? null : null, anchorFailReason: useAnchor ? null : (anchorFailReason ?? null), walkBacks, tier: tierInfo.tier, range: { start: sel.start, end } };
+         *   （R39 第一版把这里无条件写成 `tierBudget` ⇒ 锚点生效时回执误报"档位预算 240k"，已修。）
+         * R44（真机发现）：锚点预算可能被 **MIN 下限夹取**（`clamped`）——真机 `recentUser:1` 时
+         * 锚点段只有 1431 启发式，被 `MIN_RETAIN_TOKENS=40k` 抬到 40000 ⇒ 回执若只说"锚点之后原样
+         * 保留 ~40k"会让人以为那段有 40k。把 `anchorTokens`/`anchorClamped` 一并回报，回执才能说清。 */
+        return { result, source: 'own', retainBudget: useAnchor ? anchorBudget : tierBudget, retainBudgetHeur: useAnchor ? anchorBudget : tierBudgetHeur, retainFactor, retainSource, anchorSeq: useAnchor ? anchorSeq ?? null : null, anchorTokens: useAnchor ? (Number(retainOverride?.anchorTokens) || null) : null, anchorClamped: useAnchor ? !!retainOverride?.anchorClamped : null, anchorFailReason: useAnchor ? null : (anchorFailReason ?? null), walkBacks, tier: tierInfo.tier, range: { start: sel.start, end } };
       } catch (e) {
         /* 末端不合法 ⇒ 回退一个 surface 节点重试（零副作用、零 LLM 成本，见文件头）。 */
         if (api.isEndBoundaryError(e)) {
@@ -587,7 +590,7 @@ export function createM3Compaction(deps) {
       );
       const out = await compactWithOwnRange(agent, compaction, {
         forced, sig, sid, window: mr.window, measure: mr.measure, tierName,
-        retainOverride: anchorInfo?.ok ? { budget: anchorInfo.budget, source: `anchor:${anchorInfo.via}` } : null,
+        retainOverride: anchorInfo?.ok ? { budget: anchorInfo.budget, source: `anchor:${anchorInfo.via}`, anchorTokens: anchorInfo.tokens, anchorClamped: anchorInfo.clamped } : null,
         anchorSeq: anchorInfo?.ok ? anchorInfo.seq : null,
         anchorFailReason: anchorWant && !anchorInfo?.ok ? (anchorInfo?.reason ?? 'unknown') : null,
       });
@@ -638,6 +641,8 @@ export function createM3Compaction(deps) {
         retainFactor: out.retainFactor ?? 1,
         retainSource: out.retainSource ?? (out.retainBudget != null ? 'tier' : null),
         anchorLabel: out.retainSource && String(out.retainSource).startsWith('anchor:') ? anchorLabelOf(anchorWant) : null,
+        anchorTokens: out.anchorTokens ?? null,      // R44：锚点→末尾的**启发式** token（未夹取前）
+        anchorClamped: out.anchorClamped ?? null,    // R44：锚点预算是否被 MIN/MAX 夹取过
         anchorFailReason: out.anchorFailReason ?? null,
         rangeSource,
         shadowedTokens: result?.shadowedTokenCount ?? null,
@@ -659,6 +664,8 @@ export function createM3Compaction(deps) {
         retainBudgetHeur: out.retainBudgetHeur ?? null,   // R39：折算后（启发式口径）
         retainFactor: out.retainFactor ?? 1,             // R39：真实口径折算因子
         retainSource: out.retainSource ?? null,
+        anchorTokens: out.anchorTokens ?? null,          // R44：锚点段启发式 token（夹取前）
+        anchorClamped: out.anchorClamped ?? null,        // R44：锚点预算被下限抬过？
         anchorFailReason: out.anchorFailReason ?? null,
         walkBacks: out.walkBacks ?? 0,
         skipWhy: out.skipWhy ?? null,

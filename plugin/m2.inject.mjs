@@ -330,7 +330,17 @@ export function createM2Injection(deps) {
         const k = Math.round(v.retainBudget / 1000);
         if (isAnchorSrc) {
           const realK = f ? Math.round((v.retainBudget * f) / 1000) : null;
-          parts.push(`锚点之后原样保留 ~${k}k（启发式口径${realK ? `；**表盘 ≈ ${realK}k**（×${f}）` : ''}）`);
+          /* R44（真机发现）：锚点预算常被 **MIN 下限**抬起——真机 `recentUser:1` 的锚点段只有 1.4k
+           * 启发式，预算被 `MIN_RETAIN_TOKENS=40k` 抬到 40k。此时若只说"锚点之后原样保留 ~40k"，
+           * 会被读成"那段就有 40k" ⇒ 必须把「下限保护」说清（否则用户按这个数估落点会高估）。 */
+          const aTok = Number(v.anchorTokens);
+          const aK = Number.isFinite(aTok) && aTok > 0
+            ? (aTok >= 10_000 ? `${Math.round(aTok / 1000)}k` : `${(aTok / 1000).toFixed(1)}k`)
+            : null;
+          const clampNote = (v.anchorClamped === true && aK)
+            ? `；**下限保护**：锚点段实际只有 ~${aK}，为防丢新需求抬到 ~${k}k`
+            : '';
+          parts.push(`锚点之后原样保留 ~${k}k（启发式口径${clampNote}${realK ? `；**表盘 ≈ ${realK}k**（×${f}）` : ''}）`);
         } else {
           parts.push(`保留预算 ~${k}k${f ? `（真实口径 ×${f}）` : ''}`);
         }
