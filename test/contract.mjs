@@ -715,6 +715,16 @@ ok('R16.14 接线：趋势数据（增量/触线轮数）由 m2 现算并注入�
     desc15.length <= 500, `实际 ${desc15.length} 字符`);
   ok('R16.15 预算：三处教学合计 ≤ 3000 字符（去重前 ≈3900）',
     total15 <= 3000, `实际合计 ${total15}（desc ${desc15.length} + brief ${brief15.length} + card ${card15.length}）`);
+  /* R43（用户 2026-10-16）：「决策卡里是优先用 keepFrom 还是档位？使用时应该说清哪种模式。要求都是中文」。 */
+  const mode43 = (card15.match(/• \*\*两种模式[\s\S]*?锚点未命中自动退回档位。/) ?? [''])[0];
+  ok('R43 文本级：卡里写明「两种模式（二选一，**锚点优先**）」+ 按比例/按位置 + 锚点不折算 + 未命中退档位',
+    /两种模式（二选一，锚点优先）/.test(card15) && /①\*\*按比例\*\*/.test(card15) && /②\*\*按位置\*\*/.test(card15)
+    && /原样保留、不折算/.test(card15) && /锚点未命中自动退回档位/.test(card15)
+    && /表盘 ≈ 档位名 \+ 约 3%/.test(card15),
+    `实际：${mode43.slice(0, 220)}`);
+  ok('R43 中文守卫：模式说明**除代码标识符外全中文**（剥掉反引号片段后不得残留拉丁字母）',
+    mode43.length > 40 && !/[A-Za-z]/.test(mode43.replace(/`[^`]*`/g, '')),
+    `去代码后实际：${JSON.stringify(mode43.replace(/`[^`]*`/g, ''))}`);
   ok('R16.15/R27 决策行：要求绑定**提醒通道**（卡每轮一张）且**一轮只写一次**',
     /本轮开头先落一行决策/.test(card15) && /一轮只写一次/.test(card15),
     '决策行要求与提醒通道脱钩（卡不出现却要求写）/ 或没写清"一轮只写一次" ⇒ 多步轮次里每步都贴一行');
@@ -817,8 +827,9 @@ ok('R16.14 接线：趋势数据（增量/触线轮数）由 m2 现算并注入�
     /按上方趋势行判断/.test(cardTrend16) && !/若预计任务会推高占用/.test(cardTrend16),
     '趋势行与「若预计」并存 ⇒ 两种口径（评审剩项二）');
   ok('R16.16/R20 卡片：**两个方向都变数字**（多留的收益 + 少留的余量，不再单向劝导）',
-    /两个方向都算给你/.test(cardTrend16) && /浅压24%（留 240k）⇒ 丢 ~/.test(cardTrend16)
-      && /深压8%（留 80k）⇒ 丢 ~/.test(cardTrend16) && /代价对称/.test(cardTrend16),
+    /两个方向（选一个）/.test(cardTrend16) && /浅压24%（留 240k）⇒ 丢 ~/.test(cardTrend16)
+      && /深压8%（留 80k）⇒ 丢 ~/.test(cardTrend16)
+      && /多留 ⇒ 压后高、下次压缩更早；少留 ⇒ 余量大、摘要更早/.test(cardTrend16),
     '只给多留的好处 ⇒ 卡片本身在劝模型选浅压（R20 实测偏差）');
   rmSync(tmp16, { recursive: true, force: true });
 }
@@ -2926,8 +2937,9 @@ console.log('\n== 6.25 R20：卡片对称化 + 越线反向建议 ==');
     /const dirLine = /.test(ct) && /const afterOf = /.test(ct) && !/若先声明「\$\{textOf\('heavy'\)\}」（保留/.test(ct),
     '仍是单方向劝导 ⇒ 「Agent 都爱用浅压」的结构性成因没消除');
   ok('R20 行为级：两个方向都给出「丢多少 + 压后占用 + 距线轮数」',
-    /两个方向都算给你/.test(cardOver20) && /浅压24%（留 240k）⇒ 丢 ~/.test(cardOver20)
-      && /深压8%（留 80k）⇒ 丢 ~/.test(cardOver20) && /压后占用 ≈/.test(cardOver20) && /代价对称/.test(cardOver20),
+    /两个方向（选一个）/.test(cardOver20) && /浅压24%（留 240k）⇒ 丢 ~/.test(cardOver20)
+      && /深压8%（留 80k）⇒ 丢 ~/.test(cardOver20) && /压后占用 ≈/.test(cardOver20) && /距 75% ≈/.test(cardOver20)
+      && /多留 ⇒ 压后高、下次压缩更早；少留 ⇒ 余量大、摘要更早/.test(cardOver20),
     `实际：${cardOver20.slice(0, 160)}…`);
   ok('R20 行为级：越线卡**指明选更深的档**并解释「压了等于没压」（白多压一轮）',
     /已越强制线/.test(cardOver20) && /声明「深压8%」或「标准16%」/.test(cardOver20)
