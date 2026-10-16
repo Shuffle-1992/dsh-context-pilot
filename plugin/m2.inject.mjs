@@ -359,11 +359,17 @@ export function createM2Injection(deps) {
        * 把**压缩后的真实占用**念出来，并且**显式消歧**——因为同一句里还带着「浅压24% 档」「保留预算 ~240k」
        * 两个含 24 的数字，模型当初就是从这儿挑走"24%"的。两个数同时出现时必须写清"谁是谁"。
        * 口径与 DSH 表盘一致（见 core.mjs#projectedFromPressure / m3.measureRatio 的 R24 注释）；
-       * 该数是**压缩那一刻**的 provider 锚定投影 ⇒ provider 下次实报后可能略降（真机 51% → 40%），
-       * 每轮用量行的 used 会随之更新——所以这里预先说明，避免模型下一轮看到差值又去猜。 */
+       * 该数是**压缩那一刻**的 provider 锚定投影 ⇒ provider 下次实报后**会回落**（真机 51% → 40%，
+       * R45 又实测一次 19% → 10%）——所以这里必须**给出"稳定后预计"**，否则模型/用户会把中间值当结果。
+       * R45（用户实测观察）：回落量按**本会话已观测样本**（中位数）折算；没有样本时如实说"暂无实测值"。 */
+      const settledPct = Number.isFinite(v.settledRatio) ? Math.round(v.settledRatio * 100) : null;
+      const settledK = Number.isFinite(v.settledUsed) ? Math.round(v.settledUsed / 1000) : null;
       const after = Number.isFinite(v.ratioAfter)
         ? `**压缩后占用 ≈${Math.round(v.ratioAfter * 100)}%${Number.isFinite(v.usedAfter) ? `（${Math.round(v.usedAfter / 1000)}k）` : ''}**`
-          + '——档位名里的百分比是**保留预算比例、不是占用**；provider 下次实报后可能略降'
+          + (settledPct != null
+            ? `（provider 未刷新）⇒ **稳定后预计 ≈${settledPct}%${settledK != null ? `（${settledK}k）` : ''}**`
+            : '（provider 未刷新，下次请求后会回落；本会话暂无实测回落值）')
+          + '——档位名里的百分比是**保留预算比例、不是占用**'
         : null;
       if (v.state === 'executed') {
         const k = Number.isFinite(v.shadowedTokens) ? `省 ~${(v.shadowedTokens / 1000).toFixed(1)}K token` : '已执行';

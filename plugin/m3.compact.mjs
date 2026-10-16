@@ -310,6 +310,41 @@ export function createM3Compaction(deps) {
     try { const f = state.m3.retainFactor?.[sid]?.factor; return Number.isFinite(f) ? f : 1; } catch { return 1; }
   };
 
+  /* ═══ R45（用户实测观察，2026-10-16）：压缩刚完成时那个「压后占用」是 **provider 未刷新**的
+   * 投影值——真机：回执显示 19%，稳定后回落到 10%（差 ~9pp ≈ 90k token）。**行为没问题**
+   * （压缩确实生效了），问题在**回执把中间值当成了结果** ⇒ 用户会以为"压完还剩 19%"。
+   * 修法：压缩完成时挂一个「稳定观察」（settleWatch），在下一次**非 stale** 实测里量出真实回落量，
+   * 存成每会话样本（中位数，抗单次抖动）；之后回执直接给出「稳定后预计 ≈X%」。
+   * ⚠️ 只用**非 stale** 实测（stale 时 provider 旧报还扛着压缩前的大数 ⇒ 量出的"回落"是假的）。 */
+  const SETTLE_SAMPLES_CAP = 8;
+  const SETTLE_SID_CAP = 64;
+  const noteCompactSettle = (sid, mr) => {
+    try {
+      if (!sid || !mr?.ok || mr.stale || !Number.isFinite(mr.used)) return null;
+      const w = state.m3.settleWatch?.[sid];
+      if (!w || !Number.isFinite(w.used)) return null;
+      delete state.m3.settleWatch[sid];
+      const drop = w.used - mr.used;
+      if (!(drop > 0)) return null;
+      const bySid = state.m3.settleDrop = state.m3.settleDrop ?? {};
+      const arr = bySid[sid] = bySid[sid] ?? [];
+      arr.push({ drop: Math.round(drop), from: w.used, to: mr.used, at: new Date().toISOString() });
+      while (arr.length > SETTLE_SAMPLES_CAP) arr.shift();
+      const keys = Object.keys(bySid);
+      if (keys.length > SETTLE_SID_CAP) delete bySid[keys[0]];   // 有界化
+      return drop;
+    } catch { return null; }
+  };
+  const settleDropOf = (sid) => {
+    try {
+      const arr = state.m3.settleDrop?.[sid];
+      if (!Array.isArray(arr) || arr.length === 0) return null;
+      const ds = arr.map((x) => Number(x.drop)).filter((x) => Number.isFinite(x) && x > 0).sort((a, b) => a - b);
+      if (ds.length === 0) return null;
+      return { drop: ds[Math.floor(ds.length / 2)], n: ds.length, last: ds[ds.length - 1] };   // 中位数
+    } catch { return null; }
+  };
+
   /**
    * 执行一次压缩：**优先自选保留范围**（近端原样保留、更早转摘要），失败则按语义退回官方策略。
    * R16：保留预算按**会话档位**（Agent 经工具选择的 tier，会话级持久）解析；未选/非法 ⇒ standard。
@@ -477,6 +512,8 @@ export function createM3Compaction(deps) {
       /* R39：**每轮都刷新折算因子**（非 stale 才更新）——否则本会话首次压缩仍用 factor=1，
        * 「档位名副其实」要等到第二次压缩才生效。 */
       noteRetainFactor(sid, mr, agent.session);
+      /* R45：每次非 stale 实测都尝试结算上一次压缩的「稳定回落量」。 */
+      noteCompactSettle(sid, mr);
       /* ═══ R4（2026-10-08）：模型主动登记「下一步压缩」意图 ⇒ 轮内执行，本轮无缝继续 ═══
        * 这是替代「marker + 伪造恢复消息」的核心：工具调用必然产生下一步 ⇒ 下一步的 pre-step
        * 就在这里执行压缩 ⇒ 之后的步骤都在压缩后的上下文上继续，**不需要任何消息**。
@@ -650,11 +687,25 @@ export function createM3Compaction(deps) {
         ratioAfter: ratioAfter != null ? ratioAfter : null,
         usedAfter,
         basis: mr.ok ? mr.basis : null,
+        /* R45：把「稳定后预计」一并写进回执依据——压缩刚完成的 `usedAfter` 是 provider 未刷新的
+         * 投影值（真机 19% ⇒ 稳定后 10%），回执必须给出**预计稳定值**而不是只报中间值。 */
+        settleDropTokens: settleDropOf(sid)?.drop ?? null,
+        settleSamples: settleDropOf(sid)?.n ?? 0,
+        settledUsed: (Number.isFinite(usedAfter) && settleDropOf(sid))
+          ? Math.max(0, usedAfter - settleDropOf(sid).drop) : null,
+        settledRatio: (Number.isFinite(usedAfter) && settleDropOf(sid) && Number.isFinite(mr.window) && mr.window > 0)
+          ? Math.max(0, usedAfter - settleDropOf(sid).drop) / mr.window : null,
         skipWhy: out.skipWhy ?? null,
         officialWhy: out.officialWhy ?? null,
         ms: Date.now() - t0,
         read: false, // M2 域读到后置 true（一次性回执）
       });
+      /* R45：刚压完 ⇒ 挂「稳定观察」——下一次**非 stale** 实测里量出真实回落量（见 noteCompactSettle）。
+       * 只在 stale（provider 未刷新）时挂：那时值会回落，正是要量的对象。 */
+      if (Number.isFinite(usedAfter) && staleAfter) {
+        state.m3.settleWatch = state.m3.settleWatch ?? {};
+        state.m3.settleWatch[sid] = { at: Date.now(), used: usedAfter, ratio: ratioAfter };
+      }
       /* R5 取证口径：rangeSource 说明**实际用了哪条保留策略**（own=自选范围 / official=官方 overflow 兜底 /
        * own+official=自选后仍越线再收口 / none=判定无需压）。retainBudget 是自选预算（token）。 */
       const rangeInfo = {
@@ -825,5 +876,5 @@ export function createM3Compaction(deps) {
     }
   };
 
-  return { measureRatio, compactWithOwnRange, preStepCompaction, idleSweep, setCompactVerify, takeCompactVerify, isCompactionInFlight, noteEngineCompaction, noteRetainFactor, retainFactorOf };
+  return { measureRatio, compactWithOwnRange, preStepCompaction, idleSweep, setCompactVerify, takeCompactVerify, isCompactionInFlight, noteEngineCompaction, noteRetainFactor, retainFactorOf, noteCompactSettle, settleDropOf };
 }

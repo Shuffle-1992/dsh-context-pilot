@@ -592,7 +592,7 @@ ok('R16.13 接线：host 把 compaction/end 转发给 m3；m3 三处自己的压
     && /if \(isCompactionInFlight\(\)\) return null;/.test(m3src13)
     && (m3src13.match(/markOwnCompaction\(sid\)/g) ?? []).length >= 3
     && (m3src13.match(/clearOwnCompaction\(\)/g) ?? []).length >= 3
-    && /isCompactionInFlight, noteEngineCompaction, noteRetainFactor, retainFactorOf \}/.test(m3src13),
+    && /isCompactionInFlight, noteEngineCompaction, noteRetainFactor, retainFactorOf, noteCompactSettle, settleDropOf \}/.test(m3src13),
   '任一环缺位 ⇒ 引擎压缩仍无记录，或自家压缩被重复记录');
 ok('R16.13 文案：m5 为两种「非插件压缩」提供标签（不与「强制压缩」混淆）',
   /reason === 'engine-auto' \? '引擎自动压缩'/.test(m5src) && /reason === 'engine-manual' \? '手动压缩（\/compact）'/.test(m5src),
@@ -3480,10 +3480,10 @@ console.log('\n== 6.31 R24：占用口径对齐 DSH + 回执「压缩后占用�
   const out26 = await mkM2({ m2: { skips: {}, injections: 0 }, m3: {} }, undefined, stubVerify(v26),
     { RETAIN_RATIO: 0.16, tierText: () => '浅压24%' })
     .buildInjection({ agent, step: 1, turn: 1 });
-  ok('R26 端到端：真机帧 ⇒ 回执写「压缩后占用 ≈51%（510k）」而**不是**把「浅压24%」当占用（并预告下次实报可能略降）',
+  ok('R26 端到端：真机帧 ⇒ 回执写「压缩后占用 ≈51%（510k）」而**不是**把「浅压24%」当占用（并说明 provider 未刷新）',
     /压缩后占用 ≈51%（510k）/.test(out26?.text ?? '')
     && /浅压24% 档/.test(out26?.text ?? '')
-    && /provider 下次实报后可能略降/.test(out26?.text ?? ''),
+    && /provider 未刷新/.test(out26?.text ?? ''),
     `实际：${String(out26?.text ?? '').slice(0, 260)}`);
   ok('R24 接线：m3 在**每条路径**上取值（executed 测、no-need 用当前值）并写进 verify',
     /ratioAfter: ratioAfter != null \? ratioAfter : null,/.test(m3src) && /usedAfter,/.test(m3src)
@@ -3982,6 +3982,36 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
   ok('R39 接线：pre-step **每轮刷新因子**（否则本会话首次压缩仍用 factor=1，"名副其实"要等第二次）',
     /recordRatioSample\(sid, ratio, mr\);[\s\S]{0,260}?noteRetainFactor\(sid, mr, agent\.session\);/.test(m3src),
     'pre-step 不刷新因子 ⇒ 首次压缩不折算');
+
+  /* ═══ R45（用户实测观察 2026-10-16）：压缩刚完成的「压后占用」是 provider **未刷新**的投影值——
+   * 真机：回执显示 19%，稳定后回落到 10%（差 ~9pp ≈ 90k token）。行为没问题（压缩确实生效），
+   * 问题在**回执把中间值当结果**。修法：压缩时挂稳定观察，下一次非 stale 实测量出回落量（中位数），
+   * 回执据此给出「稳定后预计 ≈X%」。 */
+  const st45 = { m3: { settleWatch: { s45: { used: 200000 } } } };
+  const api45 = mk39(st45, { breakdown: { systemTokens: 2162, messageTokens: 244360, toolsTokens: 15751 } });
+  const d45a = api45.noteCompactSettle('s45', { ok: true, used: 110000, stale: false });   // 真机 192k→100k 同型
+  const s45a = api45.settleDropOf('s45');
+  ok('R45 行为级：非 stale 实测 ⇒ 量出回落量（200k→110k ⇒ drop=90000，样本 1 条）',
+    d45a === 90000 && s45a?.drop === 90000 && s45a?.n === 1 && st45.m3.settleWatch?.s45 === undefined,
+    `实际 drop=${d45a} rec=${JSON.stringify(s45a)} watch=${JSON.stringify(st45.m3.settleWatch)}`);
+  const st45b = { m3: { settleWatch: { s45b: { used: 200000 } } } };
+  const api45b = mk39(st45b, null);
+  const d45b = api45b.noteCompactSettle('s45b', { ok: true, used: 110000, stale: true });   // stale ⇒ 假的回落
+  ok('R45 行为级：**stale 实测不得记回落**（provider 旧报还扛着压缩前的大数 ⇒ 量出来是假的）',
+    d45b === null && api45b.settleDropOf('s45b') === null && Number.isFinite(st45b.m3.settleWatch?.s45b?.used),
+    `实际 drop=${d45b} rec=${JSON.stringify(api45b.settleDropOf('s45b'))}`);
+  const v45 = { ...v39, ratioAfter: 0.19, usedAfter: 192000, settledRatio: 0.10, settledUsed: 100000, settleDropTokens: 92000 };
+  const out45 = await mkM2({ m2: { skips: {}, injections: 0 }, m3: {} }, undefined, stubVerify(v45),
+    { RETAIN_RATIO: 0.24, tierText: () => '浅压24%' }).buildInjection({ agent, step: 1, turn: 1 });
+  ok('R45 端到端：回执给**两个数**——「压缩后占用 ≈19%（192k）（provider 未刷新）⇒ 稳定后预计 ≈10%（100k）」',
+    /压缩后占用 ≈19%（192k）\*\*（provider 未刷新）⇒ \*\*稳定后预计 ≈10%（100k）\*\*/.test(out45?.text ?? ''),
+    `实际：${String(out45?.text ?? '').slice(0, 300)}`);
+  const out45b = await mkM2({ m2: { skips: {}, injections: 0 }, m3: {} }, undefined,
+    stubVerify({ ...v39, ratioAfter: 0.19, usedAfter: 192000, settledRatio: null, settledUsed: null }),
+    { RETAIN_RATIO: 0.24, tierText: () => '浅压24%' }).buildInjection({ agent, step: 1, turn: 1 });
+  ok('R45 反例：**没有实测样本**时如实说「暂无实测回落值」，不得凭空给「稳定后预计」',
+    /本会话暂无实测回落值/.test(out45b?.text ?? '') && !/稳定后预计/.test(out45b?.text ?? ''),
+    `实际：${String(out45b?.text ?? '').slice(0, 300)}`);
 }
 
 /* ═══════════ 汇总 ═══════════ */
