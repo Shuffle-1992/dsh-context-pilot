@@ -3800,6 +3800,46 @@ console.log('\n== 6.36 R35：持续重复上报面板 + 可复制纠正文案 ==
     'm2 拿不到 HUD 出口 ⇒ 上报静默失效（用户永远看不到"建议手动纠正"）');
 }
 
+/* ═══════════ 6.37 R37：压缩后的"过渡值"必须带 provider 待刷新提示 ═══════════
+ * 真机（2026-10-16 14:37 `session-54597a24`）：手动 `/compact` 后面板写「压后占用 12.6%」，
+ * 而 13 分钟后表盘变成 5%——因为刚压完时 `providerReported` 还是压缩前的旧实报（387,168），
+ * 只按 surface 增量修正：`387168 + 8194 − 269183 = 126179 = 12.6%`；下一次请求完成后 provider
+ * 实报真实值（~53.6K ⇒ 5%）。面板那行不带提示 ⇒ 用户以为数字在乱跳。 */
+console.log('\n== 6.37 R37：压缩后过渡值带「provider 待刷新」提示 ==');
+{
+  const m3Mod37 = await import(pathToFileURL(join(PLUGIN, 'm3.compact.mjs')).href);
+  const pfp37 = (await import(pathToFileURL(join(PLUGIN, 'core.mjs')).href)).projectedFromPressure;
+  const mk37 = (pressure) => {
+    const acts = [];
+    const api = m3Mod37.createM3Compaction({
+      state: { m3: {} }, log: () => {}, msg: (e) => String(e), pick: (...a) => a.find((x) => x != null),
+      tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+      nfmt: (n) => String(n), errCodeOf: (e) => String(e?.code ?? 'err'), schedule: () => {},
+      svc: (k) => (k === 'sessionProjections' ? { stateOf: () => pressure }
+        : k === 'tokenMeter' ? { measure: () => ({ totalTokens: 126435, surfaceTokens: 8194 }) } : null),
+      projectedFromPressure: pfp37,
+      M3: {}, effEnabled: () => true, criticalCapOf: () => 0.75, resolveCompactionFor: () => ({ service: null, via: 'stub' }),
+      publishHud: () => {}, recordHudAct: (sid, t) => acts.push({ sid, t }),
+      formatAct: (r) => '14:37 · ' + ({ 'engine-manual': '手动压缩（/compact）', 'engine-auto': '引擎自动压缩' }[r] ?? String(r)),
+      clearBriefed: () => {}, awaitRange: async () => null,
+      getCompactTool: () => ({ hasTier: () => true, tierText: (t) => t }),
+      COMPACT_TIMEOUT_MS: 1000, SET_CAP: 10,
+    });
+    return { api, acts };
+  };
+  const a37 = mk37({ contextWindow: 1000000, pressureTokens: 387168, surfaceTokens: 8194, sampledSurfaceTokens: 269183 });
+  const t37 = a37.api.noteEngineCompaction({ type: 'compaction/end', data: { compactionId: 'c37', sourceCommandId: 'cmd-x' } }, { id: 'sess-37' });
+  ok('R37 行为级：刚压完（surface 比上报时缩水 >50%）⇒ 面板行带「provider 待刷新，下次请求后会回落」',
+    /压后占用 12\.6%/.test(t37 ?? '') && /provider 待刷新，下次请求后会回落/.test(t37 ?? '')
+    && /provider 待刷新/.test(a37.acts[0]?.t ?? ''),
+    `实际面板行：${JSON.stringify(t37)}`);
+  const b37 = mk37({ contextWindow: 1000000, pressureTokens: 333154, surfaceTokens: 224103, sampledSurfaceTokens: 223399 });
+  const t37b = b37.api.noteEngineCompaction({ type: 'compaction/end', data: { compactionId: 'c38', sourceCommandId: 'cmd-y' } }, { id: 'sess-37b' });
+  ok('R37 行为级：正常轮次（未压缩）不附该提示（避免每行都拖一句）',
+    !/provider 待刷新/.test(t37b ?? ''),
+    `实际：${JSON.stringify(t37b)}`);
+}
+
 /* ═══════════ 汇总 ═══════════ */
 console.log(`\n${'='.repeat(52)}`);
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);

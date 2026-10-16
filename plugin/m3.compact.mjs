@@ -194,10 +194,14 @@ export function createM3Compaction(deps) {
        * R22：兜底也**不许回英文 id**（旧写法 `?? 'standard'` 在工具域未加载时会把 id 写进 tooltip）
        * ⇒ 退成中性的中文说法，宁可少给数值也不给英文。 */
       const stdText = (() => { try { return getCompactTool()?.tierText?.('standard') ?? '默认档'; } catch { return '默认档'; } })();
+      /* R37（2026-10-16 真机）：压缩刚完成时表盘是**过渡值**——`providerReported` 还是压缩前的旧实报，
+       * 只按 surface 增量修正（真机：387,168 + 8,194 − 269,183 = 126,179 = 12.6%，而真实值 5%）。
+       * 面板那行只写「压后占用 12.6%」⇒ 用户以为数字在乱跳。带上 `stale` 提示（下次请求后回落）。 */
+      const staleNote = mr?.stale ? '（provider 待刷新，下次请求后会回落）' : '';
       const text = base
         + (declared ? '' : ` · 系统代压（本会话未申报档位 ⇒ 按兜底 ${stdText}）`)
         + (preempted ? ` · 引擎抢先：我方上次估计 ${(Number(lastSeen) * 100).toFixed(1)}% ＜ 我方线 ${(Number(ourLine) * 100).toFixed(0)}%（引擎在 step 边界判定，排在插件之前）` : '')
-        + (d.error ? ` · 失败（${failWhy(d.error)}）` : (ratioAfter != null ? ` · 压后占用 ${(ratioAfter * 100).toFixed(1)}%` : ''));
+        + (d.error ? ` · 失败（${failWhy(d.error)}）` : (ratioAfter != null ? ` · 压后占用 ${(ratioAfter * 100).toFixed(1)}%${staleNote}` : ''));
       recordHudAct(sidE, text);
       publishHud({ hudLastAct: text });
       state.m3.engineCompacts = (state.m3.engineCompacts ?? 0) + 1;
