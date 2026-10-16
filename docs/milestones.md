@@ -3151,3 +3151,27 @@ idle 路径绕过单源 ⇒ 红 1。
 （折算 7 例 / 因子更新与 stale 守卫 / 拿不到组成则退回 1 / 回执点明 / 两条接线）。
 **变异 4/4 CAUGHT**：不折算 ⇒ 红 1；允许 factor<1（保留更多）⇒ 红 1；stale 也更新因子 ⇒ 红 1；
 pre-step 不刷新因子 ⇒ 红 1。
+
+#### R39.1 首次实测**折算没生效**——我读错了"三行组成"的来源（2026-10-16，如实记录）
+
+用户「现在测试」后我压了一次，回执写「保留预算 ~240k」**没有 ×因子**，只省 51.7K、压后 42% ⇒ 折算没生效。
+**账本证据**（`lastCompactVerify`）：`retainBudgetHeur: 240000` / `retainFactor: 1`
+⇒ 新代码**确实在跑**，但因子恒为 1（`state.m3.retainFactor` 根本没记录）。
+
+**根因**：R39 第一版写的是 `summarizeBreakdown(mr.measure)`——但按契约 `summarizeBreakdown` 要的是
+**breakdown 对象**，它来自**另一个服务调用**：
+`svc('sessionProjections').stateOf(session, 'contextBreakdown')`（m1 账本同款取法）。
+传整个 `measure` ⇒ 返回 null（或只有 system 行的退化形状）⇒ 因子算不出来。
+
+**修法（R39.1）**：
+1. 改从 `stateOf(session, 'contextBreakdown')` 取组成（兜底才退回 `measure`）；
+2. **形状守卫**：组成必须**三行齐全**（`tools`/`messages` 都是数字）才用——否则"只有 system 行"会被当成
+   分母（2,162）⇒ factor 直接顶到上限 2 ⇒ **压过头**；不齐就**不折算**（退回 1，宁可不变也不猜）；
+3. `summarizeBreakdown` 提为**模块级导出**（测试用真函数）；
+4. **测试改造（重要教训）**：R39 的测试把 `summarizeBreakdown` **整体桩成"返回三行"** ⇒ 太配合，
+   把"传错对象"这个真 bug 放过去了。现改为**只在服务边界打桩**（`stateOf`），组成计算用**真函数**
+   ——变异 M2（把代码改回 `summarizeBreakdown(mr.measure)`）现在**能红**。
+
+**验证**：**731 断言全绿**（contract **584** / static 72 / report 54 / boot 21）。R39 段 +2 条
+（三行不齐 ⇒ 不设因子；拿不到组成 ⇒ 不设因子）。**变异 3/3 CAUGHT**：去掉三行守卫 ⇒ 红 1；
+退回原 bug（只读 measure）⇒ 红 1；stale 也更新 ⇒ 红 1。

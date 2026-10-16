@@ -3876,38 +3876,42 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
     && f39(0, 1.4) === 0,
     `实际 ${JSON.stringify([f39(240000, 1), f39(240000, 1.4), f39(240000, 2), f39(240000, 5), f39(240000, 0.5), f39(240000, null)])}`);
 
-  /* 因子来源：只用**非 stale** 的实测（stale 是刚压完的过渡值，用它折算会把预算压过头）。 */
-  const st39 = { m3: {} };
-  const api39 = m3Mod39.createM3Compaction({
-    state: st39, log: () => {}, msg: (e) => String(e), pick: (...a) => a.find((x) => x != null),
+  /* 因子来源：**真 summarizeBreakdown + 在服务边界打桩**（`stateOf('contextBreakdown')`）。
+   * ⚠️ R39.1 教训：第一版测试把 `summarizeBreakdown` 整体桩成"返回三行"⇒ 太配合，把
+   * "传错对象（整个 measure）"这个真 bug 放了过去（真机：retainBudgetHeur=240000 / retainFactor=1）。 */
+  const coreMod39 = await import(pathToFileURL(join(PLUGIN, 'core.mjs')).href);
+  const mk39 = (state, bdValue) => m3Mod39.createM3Compaction({
+    state, log: () => {}, msg: (e) => String(e), pick: (...a) => a.find((x) => x != null),
     tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
     nfmt: (n) => String(n), errCodeOf: (e) => String(e?.code ?? 'err'), schedule: () => {},
-    svc: () => null, projectedFromPressure: () => ({ used: null, projected: null, reported: null, surface: null, sampled: null, basis: 'x' }),
-    summarizeBreakdown: () => ({ system: 2162, tools: 15751, messages: 244360 }),   // 可见组成 = 262,273
+    svc: (k) => (k === 'sessionProjections' ? { stateOf: () => bdValue } : null),
+    projectedFromPressure: () => ({ used: null, projected: null, reported: null, surface: null, sampled: null, basis: 'x' }),
+    summarizeBreakdown: coreMod39.summarizeBreakdown,   // **真函数**
     M3: {}, effEnabled: () => true, criticalCapOf: () => 0.75, resolveCompactionFor: () => ({ service: null, via: 'stub' }),
     publishHud: () => {}, recordHudAct: () => {}, formatAct: () => '', clearBriefed: () => {},
     awaitRange: async () => null, getCompactTool: () => null, COMPACT_TIMEOUT_MS: 1000, SET_CAP: 10,
   });
-  api39.noteRetainFactor('s39', { ok: true, used: 400672, stale: false, measure: {} });
+  const st39 = { m3: {} };
+  const api39 = mk39(st39, { breakdown: { systemTokens: 2162, messageTokens: 244360, toolsTokens: 15751 } });
+  api39.noteRetainFactor('s39', { ok: true, used: 400672, stale: false }, { id: 's39' });
   const fA = api39.retainFactorOf('s39');
-  api39.noteRetainFactor('s39', { ok: true, used: 455337, stale: true, measure: {} });   // 过渡值 ⇒ 不得更新
+  api39.noteRetainFactor('s39', { ok: true, used: 455337, stale: true }, { id: 's39' });   // 过渡值 ⇒ 不得更新
   const fB = api39.retainFactorOf('s39');
   ok('R39 行为级：非 stale 实测 ⇒ 因子 = 真实/可见（400672/262273 ≈ 1.53）；**stale 不得更新**（否则预算被压过头）',
     Math.abs(fA - 1.53) < 0.01 && fB === fA && st39.m3.retainFactor?.s39?.visible === 262273,
     `实际 fA=${fA} fB=${fB} rec=${JSON.stringify(st39.m3.retainFactor?.s39)}`);
-  const api39b = m3Mod39.createM3Compaction({
-    state: { m3: {} }, log: () => {}, msg: (e) => String(e), pick: (...a) => a.find((x) => x != null),
-    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
-    nfmt: (n) => String(n), errCodeOf: (e) => String(e?.code ?? 'err'), schedule: () => {},
-    svc: () => null, projectedFromPressure: () => ({}), summarizeBreakdown: () => null,
-    M3: {}, effEnabled: () => true, criticalCapOf: () => 0.75, resolveCompactionFor: () => ({ service: null, via: 'stub' }),
-    publishHud: () => {}, recordHudAct: () => {}, formatAct: () => '', clearBriefed: () => {},
-    awaitRange: async () => null, getCompactTool: () => null, COMPACT_TIMEOUT_MS: 1000, SET_CAP: 10,
-  });
-  ok('R39 行为级：拿不到可见组成 ⇒ 不设因子（退回 1，行为与旧版一致，不猜）',
-    api39b.noteRetainFactor('s39b', { ok: true, used: 400672, stale: false, measure: {} }) === null
+  /* R39.1 形状守卫（真机 bug 的回归）：误把 `measure` 当组成 ⇒ 只有 system 行 ⇒ 若照算会把
+   * 2,162 当分母 ⇒ factor 顶到上限 2 ⇒ **压过头**。必须拒绝（不设因子）。 */
+  const api39b = mk39({ m3: {} }, { nodes: [{ heuristicTokens: 2162, system: true }], totalTokens: 1 });
+  ok('R39.1 形状守卫：组成**三行不齐**（tools/messages 为 null）⇒ 不设因子',
+    api39b.noteRetainFactor('s39b', { ok: true, used: 400672, stale: false }, { id: 's39b' }) === null
     && api39b.retainFactorOf('s39b') === 1,
-    `实际 factor=${api39b.retainFactorOf('s39b')}`);
+    `实际 factor=${api39b.retainFactorOf('s39b')}（若按 system=2162 当分母 ⇒ factor 顶到 2 ⇒ 压过头）`);
+  const api39c = mk39({ m3: {} }, null);   // stateOf 拿不到组成
+  ok('R39.1 行为级：`stateOf(contextBreakdown)` 拿不到 ⇒ 不设因子（退回 1，行为与旧版一致，不猜）',
+    api39c.noteRetainFactor('s39c', { ok: true, used: 400672, stale: false }, { id: 's39c' }) === null
+    && api39c.retainFactorOf('s39c') === 1,
+    `实际 factor=${api39c.retainFactorOf('s39c')}`);
 
   const v39 = {
     at: new Date().toISOString(), sessionId: 'selfcheck-1', state: 'executed', trigger: 'pressure',
@@ -3923,7 +3927,7 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
     /summarizeBreakdown, \/\/ R39/.test(host) && /summarizeBreakdown,/.test(m3src),
     'm3 拿不到可见组成 ⇒ 折算因子恒为 1（静默失效）');
   ok('R39 接线：pre-step **每轮刷新因子**（否则本会话首次压缩仍用 factor=1，"名副其实"要等第二次）',
-    /recordRatioSample\(sid, ratio, mr\);[\s\S]{0,260}?noteRetainFactor\(sid, mr\);/.test(m3src),
+    /recordRatioSample\(sid, ratio, mr\);[\s\S]{0,260}?noteRetainFactor\(sid, mr, agent\.session\);/.test(m3src),
     'pre-step 不刷新因子 ⇒ 首次压缩不折算');
 }
 

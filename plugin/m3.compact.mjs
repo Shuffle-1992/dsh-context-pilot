@@ -282,11 +282,21 @@ export function createM3Compaction(deps) {
    * `visible` = 系统 + 工具 + 消息（`summarizeBreakdown` 单源）——即"三行组成"；
    * `factor = 表盘真实 / visible`，夹在 [1,2]。stale（刚压完的过渡值）时**不更新**：
    * 过渡值里 provider 旧报还扛着压缩前的大数，用它折算会把预算压过头。 */
-  const noteRetainFactor = (sid, mr) => {
+  const noteRetainFactor = (sid, mr, session) => {
     try {
       if (!sid || !mr?.ok || mr.stale) return null;
-      const bv = summarizeBreakdown?.(mr.measure);
-      const vis = bv ? (Number(bv.system) || 0) + (Number(bv.tools) || 0) + (Number(bv.messages) || 0) : null;
+      /* ⚠️ R39.1（真机 bug，2026-10-16）：三行组成**不在 `measure` 里**，而是
+       * `svc('sessionProjections').stateOf(session, 'contextBreakdown')`（与 m1 账本同款取法）。
+       * 第一版把整个 `measure` 传给 `summarizeBreakdown` ⇒ 按契约返回 null ⇒ 因子恒为 1
+       * （真机证据：`retainBudgetHeur: 240000` / `retainFactor: 1` ⇒ 折算完全没生效）。 */
+      const sp = svc('sessionProjections');
+      const bv = summarizeBreakdown?.(tryOf(() => sp?.stateOf?.(session, 'contextBreakdown')).value ?? null)
+        /* 兜底：拿不到 `contextBreakdown` 时**退回 measure**，但只接受"三行齐全"的结果——
+         * `summarizeBreakdown(measure)` 只会给出 system 行（tools/messages 为 null），
+         * 用它算比值会把 2,162 当分母 ⇒ factor 直接顶到上限 2 ⇒ **压过头**。宁可不算（factor=1）。 */
+        ?? summarizeBreakdown?.(mr.measure);
+      const hasAllRows = bv && Number.isFinite(bv.tools) && Number.isFinite(bv.messages);
+      const vis = hasAllRows ? (Number(bv.system) || 0) + bv.tools + bv.messages : null;
       if (!Number.isFinite(vis) || vis <= 0 || !Number.isFinite(mr.used)) return null;
       const factor = Math.min(Math.max(mr.used / vis, 1), 2);
       const bySid = state.m3.retainFactor = state.m3.retainFactor ?? {};
@@ -342,7 +352,7 @@ export function createM3Compaction(deps) {
     const useAnchor = Number.isFinite(anchorBudget) && anchorBudget > 0;
     /* R39：档位预算按**真实口径**折算（因子来自非 stale 实测；只减不增，夹在 [1,2]）。
      * `tierBudget` 保持"档位承诺"（回执/报告报它，真实口径）；交给范围选择的是折算后的启发式预算。 */
-    noteRetainFactor(sid, measureRatio(agent.session));
+    noteRetainFactor(sid, measureRatio(agent.session), agent.session);
     const retainFactor = retainFactorOf(sid);
     const tierBudgetHeur = scaleRetainBudget(tierBudget, retainFactor);
     const budget = useAnchor ? anchorBudget : tierBudgetHeur;
@@ -458,7 +468,7 @@ export function createM3Compaction(deps) {
       recordRatioSample(sid, ratio, mr);
       /* R39：**每轮都刷新折算因子**（非 stale 才更新）——否则本会话首次压缩仍用 factor=1，
        * 「档位名副其实」要等到第二次压缩才生效。 */
-      noteRetainFactor(sid, mr);
+      noteRetainFactor(sid, mr, agent.session);
       /* ═══ R4（2026-10-08）：模型主动登记「下一步压缩」意图 ⇒ 轮内执行，本轮无缝继续 ═══
        * 这是替代「marker + 伪造恢复消息」的核心：工具调用必然产生下一步 ⇒ 下一步的 pre-step
        * 就在这里执行压缩 ⇒ 之后的步骤都在压缩后的上下文上继续，**不需要任何消息**。

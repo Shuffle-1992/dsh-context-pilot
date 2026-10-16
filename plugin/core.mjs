@@ -132,7 +132,9 @@ function compactMeasure(m) {
  * 实测形状（2026-10-06 报告取证）：`{ nodes: [...], breakdown: { systemTokens, messageTokens, toolsTokens } }`；
  * 兼容数组 / {entries} / {nodes} 等容器，留 sample 供形状取证。
  */
-function summarizeBreakdown(bd) {
+/* R39.1：**导出为模块级纯函数**——测试要能用"真函数"验证折算因子（只桩在服务边界）。
+ * 工厂出口仍照旧返回它（宿主解构使用），两处是同一个函数。 */
+export function summarizeBreakdown(bd) {
   if (!bd || typeof bd !== 'object') return null;
   const nodes = Array.isArray(bd.nodes) ? bd.nodes : null;
   const b = bd.breakdown;
