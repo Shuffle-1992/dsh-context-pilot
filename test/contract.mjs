@@ -3840,6 +3840,26 @@ console.log('\n== 6.37 R37：压缩后过渡值带「provider 待刷新」提示
     `实际：${JSON.stringify(t37b)}`);
 }
 
+/* ═══════════ 6.38 R38：面板行的「压后占用」后缀**单源**（三条路径共用） ═══════════
+ * 起因：我们自己发起的压缩（pre-step 自选范围 / idle 扫除）面板行只写「省 XK」，**没有占用数**；
+ * 而引擎/手动那条带占用却没提示（R37 已补）。用户要求把自选范围那条也升级 ⇒ 顺手抽成**单源**，
+ * 避免"同一物理量三处各写一遍"（本项目多次踩坑）。 */
+console.log('\n== 6.38 R38：压后占用后缀单源 ==');
+{
+  const m3Mod38 = await import(pathToFileURL(join(PLUGIN, 'm3.compact.mjs')).href);
+  const f38 = m3Mod38.occupancyActSuffix;
+  ok('R38 行为级：后缀带占用 + stale 提示；非 stale 不带提示；无值返回空串',
+    f38(0.455, true) === ' · 压后占用 45.5%（provider 待刷新，下次请求后会回落）'
+    && f38(0.126, true) === ' · 压后占用 12.6%（provider 待刷新，下次请求后会回落）'
+    && f38(0.33, false) === ' · 压后占用 33.0%'
+    && f38(null, true) === '' && f38(undefined) === '',
+    `实际 ${JSON.stringify([f38(0.455, true), f38(0.33, false), f38(null, true)])}`);
+  const uses38 = (m3src.match(/occupancyActSuffix\(/g) ?? []).length;
+  ok('R38 单源守卫：三条面板路径（引擎/手动、pre-step、idle）**共用同一个后缀函数**，且没有第二份内联实现',
+    uses38 >= 4 && !/· 压后占用 \$\{/.test(m3src.replace(/occupancyActSuffix[\s\S]{0,200}?· 压后占用/g, '')),
+    `实际 occupancyActSuffix 出现 ${uses38} 次（1 定义 + ≥3 调用）；内联实现 ${/· 压后占用 \$\{/.test(m3src) ? '仍存在' : '已无'}`);
+}
+
 /* ═══════════ 汇总 ═══════════ */
 console.log(`\n${'='.repeat(52)}`);
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);

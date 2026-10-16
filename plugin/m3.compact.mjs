@@ -26,6 +26,15 @@
  * - idle 与 pre-step 都钳到 `min(配置, 引擎阈值 − 5pp)` 之下（5pp 理由见 threshold.mjs）。
  */
 
+/** R38（2026-10-16）：面板/记录行里的「压后占用」后缀——**三条路径共用一份**
+ * （引擎/手动、pre-step 自选范围、idle 扫除），避免"同一物理量三处各写一遍"（本项目多次踩坑）。
+ * `stale`（surface 比 provider 上报时缩水 >50%）⇒ 带「provider 待刷新，下次请求后会回落」：
+ * 刚压完的表盘是**过渡值**（真机：12.6% → 13 分钟后 5%，见 R37 的账本算术）。 */
+export function occupancyActSuffix(ratioAfter, stale) {
+  if (!Number.isFinite(ratioAfter)) return '';
+  return ` · 压后占用 ${(ratioAfter * 100).toFixed(1)}%${stale ? '（provider 待刷新，下次请求后会回落）' : ''}`;
+}
+
 export function createM3Compaction(deps) {
   const {
     /* 只读依赖 */
@@ -194,14 +203,13 @@ export function createM3Compaction(deps) {
        * R22：兜底也**不许回英文 id**（旧写法 `?? 'standard'` 在工具域未加载时会把 id 写进 tooltip）
        * ⇒ 退成中性的中文说法，宁可少给数值也不给英文。 */
       const stdText = (() => { try { return getCompactTool()?.tierText?.('standard') ?? '默认档'; } catch { return '默认档'; } })();
-      /* R37（2026-10-16 真机）：压缩刚完成时表盘是**过渡值**——`providerReported` 还是压缩前的旧实报，
+      /* R37/R38（2026-10-16 真机）：压缩刚完成时表盘是**过渡值**——`providerReported` 还是压缩前的旧实报，
        * 只按 surface 增量修正（真机：387,168 + 8,194 − 269,183 = 126,179 = 12.6%，而真实值 5%）。
-       * 面板那行只写「压后占用 12.6%」⇒ 用户以为数字在乱跳。带上 `stale` 提示（下次请求后回落）。 */
-      const staleNote = mr?.stale ? '（provider 待刷新，下次请求后会回落）' : '';
+       * 面板那行必须带 `stale` 提示（后缀由 occupancyActSuffix 单源提供，三条路径共用）。 */
       const text = base
         + (declared ? '' : ` · 系统代压（本会话未申报档位 ⇒ 按兜底 ${stdText}）`)
         + (preempted ? ` · 引擎抢先：我方上次估计 ${(Number(lastSeen) * 100).toFixed(1)}% ＜ 我方线 ${(Number(ourLine) * 100).toFixed(0)}%（引擎在 step 边界判定，排在插件之前）` : '')
-        + (d.error ? ` · 失败（${failWhy(d.error)}）` : (ratioAfter != null ? ` · 压后占用 ${(ratioAfter * 100).toFixed(1)}%${staleNote}` : ''));
+        + (d.error ? ` · 失败（${failWhy(d.error)}）` : occupancyActSuffix(ratioAfter, mr?.stale));
       recordHudAct(sidE, text);
       publishHud({ hudLastAct: text });
       state.m3.engineCompacts = (state.m3.engineCompacts ?? 0) + 1;
@@ -525,12 +533,13 @@ export function createM3Compaction(deps) {
       let rangeSource = out.source;
       let ratioAfter = null;
       let usedAfter = null;
+      let staleAfter = false;   // R38：刚压完 ⇒ provider 还没刷新（面板行要带提示）
       /* R24：压缩后的占用**在每条路径上都取值**（原先只在 own 分支取，且没进回执）——
        * 不报这个数时模型只能拿档位名/保留预算自己猜：真机把「保留 ~240k」读成「回到 24%」，
        * 而 DSH 表盘当时是 40%（`projectedTokens`）。口径见 measureRatio 的 R24 注释。 */
       {
         const mrA = result != null ? measureRatio(agent.session) : mr;
-        if (mrA?.ok) { ratioAfter = mrA.ratio; usedAfter = mrA.used; }
+        if (mrA?.ok) { ratioAfter = mrA.ratio; usedAfter = mrA.used; staleAfter = mrA.stale === true; }
       }
       /* 强制线收口（R16 泛化）：**无论档位/触发**，自算压完仍在线之上 ⇒ 追加官方 overflow 再压一次。
        * 保证「越强制线必定压到线下」这条旧承诺不因换了保留策略（哪怕 Agent 选了 heavy 浅压）而丢失。 */
@@ -619,7 +628,7 @@ export function createM3Compaction(deps) {
         /* D8/F13（R7 审查修）：HUD 文案必须用**真实触发原因**——原先写死 `'pressure'`，
          * 于是「模型主动请求压缩」在弹窗与 hud-acts 里被标成「强制压缩」，与实际动机不符
          * （而 `lastPreStep.trigger` 记的是真值 ⇒ 同一件事两个说法）。 */
-        const __t = formatAct(trigger, result?.shadowedTokenCount);
+        const __t = formatAct(trigger, result?.shadowedTokenCount) + occupancyActSuffix(ratioAfter, staleAfter);
         publishHud({ hudLastAct: __t }); // M5
         recordHudAct(sid, __t);
         clearBriefed(sid); // R1：同 idle 路径——压缩后一次性说明需重讲
@@ -702,7 +711,8 @@ export function createM3Compaction(deps) {
             shadowedTokens: result?.shadowedTokenCount ?? null,
             range: result?.shadowedRange ?? null,
           };
-          const __actText = formatAct(reason, result?.shadowedTokenCount);
+          const mrI = measureRatio(agent.session);   // R38：idle 路径同样报「压后占用」（带 stale 提示）
+          const __actText = formatAct(reason, result?.shadowedTokenCount) + occupancyActSuffix(mrI?.ok ? mrI.ratio : null, mrI?.stale);
           publishHud({ hudLastAct: __actText }); // M5
           recordHudAct(sid, __actText);
           /* R1：压缩成功 ⇒ 一次性说明（压缩流程 + 智能思考教学）已随旧对话被收走，
