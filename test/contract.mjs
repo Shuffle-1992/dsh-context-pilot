@@ -2260,7 +2260,7 @@ console.log('\n== 6.20a R16 压缩档位（compact-range.mjs） ==');
 }
 console.log('\n== 6.20 工具后自检回执 + 思考强度可切性 ==');
 const m2Mod = await import(pathToFileURL(join(PLUGIN, 'm2.inject.mjs')).href);
-const mkM2 = (state, measure, takeVerify, rangeApi, compactToolApi) => m2Mod.createM2Injection({
+const mkM2 = (state, measure, takeVerify, rangeApi, compactToolApi, extra) => m2Mod.createM2Injection({
   state, log: () => {}, msg: (e) => String(e?.message ?? e), pick: (...a) => a.find((x) => x != null),
   schedule: () => {}, svc: () => null,
   tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
@@ -2272,6 +2272,7 @@ const mkM2 = (state, measure, takeVerify, rangeApi, compactToolApi) => m2Mod.cre
   takeCompactVerify: takeVerify ?? (() => null),
   getRangeApi: () => rangeApi ?? ({ RETAIN_RATIO: 0.16 }), getCompactToolApi: () => compactToolApi ?? null, getEffortApi: () => null,
   getCreateUserMessage: () => () => ({ fake: 'user-message' }), SOURCE_KIND: 'context-pilot',
+  ...(extra ?? {}),   // R35：可注入额外依赖（如 recordHudAct / publishHud 探针）
 });
 const agent = { session: { id: 'selfcheck-1' }, id: 'selfcheck-1' };
 /* R16.1：回执按 sid 存（M3 域 verifyBySid）⇒ 测试桩直接提供 takeCompactVerify(sid)。
@@ -3687,9 +3688,9 @@ console.log('\n== 6.35 R31：检测到重复才注入 ==');
     `实际 ${JSON.stringify(a3)}`);
   for (const s of [3, 4, 5]) api31.noteSessionEvent(sess31, msg31(1, s, '档位决策：保持 高(high)｜理由：x'));
   const a4 = await at31(6, 1);
-  ok('R31 行为级：退避期后再写满 3 条 ⇒ 再提醒一次（每轮上限 4 条）',
-    a4?.repeatNudge === true,
-    `实际 ${JSON.stringify(String(a4?.text ?? '').slice(0, 40))}`);
+  ok('R35 行为级：每轮上限 **1 条**（R35 从 4 降到 1：备注已证明压不住，留一个提示位即可）',
+    a4?.skip === 'not-step-1',
+    `实际 ${JSON.stringify(a4)}（计数已涨到 6，但本轮已投过 1 条 ⇒ 不再投）`);
 
   const st31b = { m2: { skips: {}, injections: 0 }, m3: { policyCards: 0 } };
   const api31b = mk31(st31b);
@@ -3705,8 +3706,8 @@ console.log('\n== 6.35 R31：检测到重复才注入 ==');
     c1?.skip === 'not-step-1',
     `实际 ${JSON.stringify(c1)}｜rec=${JSON.stringify(st31.m2.decisionRepeat?.['sess-31'])}`);
   ok('R31 可观测：检测计数（本轮条数/轮次）与投递次数都进 state（报告可见，可事后核对）',
-    st31.m2.decisionRepeat?.['sess-31']?.turn === 2 && st31.m2.repeatNudges === 2,
-    `实际 ${JSON.stringify({ rec: st31.m2.decisionRepeat?.['sess-31'], nudges: st31.m2.repeatNudges })}`);
+    st31.m2.decisionRepeat?.['sess-31']?.turn === 2 && st31.m2.repeatNudges === 1,
+    `实际 ${JSON.stringify({ rec: st31.m2.decisionRepeat?.['sess-31'], nudges: st31.m2.repeatNudges })}（R35 起每轮上限 1 ⇒ 投递数应为 1）`);
   ok('R31 接线：宿主把 `session/event` 转发给 m2（**只读检测**，不触发任何压缩）',
     /m2Ctl\?\.noteSessionEvent\?\.\(session, event\)/.test(host) && /noteSessionEvent \}/.test(m2src),
     '不转发 ⇒ 检测恒为空、备注永不触发（静默失效）');
@@ -3739,6 +3740,52 @@ console.log('\n== 6.35 R31：检测到重复才注入 ==');
   ok('R32 行为级：豁免之后再出现**纯文本**重复 ⇒ 仍按 ≥2 条判定并注入',
     st32.m2.decisionRepeat?.['sess-32']?.count === 2 && d32c?.repeatNudge === true,
     `实际 rec=${JSON.stringify(st32.m2.decisionRepeat?.['sess-32'])}｜nudge=${d32c?.repeatNudge}`);
+}
+
+/* ═══════════ 6.36 R35：持续重复 ⇒ 上报面板（含可复制纠正文案）；备注上限 4→1 ═══════════
+ * 依据（R33 实测）：备注 4 条/轮压不住模型（它照写 18–22 条/轮），压缩清先例也无效 ⇒
+ * **不再跟模型较劲**，改为**把异常上报给用户**：面板 acts 行给一句现状 + **可直接复制粘贴给 Agent 的纠正句**；
+ * 备注上限降到 1（留一个提示位即可，省 token）。 */
+console.log('\n== 6.36 R35：持续重复上报面板 + 可复制纠正文案 ==');
+{
+  const acts35 = [];
+  const huds35 = [];
+  const st35 = { m2: { skips: {}, injections: 0 }, m3: { policyCards: 0 } };
+  const ct35 = {
+    TOOL_NAME: 'compact_context', tierText: () => '浅压24%', renderBrief: () => 'stub',
+    renderCard: () => '压缩决策卡（stub）', getTier: () => 'heavy', hasTier: () => true,
+  };
+  const api35 = mkM2(st35, () => ({ ok: true, used: 590000, total: 0, surface: 0, window: 1000000, ratio: 0.59, basis: '下一请求预估', measure: {} }),
+    undefined, undefined, ct35, { recordHudAct: (sid, t) => acts35.push({ sid, t }), publishHud: (p) => huds35.push(p) });
+  const sess35 = { id: 'sess-35' };
+  const agent35 = { session: { id: 'sess-35' }, id: 'sess-35' };
+  const msg35 = (turn, step, text) => ({ type: 'assistant/message', data: { turn, step, message: { content: [{ type: 'text', text }] } } });
+  const at35 = (step, turn) => api35.buildInjection({ agent: agent35, step, turn });
+
+  api35.noteSessionEvent(sess35, msg35(1, 1, '压缩决策：不压｜占用 59%｜理由：x'));
+  api35.noteSessionEvent(sess35, msg35(1, 2, '压缩决策：不压｜占用 60%｜理由：x'));
+  const n1 = await at35(3, 1);
+  ok('R35 行为级：重复 2 条 ⇒ 只投备注、**不上报面板**（"持续重复"门槛 ≥6 条）',
+    n1?.repeatNudge === true && acts35.length === 0 && !st35.m2.repeatFixText,
+    `实际 nudge=${n1?.repeatNudge}｜acts=${acts35.length}｜fixText=${JSON.stringify(st35.m2.repeatFixText)}`);
+
+  for (const s of [3, 4, 5, 6]) api35.noteSessionEvent(sess35, msg35(1, s, '档位决策：保持 高(high)｜理由：x'));
+  await at35(7, 1);
+  ok('R35 行为级：同轮 ≥6 条 ⇒ 上报面板一行（现状 + **可直接复制的纠正文案**）并 publishHud',
+    acts35.length === 1 && /决策行重复 6 次\/轮/.test(acts35[0].t) && /可直接复制：/.test(acts35[0].t)
+    && /每轮开头写一次即可/.test(acts35[0].t) && /其余步骤不要再重复/.test(acts35[0].t)
+    && huds35.length === 1 && /决策行重复 6/.test(huds35[0].hudLastAct ?? '')
+    && /请停止在每个步骤重复写决策行/.test(st35.m2.repeatFixText ?? ''),
+    `实际 acts=${JSON.stringify(acts35)}｜hud=${JSON.stringify(huds35[0])}`);
+
+  api35.noteSessionEvent(sess35, msg35(1, 7, '档位决策：保持 高(high)｜理由：x'));
+  await at35(9, 1);
+  ok('R35 行为级：同一轮**只上报一次**（不刷面板）',
+    acts35.length === 1 && st35.m2.repeatReports === 1,
+    `实际 acts=${acts35.length}｜repeatReports=${st35.m2.repeatReports}`);
+  ok('R35 接线：宿主把 `recordHudAct` / `publishHud` 注入 m2（复用 m3 已有的 HUD 出口）',
+    /recordHudAct, publishHud,/.test(host) && /recordHudAct, publishHud,/.test(m2src),
+    'm2 拿不到 HUD 出口 ⇒ 上报静默失效（用户永远看不到"建议手动纠正"）');
 }
 
 /* ═══════════ 汇总 ═══════════ */

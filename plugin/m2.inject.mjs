@@ -39,6 +39,8 @@ export function createM2Injection(deps) {
     M3, effEnabled, criticalCapOf, measureRatio,
     getRangeApi, getCompactToolApi, getEffortApi, getCreateUserMessage, SOURCE_KIND, takeCompactVerify,
     getLastUserText,
+    /* R35：把"持续重复"上报到面板（复用 m3 已有的 HUD 出口；文本进 acts 行，用户可直接复制） */
+    recordHudAct, publishHud,
   } = deps;
 
   /* ═══════════ 一次性说明的「已讲」标记（R1：压缩后必须重讲） ═══════════
@@ -74,9 +76,15 @@ export function createM2Injection(deps) {
    * 频率：首次重复投一条；此后**再写满 NUDGE_REARM_DELTA 条**才再提醒；每轮上限 NUDGE_PER_TURN_CAP。
    * 安全性沿用 R15.4：中步插入时上一步的 tool/result 已在 surface 里，不拆散 tool_use / tool_result。 */
   const NUDGE_REARM_DELTA = 3;
-  const NUDGE_PER_TURN_CAP = 4;
+  /* R35（用户要求）：每轮备注上限 **4 → 1**（备注已证明压不住模型，留一个提示位即可，别白烧 token）。 */
+  const NUDGE_PER_TURN_CAP = 1;
+  /* R35：达到这个条数才算"**持续重复**"（≥6 条/轮）⇒ 上报到面板并给出**可复制的纠正文案**。 */
+  const REPEAT_REPORT_AT = 6;
   const REPEAT_NUDGE_TEXT = '（系统备注：本轮决策行**只需写一次**——后续步骤不必重复贴；'
     + '仅在真的改变决定（决定压缩 / 升或降档）时补一行。）';
+  /** R35：**可直接粘贴给 Agent 的纠正文案**（用户要求"一条可复制粘贴的内容"）。 */
+  const REPEAT_FIX_TEXT = '请停止在每个步骤重复写决策行：每轮开头写一次即可（含「保持 / 不压」），'
+    + '中途真的改变决定时再补一行，其余步骤不要再重复。';
   const DECISION_RE = /压缩决策：|档位决策：/g;
   /** R32：**动作背书的决策行不算重复** —— R27 的规矩是「中途真的改了决定（压缩/升或降档）再补一行」，
    * 那第二条是**合法**的；若一律按"同轮 ≥2 条"判重复，会把守规矩的会话误判成重复（用户追问点）。
@@ -117,6 +125,19 @@ export function createM2Injection(deps) {
       return rec;
     } catch { return null; }
   };
+  /** R35：把"持续重复"**上报给用户**（面板 acts 行，用户可直接复制纠正文案）——不再反复跟模型较劲。
+   * 文案两段：① 现状（重复 N 次/轮）；② **可直接粘贴给 Agent 的纠正句**。每轮最多一次。 */
+  const reportRepeat = (sid, count) => {
+    try {
+      const hhmm = new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5);
+      const text = `${hhmm} · 决策行重复 ${count} 次/轮 · 建议手动纠正；可直接复制：${REPEAT_FIX_TEXT}`;
+      state.m2.repeatFixText = REPEAT_FIX_TEXT;
+      state.m2.repeatReports = (state.m2.repeatReports ?? 0) + 1;
+      try { recordHudAct?.(sid, text); publishHud?.({ hudLastAct: text }); } catch { /* HUD 出口失败不影响注入 */ }
+      log('info', `M2 上报决策行重复（${count} 次/轮，sid=${sid}）`);
+      return text;
+    } catch { return null; }
+  };
   /** 是否该投反重复备注：**只在检测到重复之后**（同轮 ≥2 条），带退避与每轮上限。 */
   const repeatNudge = (sid, turn) => {
     try {
@@ -124,11 +145,17 @@ export function createM2Injection(deps) {
       if (!rec || rec.turn !== turn) return null;          // 本轮没检测到决策行
       if ((rec.count ?? 0) < 2) return null;               // 只写一次 = 守规矩 ⇒ 不打扰
       const bySid = state.m2.nudged = state.m2.nudged ?? {};
-      const nd = bySid[sid] ?? { turn: null, count: 0, n: 0 };
-      if (nd.turn !== turn) { nd.turn = turn; nd.count = 0; nd.n = 0; }
+      const nd = bySid[sid] ?? { turn: null, count: 0, n: 0, reportedTurn: null };
+      if (nd.turn !== turn) { nd.turn = turn; nd.count = 0; nd.n = 0; nd.reportedTurn = null; }
+      bySid[sid] = nd;                                     // 先存：下面两个分支都可能直接 return
+      /* R35：持续重复 ⇒ 上报给用户（每轮一次；用户可复制面板那行去纠正 Agent）。 */
+      if (rec.count >= REPEAT_REPORT_AT && nd.reportedTurn !== turn) {
+        nd.reportedTurn = turn;
+        reportRepeat(sid, rec.count);
+      }
       if (nd.n >= NUDGE_PER_TURN_CAP) return null;
       if (nd.n > 0 && rec.count - nd.count < NUDGE_REARM_DELTA) return null;
-      nd.count = rec.count; nd.n += 1; bySid[sid] = nd;
+      nd.count = rec.count; nd.n += 1;
       return REPEAT_NUDGE_TEXT;
     } catch { return null; }
   };

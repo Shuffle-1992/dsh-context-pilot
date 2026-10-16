@@ -314,7 +314,7 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
         getEffortApi: () => effortApi,
         /* R16.12：换档提醒的**外部触发**输入——最近一条真人用户消息文本
          * （实现在 core.lastUserText：只读 surface 尾部并跳过插件自己的注入行）。 */
-        getLastUserText: (agent) => lastUserText(agent?.session),
+        getLastUserText: (agent) => lastUserText(agent?.session), recordHudAct, publishHud, // R35：m2 也要能把"决策行持续重复"上报到面板
         getCreateUserMessage,
         SOURCE_KIND,
       });
