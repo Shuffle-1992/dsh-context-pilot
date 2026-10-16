@@ -2551,9 +2551,17 @@ ok('R17 静态：后缀必须紧跟档位值说明「用户刚改档」',
   ok('R17/R23 行为级：后缀点明「用户刚把档位从 高(high) 调到 最高(max)」并写清本步骤即生效',
     /用户刚把档位从 高\(high\) 调到 最高\(max\)/.test(sufA) && /本步骤的请求即用它/.test(sufA),
     `实际后缀：${JSON.stringify(sufA)}`);
+  /* R36（2026-10-16 真机）：模型**用上了新值却写成「保持」**（照抄卡片/教学模板）⇒ 用户以为它没感知到切换。
+   * 修：切档那一轮显式说"这不是保持"，并给出该怎么写。 */
+  ok('R36 行为级：切档轮的后缀**显式说「这是用户改的，不是"保持"」**并给出写法',
+    /这是用户改的，不是"保持"/.test(sufA) && /正文里请写「用户刚调到 最高\(max\)」/.test(sufA),
+    `实际后缀：${JSON.stringify(sufA)}`);
 
   const apiB = mkApi17({ lastUsed: sel17('high'), pending: null });
   const effB = await apiB.read(ag17('high'));
+  ok('R36 行为级：**没有**切档的轮次不出现该提示（避免每轮噪声）',
+    !/不是"保持"/.test(apiB.renderSuffix(effB) ?? ''),
+    `实际：${JSON.stringify(apiB.renderSuffix(effB))}`);
   ok('R17/R23 行为级：无 pending 时后缀形状稳定（R23 起档位显示「中文(id)」，其余逐字不变）',
     (apiB.renderSuffix(effB) ?? '') === '思考强度 高(high)（可选 关闭(off)/低(low)/高(high)/最高(max)，需要时先说再调用 set_reasoning_effort）',
     `实际：${JSON.stringify(apiB.renderSuffix(effB))}`);
@@ -3533,6 +3541,10 @@ console.log('\n== 6.32 R27：决策卡去噪 + 决策行作用域 ==');
   ok('R27 文本级：一次性说明保持「以卡为准」（卡仍每轮一张，承诺无需改口径）',
     /以卡为准/.test(briefText27) && !/卡是稀疏的/.test(briefText27),
     `实际说明：${briefText27.slice(0, 200)}`);
+  /* R36（2026-10-16 真机）：用户手动切档那一轮，模型照抄「保持 X」模板 ⇒ 用户以为它没感知到切换。 */
+  ok('R36 文本级：换档教学写明「用户手动改过档位的那一轮…不要写「保持 X」」',
+    /用户手动改过档位的那一轮/.test(effBrief27) && /不要写「保持 X」/.test(effBrief27),
+    `实际教学：${effBrief27.slice(0, 240)}`);
 }
 
 /* ═══════════ 6.33 R28：非插件压缩的**失败原因**必须可见 ═══════════
