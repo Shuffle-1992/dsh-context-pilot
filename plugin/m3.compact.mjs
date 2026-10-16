@@ -30,9 +30,14 @@
  * （引擎/手动、pre-step 自选范围、idle 扫除），避免"同一物理量三处各写一遍"（本项目多次踩坑）。
  * `stale`（surface 比 provider 上报时缩水 >50%）⇒ 带「provider 待刷新，下次请求后会回落」：
  * 刚压完的表盘是**过渡值**（真机：12.6% → 13 分钟后 5%，见 R37 的账本算术）。 */
-export function occupancyActSuffix(ratioAfter, stale) {
+export function occupancyActSuffix(ratioAfter, stale, settledRatio) {
   if (!Number.isFinite(ratioAfter)) return '';
-  return ` · 压后占用 ${(ratioAfter * 100).toFixed(1)}%${stale ? '（provider 待刷新，下次请求后会回落）' : ''}`;
+  /* R46（用户 2026-10-16 同意）：面板行后缀也带上「预计稳定后」——与回执同源同数（R45 的样本中位数）。
+   * 没有样本时保持原话「下次请求后会回落」（不编数字）。 */
+  const settled = Number.isFinite(settledRatio) ? Math.round(settledRatio * 100) : null;
+  return ` · 压后占用 ${(ratioAfter * 100).toFixed(1)}%${stale
+    ? (settled != null ? `（provider 待刷新，预计稳定后 ≈${settled}%）` : '（provider 待刷新，下次请求后会回落）')
+    : ''}`;
 }
 
 /** R39（2026-10-16 用户实测后决定「让档位名副其实」）：保留预算的**真实口径折算**。
@@ -224,7 +229,7 @@ export function createM3Compaction(deps) {
       const text = base
         + (declared ? '' : ` · 系统代压（本会话未申报档位 ⇒ 按兜底 ${stdText}）`)
         + (preempted ? ` · 引擎抢先：我方上次估计 ${(Number(lastSeen) * 100).toFixed(1)}% ＜ 我方线 ${(Number(ourLine) * 100).toFixed(0)}%（引擎在 step 边界判定，排在插件之前）` : '')
-        + (d.error ? ` · 失败（${failWhy(d.error)}）` : occupancyActSuffix(ratioAfter, mr?.stale));
+        + (d.error ? ` · 失败（${failWhy(d.error)}）` : occupancyActSuffix(ratioAfter, mr?.stale, settledRatioOf(sidE, mr)));
       recordHudAct(sidE, text);
       publishHud({ hudLastAct: text });
       state.m3.engineCompacts = (state.m3.engineCompacts ?? 0) + 1;
@@ -342,6 +347,14 @@ export function createM3Compaction(deps) {
       const ds = arr.map((x) => Number(x.drop)).filter((x) => Number.isFinite(x) && x > 0).sort((a, b) => a - b);
       if (ds.length === 0) return null;
       return { drop: ds[Math.floor(ds.length / 2)], n: ds.length, last: ds[ds.length - 1] };   // 中位数
+    } catch { return null; }
+  };
+  /* R46：由「当前实测 + 本会话回落样本」推出稳定后比例（面板行后缀用；无样本 ⇒ null，不编数字）。 */
+  const settledRatioOf = (sid, mr) => {
+    try {
+      const rec = settleDropOf(sid);
+      if (!rec || !Number.isFinite(mr?.used) || !Number.isFinite(mr?.window) || mr.window <= 0) return null;
+      return Math.max(0, mr.used - rec.drop) / mr.window;
     } catch { return null; }
   };
 
@@ -660,6 +673,12 @@ export function createM3Compaction(deps) {
         }
       }
       state.m3.preStepOk += 1;
+      /* R45/R46：稳定后预计值**先算成局部量**——回执（verify）与面板行后缀（occupancyActSuffix）共用，
+       * 两处必须是同一个数（单源），否则用户会在两个地方看到不同百分比。 */
+      const settleRec = settleDropOf(sid);
+      const settledUsed = (Number.isFinite(usedAfter) && settleRec) ? Math.max(0, usedAfter - settleRec.drop) : null;
+      const settledRatio = (settledUsed != null && Number.isFinite(mr.window) && mr.window > 0)
+        ? settledUsed / mr.window : null;
       /* R15（用户要求「工具完成后进行检查，起码 agent 自己过一遍」）：
        * 工具只登记、执行在这里 ⇒ **回执由这里产出**，M2 域在下一次注入时把它送给模型。
        * 这是把「工具回 ok 但实际没执行」变成**模型可见**的唯一手段（2026-10-08 真机踩过：
@@ -688,13 +707,12 @@ export function createM3Compaction(deps) {
         usedAfter,
         basis: mr.ok ? mr.basis : null,
         /* R45：把「稳定后预计」一并写进回执依据——压缩刚完成的 `usedAfter` 是 provider 未刷新的
-         * 投影值（真机 19% ⇒ 稳定后 10%），回执必须给出**预计稳定值**而不是只报中间值。 */
-        settleDropTokens: settleDropOf(sid)?.drop ?? null,
-        settleSamples: settleDropOf(sid)?.n ?? 0,
-        settledUsed: (Number.isFinite(usedAfter) && settleDropOf(sid))
-          ? Math.max(0, usedAfter - settleDropOf(sid).drop) : null,
-        settledRatio: (Number.isFinite(usedAfter) && settleDropOf(sid) && Number.isFinite(mr.window) && mr.window > 0)
-          ? Math.max(0, usedAfter - settleDropOf(sid).drop) / mr.window : null,
+         * 投影值（真机 19% ⇒ 稳定后 10%），回执必须给出**预计稳定值**而不是只报中间值。
+         * R46：同一组数也喂给面板行后缀（见下方 occupancyActSuffix 的第三个实参）。 */
+        settleDropTokens: settleRec?.drop ?? null,
+        settleSamples: settleRec?.n ?? 0,
+        settledUsed,
+        settledRatio,
         skipWhy: out.skipWhy ?? null,
         officialWhy: out.officialWhy ?? null,
         ms: Date.now() - t0,
@@ -753,7 +771,7 @@ export function createM3Compaction(deps) {
         /* D8/F13（R7 审查修）：HUD 文案必须用**真实触发原因**——原先写死 `'pressure'`，
          * 于是「模型主动请求压缩」在弹窗与 hud-acts 里被标成「强制压缩」，与实际动机不符
          * （而 `lastPreStep.trigger` 记的是真值 ⇒ 同一件事两个说法）。 */
-        const __t = formatAct(trigger, result?.shadowedTokenCount) + occupancyActSuffix(ratioAfter, staleAfter);
+        const __t = formatAct(trigger, result?.shadowedTokenCount) + occupancyActSuffix(ratioAfter, staleAfter, settledRatio);
         publishHud({ hudLastAct: __t }); // M5
         recordHudAct(sid, __t);
         clearBriefed(sid); // R1：同 idle 路径——压缩后一次性说明需重讲
@@ -837,7 +855,7 @@ export function createM3Compaction(deps) {
             range: result?.shadowedRange ?? null,
           };
           const mrI = measureRatio(agent.session);   // R38：idle 路径同样报「压后占用」（带 stale 提示）
-          const __actText = formatAct(reason, result?.shadowedTokenCount) + occupancyActSuffix(mrI?.ok ? mrI.ratio : null, mrI?.stale);
+          const __actText = formatAct(reason, result?.shadowedTokenCount) + occupancyActSuffix(mrI?.ok ? mrI.ratio : null, mrI?.stale, settledRatioOf(sid, mrI));
           publishHud({ hudLastAct: __actText }); // M5
           recordHudAct(sid, __actText);
           /* R1：压缩成功 ⇒ 一次性说明（压缩流程 + 智能思考教学）已随旧对话被收走，

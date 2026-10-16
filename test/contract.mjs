@@ -3868,10 +3868,27 @@ console.log('\n== 6.38 R38：压后占用后缀单源 ==');
     && f38(0.33, false) === ' · 压后占用 33.0%'
     && f38(null, true) === '' && f38(undefined) === '',
     `实际 ${JSON.stringify([f38(0.455, true), f38(0.33, false), f38(null, true)])}`);
+  /* R46（用户同意）：面板行后缀也带「预计稳定后」——与回执同源（R45 样本中位数）；无样本时**不编数字**。 */
+  ok('R46 行为级：给了回落样本 ⇒ 后缀写「预计稳定后 ≈10%」；没样本 ⇒ 保持原话（不编数字）；非 stale ⇒ 不加',
+    f38(0.19, true, 0.10) === ' · 压后占用 19.0%（provider 待刷新，预计稳定后 ≈10%）'
+    && f38(0.19, true, null) === ' · 压后占用 19.0%（provider 待刷新，下次请求后会回落）'
+    && f38(0.10, false, 0.10) === ' · 压后占用 10.0%',
+    `实际 ${JSON.stringify([f38(0.19, true, 0.10), f38(0.19, true, null), f38(0.10, false, 0.10)])}`);
   const uses38 = (m3src.match(/occupancyActSuffix\(/g) ?? []).length;
+  /* R38 单源守卫（R46 修判据）：把**整个函数体**摘掉后再找内联模板——原判据用 200 字符窗口，
+   * 函数体一变长（R46 加了注释与预计逻辑）就误报"仍有内联实现"。 */
+  const body38 = (m3src.match(/export function occupancyActSuffix[\s\S]*?\n\}/) ?? [''])[0];
+  const rest38 = m3src.replace(body38, '');
   ok('R38 单源守卫：三条面板路径（引擎/手动、pre-step、idle）**共用同一个后缀函数**，且没有第二份内联实现',
-    uses38 >= 4 && !/· 压后占用 \$\{/.test(m3src.replace(/occupancyActSuffix[\s\S]{0,200}?· 压后占用/g, '')),
-    `实际 occupancyActSuffix 出现 ${uses38} 次（1 定义 + ≥3 调用）；内联实现 ${/· 压后占用 \$\{/.test(m3src) ? '仍存在' : '已无'}`);
+    uses38 >= 4 && body38.length > 100 && !/· 压后占用 \$\{/.test(rest38),
+    `实际 occupancyActSuffix 出现 ${uses38} 次（1 定义 + ≥3 调用）；函数体外内联实现 ${/· 压后占用 \$\{/.test(rest38) ? '仍存在' : '已无'}`);
+  /* R46 接线：三条路径都必须把**稳定后比例**传进后缀（否则只有 pre-step 一条路有预计值）。 */
+  ok('R46 接线：三条面板路径都传第三参（稳定后比例），且 pre-step 用**同一局部量**（回执与面板单源）',
+    /occupancyActSuffix\(ratioAfter, mr\?\.stale, settledRatioOf\(sidE, mr\)\)/.test(m3src)
+    && /occupancyActSuffix\(ratioAfter, staleAfter, settledRatio\)/.test(m3src)
+    && /occupancyActSuffix\(mrI\?\.ok \? mrI\.ratio : null, mrI\?\.stale, settledRatioOf\(sid, mrI\)\)/.test(m3src)
+    && /const settledRatio = \(settledUsed != null/.test(m3src),
+    '有路径没传 ⇒ 面板与回执的百分比不一致（用户会看到两个数）');
 }
 
 /* ═══════════ 6.39 R39：保留预算按**真实口径**折算（让档位名副其实） ═══════════
