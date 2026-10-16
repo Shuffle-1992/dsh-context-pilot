@@ -3934,11 +3934,11 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
   };
   const out40 = await mkM2({ m2: { skips: {}, injections: 0 }, m3: {} }, undefined, stubVerify(v40),
     { RETAIN_RATIO: 0.24, tierText: () => '浅压24%' }).buildInjection({ agent, step: 1, turn: 1 });
-  ok('R40 端到端：锚点生效 ⇒ 回执报**锚点保留量**并标启发式口径，**不误报档位预算**',
-    /锚点之后原样保留 ~95k（启发式口径；表盘 ≈ ×1\.5）/.test(out40?.text ?? '')
+  ok('R40/R41 端到端：锚点生效 ⇒ 回执报**锚点保留量 + 真实口径落点**，**不误报档位预算**',
+    /锚点之后原样保留 ~95k（启发式口径；\*\*表盘 ≈ 143k\*\*（×1\.5））/.test(out40?.text ?? '')
     && !/保留预算 ~240k/.test(out40?.text ?? '')
     && /语义锚点（从最近第 1 条你的消息起）/.test(out40?.text ?? ''),
-    `实际：${String(out40?.text ?? '').slice(0, 240)}`);
+    `实际：${String(out40?.text ?? '').slice(0, 260)}`);
   ok('R40 单源守卫：m3 自选范围回报的预算**随来源切换**（锚点报锚点、档位报档位承诺）',
     /retainBudget: useAnchor \? anchorBudget : tierBudget/.test(m3src)
     && /retainBudgetHeur: useAnchor \? anchorBudget : tierBudgetHeur/.test(m3src),
