@@ -592,7 +592,7 @@ ok('R16.13 接线：host 把 compaction/end 转发给 m3；m3 三处自己的压
     && /if \(isCompactionInFlight\(\)\) return null;/.test(m3src13)
     && (m3src13.match(/markOwnCompaction\(sid\)/g) ?? []).length >= 3
     && (m3src13.match(/clearOwnCompaction\(\)/g) ?? []).length >= 3
-    && /isCompactionInFlight, noteEngineCompaction \}/.test(m3src13),
+    && /isCompactionInFlight, noteEngineCompaction, noteRetainFactor, retainFactorOf \}/.test(m3src13),
   '任一环缺位 ⇒ 引擎压缩仍无记录，或自家压缩被重复记录');
 ok('R16.13 文案：m5 为两种「非插件压缩」提供标签（不与「强制压缩」混淆）',
   /reason === 'engine-auto' \? '引擎自动压缩'/.test(m5src) && /reason === 'engine-manual' \? '手动压缩（\/compact）'/.test(m5src),
@@ -1284,7 +1284,9 @@ ok('保留预算按**会话档位**解析（R16：档位只改预算，不改范
   && /api\.resolveTier/.test(ctOwnRange) && /api\.selectRange\(\{ session: agent\.session, measurement: measure, retainTokens: budget, keepFromSeq:/.test(ctOwnRange)
   /* R21：**兜底链的源码形态**必须钉死——锚点预算可用就用它，否则原样用档位预算。 */
   && /const useAnchor = Number\.isFinite\(anchorBudget\) && anchorBudget > 0;/.test(ctOwnRange)
-  && /const budget = useAnchor \? anchorBudget : tierBudget;/.test(ctOwnRange),
+  /* R39：预算改为「档位预算 → 真实口径折算 → 交给范围选择」三步；锚点优先的语义不变。 */
+  && /const tierBudgetHeur = scaleRetainBudget\(tierBudget, retainFactor\);/.test(ctOwnRange)
+  && /const budget = useAnchor \? anchorBudget : tierBudgetHeur;/.test(ctOwnRange),
   '档位没接进预算 ⇒ Agent 选档无效（功能性回归）；锚点没做兜底 ⇒ 解析失败就无预算可用');
 ok('rangeProbe 留档位取证（请求档位/夹取/回落）',
   /tier: tierInfo\.tier,/.test(ctOwnRange) && /tierClamped: tierInfo\.clamped/.test(ctOwnRange) && /tierFallback: tierInfo\.fallback/.test(ctOwnRange),
@@ -3858,6 +3860,71 @@ console.log('\n== 6.38 R38：压后占用后缀单源 ==');
   ok('R38 单源守卫：三条面板路径（引擎/手动、pre-step、idle）**共用同一个后缀函数**，且没有第二份内联实现',
     uses38 >= 4 && !/· 压后占用 \$\{/.test(m3src.replace(/occupancyActSuffix[\s\S]{0,200}?· 压后占用/g, '')),
     `实际 occupancyActSuffix 出现 ${uses38} 次（1 定义 + ≥3 调用）；内联实现 ${/· 压后占用 \$\{/.test(m3src) ? '仍存在' : '已无'}`);
+}
+
+/* ═══════════ 6.39 R39：保留预算按**真实口径**折算（让档位名副其实） ═══════════
+ * 用户实测：档位名（保留窗口 × 24%）按**启发式** token 算，而表盘真实值 ≈ 启发式 × 1.3–1.5
+ * （6 会话实测 1.31/1.32/1.38/1.43/1.46/1.51）⇒「浅压24%」压完表盘 ~40%，而 DSH 原生 `/compact`
+ * （只留 3.9K 消息）能到 5%。修：`budget / factor`（夹在 [1,2]，**只减不增**）。 */
+console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
+{
+  const m3Mod39 = await import(pathToFileURL(join(PLUGIN, 'm3.compact.mjs')).href);
+  const f39 = m3Mod39.scaleRetainBudget;
+  ok('R39 行为级：`scaleRetainBudget` = budget/factor，夹在 [1,2]，**只减不增**',
+    f39(240000, 1) === 240000 && f39(240000, 1.4) === 171429 && f39(240000, 2) === 120000
+    && f39(240000, 5) === 120000 && f39(240000, 0.5) === 240000 && f39(240000, null) === 240000
+    && f39(0, 1.4) === 0,
+    `实际 ${JSON.stringify([f39(240000, 1), f39(240000, 1.4), f39(240000, 2), f39(240000, 5), f39(240000, 0.5), f39(240000, null)])}`);
+
+  /* 因子来源：只用**非 stale** 的实测（stale 是刚压完的过渡值，用它折算会把预算压过头）。 */
+  const st39 = { m3: {} };
+  const api39 = m3Mod39.createM3Compaction({
+    state: st39, log: () => {}, msg: (e) => String(e), pick: (...a) => a.find((x) => x != null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    nfmt: (n) => String(n), errCodeOf: (e) => String(e?.code ?? 'err'), schedule: () => {},
+    svc: () => null, projectedFromPressure: () => ({ used: null, projected: null, reported: null, surface: null, sampled: null, basis: 'x' }),
+    summarizeBreakdown: () => ({ system: 2162, tools: 15751, messages: 244360 }),   // 可见组成 = 262,273
+    M3: {}, effEnabled: () => true, criticalCapOf: () => 0.75, resolveCompactionFor: () => ({ service: null, via: 'stub' }),
+    publishHud: () => {}, recordHudAct: () => {}, formatAct: () => '', clearBriefed: () => {},
+    awaitRange: async () => null, getCompactTool: () => null, COMPACT_TIMEOUT_MS: 1000, SET_CAP: 10,
+  });
+  api39.noteRetainFactor('s39', { ok: true, used: 400672, stale: false, measure: {} });
+  const fA = api39.retainFactorOf('s39');
+  api39.noteRetainFactor('s39', { ok: true, used: 455337, stale: true, measure: {} });   // 过渡值 ⇒ 不得更新
+  const fB = api39.retainFactorOf('s39');
+  ok('R39 行为级：非 stale 实测 ⇒ 因子 = 真实/可见（400672/262273 ≈ 1.53）；**stale 不得更新**（否则预算被压过头）',
+    Math.abs(fA - 1.53) < 0.01 && fB === fA && st39.m3.retainFactor?.s39?.visible === 262273,
+    `实际 fA=${fA} fB=${fB} rec=${JSON.stringify(st39.m3.retainFactor?.s39)}`);
+  const api39b = m3Mod39.createM3Compaction({
+    state: { m3: {} }, log: () => {}, msg: (e) => String(e), pick: (...a) => a.find((x) => x != null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    nfmt: (n) => String(n), errCodeOf: (e) => String(e?.code ?? 'err'), schedule: () => {},
+    svc: () => null, projectedFromPressure: () => ({}), summarizeBreakdown: () => null,
+    M3: {}, effEnabled: () => true, criticalCapOf: () => 0.75, resolveCompactionFor: () => ({ service: null, via: 'stub' }),
+    publishHud: () => {}, recordHudAct: () => {}, formatAct: () => '', clearBriefed: () => {},
+    awaitRange: async () => null, getCompactTool: () => null, COMPACT_TIMEOUT_MS: 1000, SET_CAP: 10,
+  });
+  ok('R39 行为级：拿不到可见组成 ⇒ 不设因子（退回 1，行为与旧版一致，不猜）',
+    api39b.noteRetainFactor('s39b', { ok: true, used: 400672, stale: false, measure: {} }) === null
+    && api39b.retainFactorOf('s39b') === 1,
+    `实际 factor=${api39b.retainFactorOf('s39b')}`);
+
+  const v39 = {
+    at: new Date().toISOString(), sessionId: 'selfcheck-1', state: 'executed', trigger: 'pressure',
+    tier: 'heavy', retainBudget: 240000, retainFactor: 1.4, retainSource: 'tier', rangeSource: 'own',
+    shadowedTokens: 150900, ratioAfter: 0.40, usedAfter: 400672, ms: 39000,
+  };
+  const out39 = await mkM2({ m2: { skips: {}, injections: 0 }, m3: {} }, undefined, stubVerify(v39),
+    { RETAIN_RATIO: 0.24, tierText: () => '浅压24%' }).buildInjection({ agent, step: 1, turn: 1 });
+  ok('R39 端到端：回执点明「保留预算 ~240k（真实口径 ×1.4）」（否则模型看到保留量与预算对不上会再误读）',
+    /保留预算 ~240k（真实口径 ×1\.4）/.test(out39?.text ?? ''),
+    `实际：${String(out39?.text ?? '').slice(0, 200)}`);
+  ok('R39 接线：宿主把 `summarizeBreakdown`（可见组成单源）注入 m3',
+    /summarizeBreakdown, \/\/ R39/.test(host) && /summarizeBreakdown,/.test(m3src),
+    'm3 拿不到可见组成 ⇒ 折算因子恒为 1（静默失效）');
+  ok('R39 接线：pre-step **每轮刷新因子**（否则本会话首次压缩仍用 factor=1，"名副其实"要等第二次）',
+    /recordRatioSample\(sid, ratio, mr\);[\s\S]{0,260}?noteRetainFactor\(sid, mr\);/.test(m3src),
+    'pre-step 不刷新因子 ⇒ 首次压缩不折算');
 }
 
 /* ═══════════ 汇总 ═══════════ */

@@ -35,12 +35,27 @@ export function occupancyActSuffix(ratioAfter, stale) {
   return ` · 压后占用 ${(ratioAfter * 100).toFixed(1)}%${stale ? '（provider 待刷新，下次请求后会回落）' : ''}`;
 }
 
+/** R39（2026-10-16 用户实测后决定「让档位名副其实」）：保留预算的**真实口径折算**。
+ * 起因：档位名（保留窗口 × 24%）按**启发式** token 算，而表盘真实值 ≈ 启发式 × 1.3–1.5
+ * （6 个会话实测 1.31/1.32/1.38/1.43/1.46/1.51）⇒「浅压24%」压完表盘落在 ~40%，名不副实；
+ * 而 DSH 原生 `/compact`（只留 3.9K 消息）能压到 5%。修：`budget / factor`。
+ * ⚠️ factor **夹在 [1,2]** ⇒ **只减不增**（绝不让档位保留得比它承诺的更多）；
+ * ⚠️ factor 只允许来自**非 stale** 的实测（stale 是"刚压完的过渡值"，用它会把预算压过头）。 */
+export function scaleRetainBudget(budget, factor) {
+  const b = Number(budget);
+  if (!Number.isFinite(b) || b <= 0) return budget;
+  const f = Number.isFinite(factor) ? Math.min(Math.max(factor, 1), 2) : 1;
+  return Math.max(1, Math.round(b / f));
+}
+
 export function createM3Compaction(deps) {
   const {
     /* 只读依赖 */
     svc, tryOf, state, M3, effEnabled, criticalCapOf, engineThreshold, resolveCompactionFor,
     /* R25：占用口径单源（core.mjs 注入；m1 报告账本用同一份） */
     projectedFromPressure,
+    /* R39：可见组成（系统+工具+消息）单源 —— 真实口径折算要用它 */
+    summarizeBreakdown,
     /* 工具 */
     log, msg, pick, nfmt, errCodeOf, schedule,
     /* 跨域回调（R10：由宿主显式注入，不再靠闭包穿透） */
@@ -263,6 +278,28 @@ export function createM3Compaction(deps) {
     } catch { return null; }
   };
 
+  /* ═══ R39：真实口径折算因子（每会话一份；**只用非 stale 的实测**更新）═══
+   * `visible` = 系统 + 工具 + 消息（`summarizeBreakdown` 单源）——即"三行组成"；
+   * `factor = 表盘真实 / visible`，夹在 [1,2]。stale（刚压完的过渡值）时**不更新**：
+   * 过渡值里 provider 旧报还扛着压缩前的大数，用它折算会把预算压过头。 */
+  const noteRetainFactor = (sid, mr) => {
+    try {
+      if (!sid || !mr?.ok || mr.stale) return null;
+      const bv = summarizeBreakdown?.(mr.measure);
+      const vis = bv ? (Number(bv.system) || 0) + (Number(bv.tools) || 0) + (Number(bv.messages) || 0) : null;
+      if (!Number.isFinite(vis) || vis <= 0 || !Number.isFinite(mr.used)) return null;
+      const factor = Math.min(Math.max(mr.used / vis, 1), 2);
+      const bySid = state.m3.retainFactor = state.m3.retainFactor ?? {};
+      bySid[sid] = { factor: +factor.toFixed(2), at: new Date().toISOString(), real: mr.used, visible: vis };
+      const keys = Object.keys(bySid);
+      if (keys.length > 64) delete bySid[keys[0]];   // 有界化
+      return factor;
+    } catch { return null; }
+  };
+  const retainFactorOf = (sid) => {
+    try { const f = state.m3.retainFactor?.[sid]?.factor; return Number.isFinite(f) ? f : 1; } catch { return 1; }
+  };
+
   /**
    * 执行一次压缩：**优先自选保留范围**（近端原样保留、更早转摘要），失败则按语义退回官方策略。
    * R16：保留预算按**会话档位**（Agent 经工具选择的 tier，会话级持久）解析；未选/非法 ⇒ standard。
@@ -303,7 +340,12 @@ export function createM3Compaction(deps) {
      * 无论走哪条都要留痕：`retainSource` 会进 rangeProbe 与回执（静默降级是本项目大忌）。 */
     const anchorBudget = Number(retainOverride?.budget);
     const useAnchor = Number.isFinite(anchorBudget) && anchorBudget > 0;
-    const budget = useAnchor ? anchorBudget : tierBudget;
+    /* R39：档位预算按**真实口径**折算（因子来自非 stale 实测；只减不增，夹在 [1,2]）。
+     * `tierBudget` 保持"档位承诺"（回执/报告报它，真实口径）；交给范围选择的是折算后的启发式预算。 */
+    noteRetainFactor(sid, measureRatio(agent.session));
+    const retainFactor = retainFactorOf(sid);
+    const tierBudgetHeur = scaleRetainBudget(tierBudget, retainFactor);
+    const budget = useAnchor ? anchorBudget : tierBudgetHeur;
     const retainSource = useAnchor ? String(retainOverride?.source ?? 'anchor') : 'tier';
     const sel = api.selectRange({ session: agent.session, measurement: measure, retainTokens: budget, keepFromSeq: useAnchor ? anchorSeq : null });
     /* 取证：无论成败都留一次范围读数（范围不对时这是唯一的现场）。
@@ -367,7 +409,9 @@ export function createM3Compaction(deps) {
         try {
           result = await compaction.service.compactRegion(sel.start, end, agent, sig);
         } finally { clearOwnCompaction(); }
-        return { result, source: 'own', retainBudget: budget, retainSource, anchorSeq: useAnchor ? anchorSeq ?? null : null, anchorFailReason: useAnchor ? null : (anchorFailReason ?? null), walkBacks, tier: tierInfo.tier, range: { start: sel.start, end } };
+        /* R39：`retainBudget` 报**档位承诺**（真实口径，回执用它）；实际交给范围选择的是折算后的
+         * `retainBudgetHeur`（启发式口径），两者都留痕（否则"为什么保留量比档位小"无从解释）。 */
+        return { result, source: 'own', retainBudget: tierBudget, retainBudgetHeur: tierBudgetHeur, retainFactor, retainSource, anchorSeq: useAnchor ? anchorSeq ?? null : null, anchorFailReason: useAnchor ? null : (anchorFailReason ?? null), walkBacks, tier: tierInfo.tier, range: { start: sel.start, end } };
       } catch (e) {
         /* 末端不合法 ⇒ 回退一个 surface 节点重试（零副作用、零 LLM 成本，见文件头）。 */
         if (api.isEndBoundaryError(e)) {
@@ -412,6 +456,9 @@ export function createM3Compaction(deps) {
        * 修法：用**实测的单步最大增量**把我们的线提前：margin = clamp(5pp, 20pp, 单步最大增量)。
        * 这样我们总在「引擎可能到线的那一步之前」触发，档位/范围由我们说了算（而非引擎兜底 standard）。 */
       recordRatioSample(sid, ratio, mr);
+      /* R39：**每轮都刷新折算因子**（非 stale 才更新）——否则本会话首次压缩仍用 factor=1，
+       * 「档位名副其实」要等到第二次压缩才生效。 */
+      noteRetainFactor(sid, mr);
       /* ═══ R4（2026-10-08）：模型主动登记「下一步压缩」意图 ⇒ 轮内执行，本轮无缝继续 ═══
        * 这是替代「marker + 伪造恢复消息」的核心：工具调用必然产生下一步 ⇒ 下一步的 pre-step
        * 就在这里执行压缩 ⇒ 之后的步骤都在压缩后的上下文上继续，**不需要任何消息**。
@@ -570,7 +617,10 @@ export function createM3Compaction(deps) {
         tier: out.tier ?? tierName,
         retainBudget: out.retainBudget ?? null,
         /* R21：保留来源（anchor:* = 语义锚点生效；tier = 三档兜底）+ 锚点失败原因（写了才有痕）。
-         * R23：`anchorLabel` = 锚点的中文描述（回执直接用它，不再显示 `recent-user`/`text` 这类内部 token）。 */
+         * R23：`anchorLabel` = 锚点的中文描述（回执直接用它，不再显示 `recent-user`/`text` 这类内部 token）。
+         * R39：`retainBudgetHeur` = 折算后真正交给范围选择的启发式预算；`retainFactor` = 折算因子。 */
+        retainBudgetHeur: out.retainBudgetHeur ?? null,
+        retainFactor: out.retainFactor ?? 1,
         retainSource: out.retainSource ?? (out.retainBudget != null ? 'tier' : null),
         anchorLabel: out.retainSource && String(out.retainSource).startsWith('anchor:') ? anchorLabelOf(anchorWant) : null,
         anchorFailReason: out.anchorFailReason ?? null,
@@ -591,6 +641,8 @@ export function createM3Compaction(deps) {
         rangeSource,
         tier: out.tier ?? tierName,
         retainBudget: out.retainBudget ?? null,
+        retainBudgetHeur: out.retainBudgetHeur ?? null,   // R39：折算后（启发式口径）
+        retainFactor: out.retainFactor ?? 1,             // R39：真实口径折算因子
         retainSource: out.retainSource ?? null,
         anchorFailReason: out.anchorFailReason ?? null,
         walkBacks: out.walkBacks ?? 0,
@@ -751,5 +803,5 @@ export function createM3Compaction(deps) {
     }
   };
 
-  return { measureRatio, compactWithOwnRange, preStepCompaction, idleSweep, setCompactVerify, takeCompactVerify, isCompactionInFlight, noteEngineCompaction };
+  return { measureRatio, compactWithOwnRange, preStepCompaction, idleSweep, setCompactVerify, takeCompactVerify, isCompactionInFlight, noteEngineCompaction, noteRetainFactor, retainFactorOf };
 }

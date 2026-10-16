@@ -319,7 +319,12 @@ export function createM2Injection(deps) {
         })();
         if (label) parts.push(`${label} 档`);
       }
-      if (Number.isFinite(v.retainBudget) && v.retainBudget > 0) parts.push(`保留预算 ~${Math.round(v.retainBudget / 1000)}k`);
+      if (Number.isFinite(v.retainBudget) && v.retainBudget > 0) {
+        /* R39：档位预算现在是**真实口径**（范围选择用折算后的启发式预算）——折算过就点明，否则
+         * 模型看到"保留预算 240k"与"实际保留了多少"对不上会再次误读。 */
+        const fNote = Number.isFinite(v.retainFactor) && v.retainFactor > 1.05 ? `（真实口径 ×${v.retainFactor}）` : '';
+        parts.push(`保留预算 ~${Math.round(v.retainBudget / 1000)}k${fNote}`);
+      }
       /* R21：语义锚点的**实际结果必须在回执里可见**——否则模型以为锚点生效了、其实已退回档位
        * （静默降级是本项目大忌）。生效说来源，未命中说原因。
        * R23：来源用**中文描述**（`anchorLabel`，如「从最近第 1 条你的消息起」）——

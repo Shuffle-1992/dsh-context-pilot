@@ -347,7 +347,7 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
     .then((m) => {
       m3Ctl = m.createM3Compaction({
         svc, tryOf, state, M3, effEnabled, criticalCapOf, engineThreshold, resolveCompactionFor,
-        log, msg, pick, nfmt, errCodeOf, schedule, projectedFromPressure,
+        log, msg, pick, nfmt, errCodeOf, schedule, projectedFromPressure, summarizeBreakdown, // R39：真实口径折算要用"可见组成"单源
         publishHud, recordHudAct, formatAct, clearBriefed, extractEventText, // R21：锚点 text 定位用它（文本提取单一真相）
         /* range 模块与压缩工具的生命周期都由宿主拥有 ⇒ 交给模块 async 取用口。 */
         awaitRange: async () => rangeApi ?? (await rangeReady),
