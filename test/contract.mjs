@@ -3943,6 +3943,12 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
     /retainBudget: useAnchor \? anchorBudget : tierBudget/.test(m3src)
     && /retainBudgetHeur: useAnchor \? anchorBudget : tierBudgetHeur/.test(m3src),
     '无条件报 tierBudget ⇒ 锚点生效时回执报的是档位承诺（R39 的回归）');
+  /* R42（用户 2026-10-16 明确）：「keepFrom 不用强制符合这个计算逻辑，应准确保留之前的逻辑」。 */
+  ok('R42 语义守卫：**只有档位预算经过折算，锚点预算绝不折算**（保持 R21 的位置语义）',
+    /const tierBudgetHeur = scaleRetainBudget\(tierBudget, retainFactor\);/.test(m3src)
+    && !/scaleRetainBudget\(anchorBudget/.test(m3src)
+    && /const budget = useAnchor \? anchorBudget : tierBudgetHeur;/.test(m3src),
+    '锚点被折算 ⇒ 保留边界越过锚点 ⇒ 违背「锚点之后一律原样保留」（R21 护栏）');
   ok('R39 接线：宿主把 `summarizeBreakdown`（可见组成单源）注入 m3',
     /summarizeBreakdown, \/\/ R39/.test(host) && /summarizeBreakdown,/.test(m3src),
     'm3 拿不到可见组成 ⇒ 折算因子恒为 1（静默失效）');

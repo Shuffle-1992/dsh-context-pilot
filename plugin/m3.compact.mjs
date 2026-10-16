@@ -350,12 +350,14 @@ export function createM3Compaction(deps) {
      * 无论走哪条都要留痕：`retainSource` 会进 rangeProbe 与回执（静默降级是本项目大忌）。 */
     const anchorBudget = Number(retainOverride?.budget);
     const useAnchor = Number.isFinite(anchorBudget) && anchorBudget > 0;
-    /* R39：档位预算按**真实口径**折算（因子来自非 stale 实测；只减不增，夹在 [1,2]）。
+    /* R39/R42：**只有档位预算**按真实口径折算（因子来自非 stale 实测；只减不增，夹在 [1,2]）。
+     * ⚠️ **锚点预算绝不折算**（用户 2026-10-16 明确要求"准确保留之前的逻辑"）：锚点是**位置承诺**
+     * （"从这条消息起之后一律原样保留"），折算会越过锚点 ⇒ 违背 R21 护栏「宁可多留，绝不丢新需求」。
      * `tierBudget` 保持"档位承诺"（回执/报告报它，真实口径）；交给范围选择的是折算后的启发式预算。 */
     noteRetainFactor(sid, measureRatio(agent.session), agent.session);
     const retainFactor = retainFactorOf(sid);
     const tierBudgetHeur = scaleRetainBudget(tierBudget, retainFactor);
-    const budget = useAnchor ? anchorBudget : tierBudgetHeur;
+    const budget = useAnchor ? anchorBudget : tierBudgetHeur;   // ← 锚点原样（不折算）
     const retainSource = useAnchor ? String(retainOverride?.source ?? 'anchor') : 'tier';
     const sel = api.selectRange({ session: agent.session, measurement: measure, retainTokens: budget, keepFromSeq: useAnchor ? anchorSeq : null });
     /* 取证：无论成败都留一次范围读数（范围不对时这是唯一的现场）。

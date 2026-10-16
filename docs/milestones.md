@@ -3250,3 +3250,31 @@ toggle 到 v0.1.28 后重跑同一条测试，账本逐项吻合：
 
 **验证**：**733 断言全绿**（R40 段断言改写为 R40/R41，同时钉住"真实口径落点"与"不误报档位预算"）。
 **变异 2/2 CAUGHT**：锚点不报落点 ⇒ 红 1；锚点混用档位话术 ⇒ 红 1。
+
+### R42 锚点语义**定案**：绝不折算（2026-10-16，用户明确）
+
+用户原话：「`keepFrom:{text:…}` 和 `keepFrom:{recentUser:N}`，就应该**不用强制符合这个计算逻辑**，
+应该**准确保留之前的逻辑**。」
+
+**确认：这正是现有实现**——`scaleRetainBudget` **只作用于档位预算**：
+
+```js
+const tierBudgetHeur = scaleRetainBudget(tierBudget, retainFactor);
+const budget = useAnchor ? anchorBudget : tierBudgetHeur;   // ← 锚点原样（不折算）
+```
+
+锚点侧的一切**未改动**：`resolveAnchorBudget`（锚点→末尾 token + 余量，启发式口径）+ R21 护栏
+（`selectRange` 的范围**绝不越过锚点**：`keepAtIdx` 被拉到锚点）。
+
+**唯一变化的是回执文案**（R40 报正确来源、R41 附"真实口径落点"预估）——**只读、不改行为**。
+
+**新增契约守卫（R42）**：`scaleRetainBudget(anchorBudget` **不得出现**在源码里；锚点分支必须原样传
+`anchorBudget`。**变异 2/2 CAUGHT**：把折算套到锚点上（直接折 / 挪到公共出口）⇒ 各红 2 条
+（R42 守卫 + R16/R21 老断言）。
+
+| 路径 | 是否折算 | 口径 |
+| --- | --- | --- |
+| 档位 tier | ✅ 折算（÷ 实测 factor，夹 [1,2]） | 真实口径 ⇒ 表盘 ≈ 档位名 + ~3pp |
+| 锚点 keepFrom | ❌ **绝不折算**（保持 R21 位置语义） | 位置口径 ⇒ 表盘由锚点位置决定（回执给落点预估） |
+
+**验证**：**734 断言全绿**（contract **587** / static 72 / report 54 / boot 21）。
