@@ -3591,3 +3591,33 @@ before initialization`，且当时 `compactIfNeeded` 已真的执行）。
 **如实记录的未修项**：`preStepOk` 在"引擎判定无需压"（`result == null`）时也 +1 —— 语义偏差，
 但实际压缩量另有 `shadowedTokens`/`lastPreStep.acted` 精确表达，改它会让历史报告的数前后不可比、
 零用户可见影响 ⇒ **记录不改**（详见自审报告 §4）。
+
+### R54 千问独立审计真的跑通了 —— 4 条真缺陷（全部我自审漏掉）+ 测试盲区修复（2026-10-17）
+
+第三次派发 `qoder/Qwen3.8-Flash`（用户重启后）**成功交付**：24KB 报告、62 轮、7 段结构齐全、
+写入范围守规矩（仓库里只多出它那份报告）。我**逐条复核、不采信结论**，四条全部成立：
+逐条判定与我的错误记录见 `docs/reviews/r51-audit-crosscheck.md`。
+
+- **F1（高）`lastUserText` 未解构**：`host.impl.mjs:317` 把它当**自由标识符**用，而 core 解构里没有
+  ⇒ 每次调用 `ReferenceError`，再被 `m2` 的空 `catch` 吞掉 ⇒ 思考强度提醒**永远拿不到用户文本**
+  （静默降级）。修：解构补上。
+- **F2（高）清理块引用未定义的 `pending`**：`pending` 既没解构、core 也**没导出** ⇒ 卸载/热换时
+  清理块**第一行**就抛 ⇒ 后面所有 disposer 全不执行（监听器/定时器泄漏，且 apply 期毫无异常可见）。
+  修：core 新增 `clearSchedules()`（防抖表归它清），宿主改调它。
+- **F3（中）client `alive` 作用域外引用**：`alive` 只声明在**上一个 effect**，autoClamp 那个 effect
+  在 `await` 之后引用它 ⇒ `ReferenceError`，且 `catch` 里**再抛一次** ⇒ 未捕获 rejection + 用户
+  看不到成功/失败提示。修：声明本 effect 自己的 `alive` + 返回清理。
+- **F4（中）回执只写全局镜像**：`host.impl.mjs:380` 直写 `state.m3.lastCompactVerify`，而读取端
+  `takeCompactVerify(sid)` **只读** `verifyBySid[sid]` ⇒ 这条「未执行」回执**永远读不回来**。
+  修：同时写 per-sid 槽 + 全局镜像。
+
+**测试盲区（它的 M1，最锋利的一条，已采纳）**：`test/boot.mjs` 的 `effect` 桩 `return setup?.()` 把
+卸载器**返回后直接丢弃** ⇒ 卸载路径**从未被执行**（F2 因此藏了三个版本）。已修：桩收集卸载器，
+boot 末尾**真调**并断言不抛 —— 这条行为级断言正是 F2 的回归守卫。
+
+**我自审报告的错误（必须记）**：`r51-audit-self.md` §5 的 H1 写「未再发现第三例」——**错的**。
+F1/F2/F4 全在 `host.impl.mjs` 几十行之内，我读过很多次却没看见。自审的可信度上限就在这里。
+
+**验证**：**782 断言全绿**（contract **629** / static 77 / report 54 / boot **22**）；
+**变异 4/4 CAUGHT**。其中 F1 的结构守卫首版**被自己的注释骗过**（变异 MISSED）⇒ 改为先剥注释再比对，
+复测 CAUGHT —— 这本身也是"断言假绿"的现场教训。

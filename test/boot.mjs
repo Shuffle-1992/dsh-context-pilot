@@ -60,12 +60,15 @@ const logger = {
   warn: (...a) => warns.push(['warn', a.join(' ')]),
 };
 
+const disposers = [];
 const ctx = {
   logger,
   get: () => null, // 所有服务都拿不到 ⇒ 走「降级」分支（这正是要验证的鲁棒性）
   on: (name, handler) => { handlers.set(name, handler); },
   provide: (name, face) => { provided.set(name, face); },
-  effect: (setup) => { effects += 1; return setup?.(); },
+  /* R54（独立审计 M1）：卸载器必须**真的被调用**。原桩 `return setup?.()` 把清理函数返回后直接丢弃，
+   * 于是「卸载路径 ReferenceError」（审计 F2）在 780 条断言全绿的情况下都没被发现。 */
+  effect: (setup) => { effects += 1; const d = setup?.(); if (typeof d === 'function') disposers.push(d); return d; },
 };
 
 let applyFn = null;
@@ -262,6 +265,16 @@ ok('报告已落盘且 history 非空（激活快照管线可达）',
 }
 
 try { rmSync(tmp, { recursive: true, force: true }); } catch { /* 吞 */ }
+
+/* R54（独立审计 F2 的回归守卫）：**真调**卸载器 —— 清理块里若引用了未定义的自由标识符
+ * （原实现 `for (const t of pending.values())` 就是这样），这里必抛；而以前这条路径从未被执行。
+ * 放在最后执行：清理会撤掉监听器/定时器，避免影响前面的断言。 */
+{
+  let disposeErr = null;
+  try { for (const d of disposers) d(); } catch (e) { disposeErr = e; }
+  ok('卸载器可执行且不抛（清理块无未定义标识符 / disposer 全跑完）',
+    disposeErr === null, disposeErr ? String(disposeErr?.message ?? disposeErr) : `disposers=${disposers.length}`);
+}
 
 console.log(`\n${'='.repeat(52)}`);
 console.log(`宿主启动冒烟：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);

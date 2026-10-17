@@ -360,6 +360,16 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
   };
 
   const pending = new Map(); // reason -> timer（防抖合并）
+  /** R54（独立审计 F2，2026-10-17）：防抖表归 core 自己清。
+   * 宿主原先是直接 `for (const t of pending.values())` —— 而 `pending` **既没被解构、core 也没导出**
+   * ⇒ 卸载/热换时清理块**第一行就 ReferenceError** ⇒ 后面所有 disposer 都不执行（监听器/定时器泄漏），
+   * 而 apply 期看不到任何异常（正是「最坏情况静默」的形态）。 */
+  const clearSchedules = () => {
+    try {
+      for (const t of pending.values()) { try { clearTimeout(t); } catch { /* 吞 */ } }
+      pending.clear();
+    } catch { /* 吞 */ }
+  };
   /** M3.6 取证：session/event 全量形状探针（类型计数 + 前 N 条样本），落报告定位解析断点。 */
   
   /* ---- M4：生效参数 = bundle config 覆盖默认值（字段级类型守卫，异常全落默认）。
@@ -814,7 +824,7 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
   /** core 出口：宿主只解构使用，不直接改。 */
   return {
     state, log, msg, svc, tryOf, pick, kfmt, nfmt, errCodeOf, remember, SET_CAP,
-    M3, mergeConfig, effEnabled, schedule, addListener, SOURCE_KIND, TAG,
+    M3, mergeConfig, effEnabled, schedule, addListener, SOURCE_KIND, TAG, clearSchedules,
     COMPACT_TIMEOUT_MS, HISTORY_CAP, HEARTBEAT_MS, SESSION_CAP,
     compactMeasure, summarizeBreakdown, messageText, messageTextLength, extractEventText, lastUserText,
     /* R25：占用口径单源（m3 触发/显示、m1 报告账本都用这两支）。 */

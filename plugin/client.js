@@ -326,6 +326,10 @@ window.__ModuleLoader__.load({
 			const autoClamped = react.useRef(false);
 			react.useEffect(() => {
 				if (autoClamped.current) return;
+				/* R54（独立审计 F3）：**本 effect 自己的**存活标志——原实现在这里引用了上一个 effect
+				 * 里的 `alive`（作用域外 ⇒ ReferenceError）：await 之后的首个检查就抛、被 catch 吞掉后
+				 * 又在 catch 里**再抛一次** ⇒ 未捕获 rejection，且用户永远看不到成功/失败提示（静默）。 */
+				let alive = true;
 				if (!ready || !writable || engineCap === null) return;
 				const cur = Number(stored.criticalRatio);
 				if (!Number.isFinite(cur) || cur <= engineCap) return;
@@ -351,6 +355,7 @@ window.__ModuleLoader__.load({
 						setMessage({ kind: "error", text: `自动钳制失败：${String(error?.message ?? error)}` });
 					}
 				})();
+				return () => { alive = false; };
 			}, [ready, writable, engineCap, stored.criticalRatio]);
 			/** 取字段的 **UI 口径**值：草稿已是 UI 串（秒），存储值经 toUi 转成 UI 口径（毫秒→秒）。 */
 			const valueOf = (field) => {

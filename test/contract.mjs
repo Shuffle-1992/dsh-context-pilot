@@ -4427,6 +4427,41 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
     '实现不是 tmp+rename ⇒ 半截 JSON 仍可能出现（名字叫 atomic 但行为不是）');
 }
 
+/* ═══ 6.47 R54（独立审计 B 路 · qoder/Qwen3.8-Flash）：四条真缺陷的回归守卫 ═══
+ * F1 `lastUserText` 未解构 → 每次调用 ReferenceError（被 m2 的空 catch 吞掉 = 静默降级）
+ * F2 `pending` 未定义 → 卸载清理**第一行**就抛 ⇒ 后面所有 disposer 全不执行（监听器/定时器泄漏）
+ * F3 client `alive` 引用作用域外的变量 → autoClamp 路径 ReferenceError + 未捕获 rejection
+ * F4 回执只写全局镜像、读取端只读 per-sid ⇒ 模型永远看不到「未执行」
+ * 说明：F2 的**行为级**守卫在 boot.mjs（真调卸载器）；F3 的**行为级**守卫是
+ * contract 既有的「autoClamped 异步分支有 alive 守卫」两条；本块做结构守卫，防有人改回去。 */
+{
+  const host54 = read('host.impl.mjs');
+  const core54 = read('core.mjs');
+  const client54 = read('client.js');
+  const problems54 = [];
+  /* F1：宿主必须解构 core 导出的 lastUserText（否则是自由标识符 ⇒ 调用即 ReferenceError）。
+   * ⚠️ 必须先**剥掉注释**再比对：解构块上方那段注释里也写着 lastUserText，否则守卫会被自己的注释骗过
+   * （首版就是这么 MISSED 的 —— 变异 M1 实测抓不住）。 */
+  const destr54 = ((host54.match(/const \{\n([\s\S]{0,1500}?)\} = core;/) ?? [])[1] ?? '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
+  if (!destr54.includes('lastUserText')) problems54.push('F1: 宿主 core 解构缺 lastUserText（仅注释里有不算）');
+  if (!/lastUserText,/.test(core54)) problems54.push('F1: core 未导出 lastUserText');
+  /* F2：防抖表必须由 core 清，宿主不得再引用未定义的 pending。 */
+  if (!/const clearSchedules = \(\) =>/.test(core54)) problems54.push('F2: core 缺 clearSchedules');
+  if (/for \(const t of pending\.values\(\)\)/.test(host54)) problems54.push('F2: 宿主仍引用未定义的 pending');
+  if (!/clearSchedules\?\.\(\)/.test(host54)) problems54.push('F2: 宿主清理块未调 clearSchedules');
+  /* F3：autoClamp effect 必须声明自己的 alive（不得借用上一个 effect 的）。 */
+  if (!/const autoClamped = react\.useRef\(false\);[\s\S]{0,800}?let alive = true;/.test(client54)) {
+    problems54.push('F3: autoClamp effect 未声明自己的 alive');
+  }
+  /* F4：回执必须同时写 per-sid 槽（读取端只读它）。 */
+  if (/state\.m3\.lastCompactVerify = \{/.test(host54)) problems54.push('F4: 宿主仍只写全局镜像（绕过 verifyBySid）');
+  if (!/\[sid\]: rec \}/.test(host54)) problems54.push('F4: 宿主未写 per-sid 槽');
+  ok('R54 独立审计四条修复的结构守卫（F1 解构 / F2 clearSchedules / F3 作用域 / F4 回执同源）',
+    problems54.length === 0, `实际问题：${JSON.stringify(problems54)}`);
+}
+
 /* ═══════════ 汇总 ═══════════ */
 console.log(`\n${'='.repeat(52)}`);
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);

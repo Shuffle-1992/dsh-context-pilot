@@ -40,7 +40,11 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
     schedule, addListener, remember, SET_CAP, SOURCE_KIND, SESSION_CAP, HEARTBEAT_MS, TAG,
     COMPACT_TIMEOUT_MS, HISTORY_CAP,
     compactMeasure, summarizeBreakdown, extractEventText, messageText, errCodeOf, projectedFromPressure, contextLedgerOf, // R25 占用口径单源：注入 M1（账本）与 M3（触发/显示）
-    getCreateUserMessage, attachSnapshot, loadDefineTool, loadReportBase,
+    /* R54（独立审计 F1/F2）：`lastUserText` 与 `clearSchedules` 必须在**解构里**——
+     * F1：第 317 行把 lastUserText 当自由标识符用（core 导出了但没取 ⇒ 每次调用 ReferenceError，
+     *     再被 m2 空 catch 吞掉 ⇒ 思考强度提醒永远拿不到用户文本）；F2：清理块原先直接引用 `pending`
+     *     （既没解构、core 也没导出）⇒ 卸载第一行就抛、所有 disposer 都不执行。 */
+    lastUserText, getCreateUserMessage, attachSnapshot, loadDefineTool, loadReportBase, clearSchedules,
   } = core;
 /**
  * dsh-context-pilot —— M1+M2 实现：用量读取验证 + 每轮注入。
@@ -377,10 +381,12 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
       try {
         const sid = String(pick(payload?.agent?.session?.id, payload?.agent?.sessionId, payload?.agent?.id, 'unknown'));
         if (compactToolApi?.peekIntent?.(sid)) {
-          state.m3.lastCompactVerify = {
-            at: new Date().toISOString(), sessionId: sid, state: 'not-executed',
-            why: 'm3-module-missing', read: false,
-          };
+          /* R54（独立审计 F4）：读取端 `takeCompactVerify(sid)` **只读** `state.m3.verifyBySid[sid]`；
+           * 原实现只写全局镜像 `lastCompactVerify` ⇒ 这条「未执行」回执**永远读不回来**（静默降级）。
+           * M3 模块缺失时调不了 setCompactVerify ⇒ 这里按同一形状直接写 per-sid 槽，再同步全局镜像。 */
+          const rec = { at: new Date().toISOString(), sessionId: sid, state: 'not-executed', why: 'm3-module-missing', read: false };
+          state.m3.verifyBySid = { ...(state.m3.verifyBySid ?? {}), [sid]: rec };
+          state.m3.lastCompactVerify = rec;
         }
       } catch { /* 吞 */ }
       log('warn', 'M3 pre-step 先压：压缩域模块未就绪，本轮跳过');
@@ -517,8 +523,9 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
   try {
     if (typeof ctx?.effect === 'function') {
       ctx.effect(() => () => {
-        for (const t of pending.values()) { try { clearTimeout(t); } catch { /* 吞 */ } }
-        pending.clear();
+        /* R54（独立审计 F2）：防抖表改由 core 清 —— 原实现直接引用 `pending`，而它既没解构、
+         * core 也没导出 ⇒ 卸载时**第一行**就抛 ReferenceError ⇒ 下面那圈 disposer 全不执行。 */
+        try { clearSchedules?.(); } catch { /* 吞 */ }
         for (const d of disposers) { try { d?.(); } catch { /* 吞 */ } }
       }, 'context-pilot:cleanup');
     }
