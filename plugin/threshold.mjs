@@ -73,25 +73,45 @@ export function createThreshold({ svc, tryOf, state, log }) {
    */
   const engineThreshold = (agent) => {
     const r = resolveCompactionFor(agent);
-    const t = tryOf(() => r.service?.config?.thresholdRatio);
+    /* ═══ R49（DSH 0.2.1-rc.2 正向优化，2026-10-17）：按**当前模型**的官方策略取阈值 ═══
+     * 官方 `resolveTargetPolicy(config, target)`：`config.modelPolicies[]` 按 **provider+model 精确匹配**
+     * 覆盖 `thresholdRatio`/`headroomTokens`（见 dsh-compaction-basic lib/index.js）。
+     * 只读默认 `thresholdRatio` 会在用户配了 modelPolicies 时与"当前模型"的官方阈值错位
+     * （插件线可能反而**高于**引擎线 ⇒ 失去"确定性先行"，甚至压了等于没压）。
+     * 路由来自 m3 从 `model/selection` 事件记的 route（R49）；**匹配不到 ⇒ 用默认（与旧行为逐字一致）**。 */
+    const sid = (() => { try { return String(agent?.session?.id ?? agent?.sessionId ?? ''); } catch { return ''; } })();
+    const route = (() => { try { return state?.m3?.route?.[sid] ?? null; } catch { return null; } })();
+    const pol = (() => {
+      try {
+        const list = r.service?.config?.modelPolicies;
+        if (!Array.isArray(list) || !route?.provider || !route?.model) return null;
+        return list.find((p) => p && p.provider === route.provider && p.model === route.model) ?? null;
+      } catch { return null; }
+    })();
+    /* `via` 只在**策略真的覆盖了阈值**时标 modelPolicies（策略命中但没写 thresholdRatio ⇒ 仍是默认值，
+     * 标 modelPolicies 会让人以为阈值来自策略 ⇒ 取证失真）。 */
+    const via = (pol && typeof pol.thresholdRatio === 'number') ? 'modelPolicies' : r.via;
+    const t = tryOf(() => (typeof pol?.thresholdRatio === 'number' ? pol.thresholdRatio : r.service?.config?.thresholdRatio));
     const v = t.value;
     const ok = typeof v === 'number' && Number.isFinite(v) && v > 0 && v <= 1;
     const raw = ok ? v : DEFAULT_ENGINE_THRESHOLD;
     /* 取证同时记**原始引擎阈值**与**减去余量后的生效上限**，否则报告里看不出 5pp 被扣在哪。 */
     const prev = state?.m3?.engineCapProbe;
     const ratio = ok ? v : null;
-    if (!prev || prev.ratio !== ratio || prev.fallback !== !ok || prev.via !== r.via) {
+    if (!prev || prev.ratio !== ratio || prev.fallback !== !ok || prev.via !== via) {
       if (state?.m3) {
         state.m3.engineCapProbe = {
           at: new Date().toISOString(),
-          via: r.via,
+          via,
           ratio,
           fallback: !ok,
           cap: +Math.max(0, raw - ENGINE_CAP_MARGIN).toFixed(4),
           margin: ENGINE_CAP_MARGIN,
+          /* R49：命中 modelPolicies 时把**路由**也留痕，一眼看出"按哪条策略钳的"。 */
+          route: (pol && typeof pol.thresholdRatio === 'number') ? { provider: route.provider, model: route.model } : null,
         };
       }
-      if (log) log('info', `引擎阈值探取：ratio=${ratio ?? '(fallback)'} via=${r.via} cap=${Math.max(0, raw - ENGINE_CAP_MARGIN).toFixed(4)}`);
+      if (log) log('info', `引擎阈值探取：ratio=${ratio ?? '(fallback)'} via=${via} cap=${Math.max(0, raw - ENGINE_CAP_MARGIN).toFixed(4)}`);
     }
     return raw;
   };

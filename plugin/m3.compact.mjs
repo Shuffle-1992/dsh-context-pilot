@@ -349,6 +349,73 @@ export function createM3Compaction(deps) {
       return { drop: ds[Math.floor(ds.length / 2)], n: ds.length, last: ds[ds.length - 1] };   // 中位数
     } catch { return null; }
   };
+
+  /* ═══ R49（DSH 0.2.1-rc.2 正向优化，2026-10-17）：压缩锁避让 + 当前模型路由记账 ═══
+   * 依据（**官方源码实证**，逐包 diff 复核过 0.2.0-rc.2 → 0.2.1-rc.1/rc.2）：
+   *  · `dsh-compaction-basic#assertCompactionInactive(unmatchedCompactionStart, latestEndSeedSeq, stage)`：
+   *    **未匹配的 `compaction/start`（其后没有更晚的 `session/end-seed`）即持久锁**；事务进行中任何其他
+   *    发起者（含插件的 `compactRegion`）都会被拒并抛 `ManualCompactionError('busy')`。官方 `/compact`
+   *    与插件**共用这把锁**，且 `/compact` **仅限空闲**（命令自身不排队）⇒ 同时发起必有一方吃 `busy`。
+   *  · `resolveTargetPolicy(config, target)`：`config.modelPolicies[]` 按 **provider+model 精确匹配**
+   *    覆盖 `thresholdRatio`/`headroomTokens` ⇒ 插件只读**默认** `thresholdRatio` 会与"当前模型"的
+   *    官方阈值错位（插件线可能反而高于引擎线）。见 threshold.mjs 的 R49 段。
+   * 实现纪律：**只用已文档化的会话事件**记账（不去碰未公开的 `session.seq` / 反向扫日志），
+   *   `compaction/start` ⇒ 记锁；`compaction/end` 或 `session/end-seed` ⇒ 清锁；`model/selection` ⇒ 记路由。
+   * ⚠️ 锁带 **TTL**：日志修复/崩溃后若永远没有 end 事件，插件不能永久让路（宁可让路超时后恢复自己的
+   *    兜底，也不能永久失去压缩能力）——这是"正向提升"的底线：最坏情况 = 旧行为。 */
+  const COMPACT_LOCK_TTL_MS = 10 * 60_000;
+  const R49_SID_CAP = 64;
+  const boundMap = (m, cap) => {
+    try {
+      const ks = Object.keys(m);
+      if (ks.length > cap) delete m[ks[0]];
+    } catch { /* ignore */ }
+  };
+  const noteSessionEvent = (session, event) => {
+    try {
+      const t = event?.type;
+      if (!t) return null;
+      const sid = String(pick(session?.id, session?.header?.id, ''));
+      if (!sid) return null;
+      const m3s = state.m3;
+      if (t === 'compaction/start') {
+        m3s.compactLock = m3s.compactLock ?? {};
+        m3s.compactLock[sid] = { at: Date.now(), seq: event.seq ?? null, turn: event.data?.turn ?? null };
+        boundMap(m3s.compactLock, R49_SID_CAP);
+        return 'lock-set';
+      }
+      if (t === 'compaction/end' || t === 'session/end-seed') {
+        if (m3s.compactLock?.[sid]) { delete m3s.compactLock[sid]; return 'lock-cleared'; }
+        return null;
+      }
+      if (t === 'model/selection') {
+        m3s.route = m3s.route ?? {};
+        m3s.route[sid] = { at: Date.now(), provider: event.data?.provider ?? null, model: event.data?.model ?? null };
+        boundMap(m3s.route, R49_SID_CAP);
+        return 'route-set';
+      }
+      return null;
+    } catch { return null; }
+  };
+  const compactionLockActive = (sid) => {
+    try {
+      const rec = state.m3.compactLock?.[sid];
+      if (!rec || !Number.isFinite(rec.at)) return false;
+      if (Date.now() - rec.at > COMPACT_LOCK_TTL_MS) { delete state.m3.compactLock[sid]; return false; }   // TTL 过期 ⇒ 不永久让路
+      return true;
+    } catch { return false; }
+  };
+  const currentRouteOf = (sid) => { try { return state.m3.route?.[sid] ?? null; } catch { return null; } };
+  /* R49：让路留痕（取证用；也便于测试断言"真的没发起"）。 */
+  const noteLockSkip = (sid, ratio, wanted) => {
+    try {
+      state.m3.lockSkips = (state.m3.lockSkips ?? 0) + 1;
+      state.m3.lastLockSkip = {
+        at: new Date().toISOString(), sessionId: sid,
+        ratio: Number.isFinite(ratio) ? +(ratio * 100).toFixed(1) : null, wanted: !!wanted,
+      };
+    } catch { /* ignore */ }
+  };
   /* R46：由「当前实测 + 本会话回落样本」推出稳定后比例（面板行后缀用；无样本 ⇒ null，不编数字）。 */
   const settledRatioOf = (sid, mr) => {
     try {
@@ -507,6 +574,12 @@ export function createM3Compaction(deps) {
    * 触发来源两类：① 模型调用 `compact_context` 登记的意图（`wanted`）；② 占用越过生效强制线（`forced`）。
    */
   const preStepCompaction = async (payload) => {
+    /* ═══ R49.1（既有隐患，测试暴露）：`sid` 必须在 `try` **之外**声明 ═══
+     * 原实现在 try 内 `const sid`，而 catch 里要用它写「未执行」回执 ⇒ catch 自身 ReferenceError：
+     * `lastPreStepError`（2026-10-08 专为"全线失败时报告里看不到原因"加的）与「吞掉、本轮照常继续」
+     * 全丢，异常还冒泡给 DSH。真机从未触发（`preStepErrors` 为空）⇒ 一直潜伏。
+     * ⚠️ 也不能在 catch 里**重算** sid：payload 的 `session` 可能就是抛错源（取一次抛一次）⇒ 会二次抛错。 */
+    let sid = 'unknown';
     try {
       if (!effEnabled()) return; // 总开关活读（演习模式已随 2026-10-07 面板精简退役：压缩路径无影子模式）
       const { agent, signal } = payload ?? {};
@@ -515,7 +588,7 @@ export function createM3Compaction(deps) {
        * （M5.5 通道 A 已实证同款）。payload 未带 signal 时兜底 180s 超时信号（与 idle compactNow 同参）。 */
       const sig = signal && typeof signal === 'object' ? signal : AbortSignal.timeout(COMPACT_TIMEOUT_MS);
       if (sig.aborted) return;
-      const sid = String(pick(agent.session.id, agent.sessionId, agent.id, 'unknown'));
+      sid = String(pick(agent.session.id, agent.sessionId, agent.id, 'unknown'));
       const mr = measureRatio(agent.session); // B2：读取收敛
       if (!mr.ok || mr.ratio == null) return;
       const ratio = mr.ratio;
@@ -574,6 +647,15 @@ export function createM3Compaction(deps) {
         } catch { return Math.min(M3.criticalRatio, cap); }
       })();
       if (!wanted && ratio < effCritical) return;
+      /* R49：官方压缩事务进行中（未匹配的 `compaction/start`）⇒ **本轮让路**——官方 `/compact` 或引擎
+       * 正在压，此刻发起必然撞 `busy`（官方 assertCompactionInactive）。⚠️ 放在**消费意图之前**：
+       * 让路时意图必须保留（F5 同款纪律：工具已回 scheduled，实际没执行 ⇒ 下一步要能重试）。 */
+      if (compactionLockActive(sid)) {
+        noteLockSkip(sid, ratio, wanted);
+        log('info', `M3.5 pre-step 先压：官方压缩事务进行中（未匹配 compaction/start）⇒ 本轮让路`
+          + `（占用 ${(ratio * 100).toFixed(1)}%，意图保留=${wanted}）`);
+        return;
+      }
       const compaction = resolveCompactionFor(agent);
       if (!compaction.service) {
         /* R15：**未执行**也要留回执——这是模型自检的唯一依据。
@@ -793,7 +875,7 @@ export function createM3Compaction(deps) {
     } catch (e) {
       const code = errCodeOf(e);
       state.m3.preStepErrors[code] = (state.m3.preStepErrors[code] ?? 0) + 1;
-      /* R15：失败同样留回执（模型要能看见「未执行 + 原因」）。 */
+      /* R15：失败同样留回执（模型要能看见「未执行 + 原因」）。R49.1：`sid` 已提到 try 之外 ⇒ 这里安全。 */
       setCompactVerify(sid, { at: new Date().toISOString(), sessionId: sid, state: 'not-executed', why: code, trigger: 'pressure', read: false });
       /* ⚠️ 2026-10-08：此前**只记错误码、错误正文只进 log**——压缩全线失败（preStepOk=0）
        * 时报告里看不到原因，无法定位。现保留最近一次失败的完整信息。 */
@@ -825,6 +907,12 @@ export function createM3Compaction(deps) {
       /* C-own：safety-net 同样钳到「引擎阈值 − 5pp」之下（同 pre-step，理由见 threshold.mjs） */
       if (mr.ratio < Math.min(M3.criticalRatio, criticalCapOf(agent))) return; // 仅越强制线才兜底
       if (now - (state.m3.sweeps[sid] ?? 0) < M3.sweepMinIntervalMs) return; // 兜底受冷却限制
+      /* R49：idle 兜底同样让路给进行中的官方压缩事务（同 pre-step 理由；不消耗冷却，下次还能补）。 */
+      if (compactionLockActive(sid)) {
+        noteLockSkip(sid, mr.ratio, false);
+        log('info', `M3 idle 扫除：官方压缩事务进行中 ⇒ 本轮让路（占用 ${(mr.ratio * 100).toFixed(1)}%）`);
+        return;
+      }
       const reason = 'safety-net';
       const compaction = resolveCompactionFor(agent);
       if (!compaction.service) {
@@ -901,5 +989,5 @@ export function createM3Compaction(deps) {
     }
   };
 
-  return { measureRatio, compactWithOwnRange, preStepCompaction, idleSweep, setCompactVerify, takeCompactVerify, isCompactionInFlight, noteEngineCompaction, noteRetainFactor, retainFactorOf, noteCompactSettle, settleDropOf };
+  return { measureRatio, compactWithOwnRange, preStepCompaction, idleSweep, setCompactVerify, takeCompactVerify, isCompactionInFlight, noteEngineCompaction, noteRetainFactor, retainFactorOf, noteCompactSettle, settleDropOf, noteSessionEvent, compactionLockActive, currentRouteOf };
 }

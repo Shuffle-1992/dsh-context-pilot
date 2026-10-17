@@ -592,7 +592,7 @@ ok('R16.13 接线：host 把 compaction/end 转发给 m3；m3 三处自己的压
     && /if \(isCompactionInFlight\(\)\) return null;/.test(m3src13)
     && (m3src13.match(/markOwnCompaction\(sid\)/g) ?? []).length >= 3
     && (m3src13.match(/clearOwnCompaction\(\)/g) ?? []).length >= 3
-    && /isCompactionInFlight, noteEngineCompaction, noteRetainFactor, retainFactorOf, noteCompactSettle, settleDropOf \}/.test(m3src13),
+    && /isCompactionInFlight, noteEngineCompaction, noteRetainFactor, retainFactorOf, noteCompactSettle, settleDropOf, noteSessionEvent, compactionLockActive, currentRouteOf \}/.test(m3src13),
   '任一环缺位 ⇒ 引擎压缩仍无记录，或自家压缩被重复记录');
 ok('R16.13 文案：m5 为两种「非插件压缩」提供标签（不与「强制压缩」混淆）',
   /reason === 'engine-auto' \? '引擎自动压缩'/.test(m5src) && /reason === 'engine-manual' \? '手动压缩（\/compact）'/.test(m5src),
@@ -2380,6 +2380,7 @@ ok('思考强度教学改为「按需可多次」（删掉「1-2 次为宜」的
 ok('M3 域在每条路径都产出执行回执（executed / no-need / not-executed）',
   /setCompactVerify\(sid, \{[\s\S]{0,300}state: result != null \? 'executed' : 'no-need'/.test(m3src)
   && /state: 'not-executed',\n\s+why: 'no-compaction-service'/.test(m3src)
+  /* R49.1：错误分支用**提到 try 之外**的 `sid`（原引用 try 内 `const sid` ⇒ catch 自身抛错，见 m3 注释）。 */
   && /setCompactVerify\(sid, \{ at: new Date\(\)\.toISOString\(\), sessionId: sid, state: 'not-executed', why: code/.test(m3src),
   '缺任一条路径的回执 ⇒ 那种情形下模型看不到「未执行」（正是真机静默失效的形态）');
 ok('R16.1 回执按 sid 存取（并发压缩互不覆盖）+ 全局镜像保留',
@@ -4093,6 +4094,134 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
     /@deepseek-ai\/dsh-typert-protocol\/remote-methods/.test(wire48) && /typertRemote/.test(wire48)
     && /ctx\.provide\(/.test(readFileSync(join(PLUGIN, 'host.impl.mjs'), 'utf8')),
     '升级 DSH 后先看 HUD 是否仍有数据（DSH-0.2.1-COMPAT-REVIEW.md §六-4 / §7.6）');
+}
+
+/* ═══ 6.42 R49：用 0.2.1-rc.2 的新能力做**正向优化**（锁避让 + 按模型的官方阈值）═══
+ * 两项都依据**官方源码实证**（逐包 diff 复核过）：
+ *  · `dsh-compaction-basic#assertCompactionInactive`：未匹配的 `compaction/start` 即持久锁 ⇒
+ *    官方 `/compact` 与插件同时发起必有一方吃 `busy` ⇒ 插件应先查锁、让路（意图保留，可重试）；
+ *  · `resolveTargetPolicy(config, target)`：`config.modelPolicies[]` 按 provider+model 精确匹配覆盖
+ *    `thresholdRatio` ⇒ 插件只读默认值会与"当前模型"的官方阈值错位。
+ * 纪律：**只用已文档化的会话事件**记账（不碰未公开的 `session.seq`）；匹配不到/无锁 ⇒ 与旧行为逐字一致。 */
+{
+  const thMod49 = await import(pathToFileURL(join(PLUGIN, 'threshold.mjs')).href);
+  const m3Mod49 = await import(pathToFileURL(join(PLUGIN, 'm3.compact.mjs')).href);
+  const tryOf49 = (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } };
+  const mkTh49 = (state, cfg) => thMod49.createThreshold({
+    svc: (k) => (k === 'agentPresets' ? { serviceFor: () => ({ compactNow: () => {}, config: cfg }) } : null),
+    tryOf: tryOf49, state, log: () => {},
+  });
+
+  /* --- A：modelPolicies 按当前模型覆盖阈值 --- */
+  const stA = { m3: { route: { sA: { provider: 'deepseek', model: 'M-1' } } } };
+  const thA = mkTh49(stA, { thresholdRatio: 0.8, modelPolicies: [{ provider: 'deepseek', model: 'M-1', thresholdRatio: 0.7 }] });
+  const ethA = thA.engineThreshold({ session: { id: 'sA' } });
+  ok('R49 行为级：命中 `modelPolicies` ⇒ 阈值取**该模型策略**（0.7），并留痕 `via=modelPolicies`',
+    ethA === 0.7 && stA.m3.engineCapProbe?.via === 'modelPolicies'
+    && stA.m3.engineCapProbe?.cap === 0.65 && stA.m3.engineCapProbe?.route?.model === 'M-1',
+    `实际 eth=${ethA} probe=${JSON.stringify(stA.m3.engineCapProbe)}`);
+  const stA2 = { m3: { route: { sA: { provider: 'deepseek', model: 'M-9' } } } };   // 路由不匹配
+  const thA2 = mkTh49(stA2, { thresholdRatio: 0.8, modelPolicies: [{ provider: 'deepseek', model: 'M-1', thresholdRatio: 0.7 }] });
+  const ethA2 = thA2.engineThreshold({ session: { id: 'sA' } });
+  ok('R49 反例：**路由不匹配**（或没有路由）⇒ 用默认阈值 0.8（与旧行为逐字一致，纯增量）',
+    ethA2 === 0.8 && stA2.m3.engineCapProbe?.ratio === 0.8 && stA2.m3.engineCapProbe?.route === null,
+    `实际 eth=${ethA2} probe=${JSON.stringify(stA2.m3.engineCapProbe)}`);
+  const stA3 = { m3: { route: { sA: { provider: 'p', model: 'm' } } } };
+  const thA3 = mkTh49(stA3, { thresholdRatio: 0.8, modelPolicies: [{ provider: 'p', model: 'm' }] });   // 策略命中但没写 thresholdRatio
+  const ethA3 = thA3.engineThreshold({ session: { id: 'sA' } });
+  ok('R49 取证守卫：策略命中但**未覆盖 thresholdRatio** ⇒ 用默认值，且 `via` **不得**标成 modelPolicies',
+    ethA3 === 0.8 && stA3.m3.engineCapProbe?.via !== 'modelPolicies',
+    `实际 eth=${ethA3} via=${stA3.m3.engineCapProbe?.via}`);
+
+  /* --- B：锁记账（行为级） --- */
+  const mkM3b49 = (state) => m3Mod49.createM3Compaction({
+    state, log: () => {}, msg: (e) => String(e), pick: (...a) => a.find((x) => x != null),
+    tryOf: tryOf49, nfmt: (n) => String(n), errCodeOf: (e) => String(e?.code ?? 'err'), schedule: () => {},
+    svc: () => null, projectedFromPressure: () => ({ used: null, projected: null, reported: null, surface: null, sampled: null, basis: 'x' }),
+    summarizeBreakdown: () => null, M3: {}, effEnabled: () => true, criticalCapOf: () => 0.75,
+    resolveCompactionFor: () => ({ service: null, via: 'stub' }), publishHud: () => {}, recordHudAct: () => {},
+    formatAct: () => '', clearBriefed: () => {}, awaitRange: async () => null, getCompactTool: () => null,
+    COMPACT_TIMEOUT_MS: 1000, SET_CAP: 10,
+  });
+  const stB = { m3: {} };
+  const apiB49 = mkM3b49(stB);
+  const sessB = { id: 'sB' };
+  const r1 = apiB49.noteSessionEvent(sessB, { type: 'compaction/start', seq: 5, data: { turn: 3 } });
+  const lockedB = apiB49.compactionLockActive('sB');
+  apiB49.noteSessionEvent(sessB, { type: 'compaction/end' });
+  const clearedB = apiB49.compactionLockActive('sB');
+  ok('R49 行为级：`compaction/start` ⇒ 锁生效；`compaction/end` ⇒ 锁清除',
+    r1 === 'lock-set' && lockedB === true && clearedB === false && stB.m3.compactLock?.sB === undefined,
+    `实际 r1=${r1} locked=${lockedB} cleared=${clearedB}`);
+  apiB49.noteSessionEvent(sessB, { type: 'compaction/start', seq: 6 });
+  apiB49.noteSessionEvent(sessB, { type: 'session/end-seed', seq: 7 });
+  ok('R49 行为级：`session/end-seed`（官方锁的"更晚 end-seed"）⇒ 也清锁',
+    apiB49.compactionLockActive('sB') === false, '实际仍锁定');
+  apiB49.noteSessionEvent(sessB, { type: 'model/selection', data: { provider: 'deepseek', model: 'M-2' } });
+  ok('R49 行为级：`model/selection` ⇒ 记当前路由（供 threshold 匹配 modelPolicies）',
+    apiB49.currentRouteOf('sB')?.provider === 'deepseek' && apiB49.currentRouteOf('sB')?.model === 'M-2',
+    `实际 ${JSON.stringify(apiB49.currentRouteOf('sB'))}`);
+  stB.m3.compactLock.sTTL = { at: Date.now() - 11 * 60_000 };   // 11 分钟前的陈旧锁
+  ok('R49 行为级：锁带 **TTL**——陈旧锁（11 分钟）不得让插件永久让路，且顺手清理',
+    apiB49.compactionLockActive('sTTL') === false && stB.m3.compactLock?.sTTL === undefined,
+    `实际 active=${apiB49.compactionLockActive('sTTL')} rec=${JSON.stringify(stB.m3.compactLock?.sTTL)}`);
+
+  /* --- B（e2e）：锁生效时 pre-step **不发起**且**不消费意图** --- */
+  const calls49 = [];
+  const svc49 = {
+    compactNow: () => { calls49.push('compactNow'); },
+    compactRegion: () => { calls49.push('compactRegion'); return {}; },
+    compactIfNeeded: () => { calls49.push('compactIfNeeded'); return null; },
+  };
+  const tool49 = {
+    peekIntent: () => ({ reason: 'test' }), takeIntent: () => { calls49.push('takeIntent'); },
+    getTier: () => 'heavy', getAnchor: () => null, pending: () => [],
+  };
+  const mkM3e49 = (state) => m3Mod49.createM3Compaction({
+    state, log: () => {}, msg: (e) => String(e), pick: (...a) => a.find((x) => x != null),
+    tryOf: tryOf49, nfmt: (n) => String(n), errCodeOf: (e) => String(e?.code ?? 'err'), schedule: () => {},
+    /* ⚠️ m3 的 `measureRatio` 是**内部实现**（不吃注入的 measureRatio 桩）⇒ 必须喂它真正读的两个源：
+     * `sessionProjections.stateOf(session,'contextPressure')` + 注入的 `projectedFromPressure`。 */
+    svc: (k) => (k === 'tokenMeter'
+      ? { measure: () => ({ totalTokens: 900000, surfaceTokens: 500000, nodes: [] }) }
+      : k === 'sessionProjections'
+        ? { stateOf: () => ({ contextWindow: 1000000, pressureTokens: 800000, surfaceTokens: 500000, sampledSurfaceTokens: 500000 }) }
+        : (k === 'agentPresets' ? { serviceFor: () => svc49 } : null)),
+    projectedFromPressure: () => ({ used: 800000, projected: 800000, reported: 800000, surface: 500000, sampled: 500000, basis: 'test' }),
+    summarizeBreakdown: () => null, M3: { criticalRatio: 0.85 }, effEnabled: () => true, criticalCapOf: () => 0.75,
+    resolveCompactionFor: () => ({ service: svc49, via: 'agentPresets.serviceFor' }), publishHud: () => {}, recordHudAct: () => {},
+    formatAct: () => '', clearBriefed: () => {}, awaitRange: async () => null, getCompactTool: () => tool49,
+    COMPACT_TIMEOUT_MS: 1000, SET_CAP: 10,
+    engineThreshold: () => 0.8, getRangeApi: () => null,
+  });
+  const stE49 = { m3: { preStepErrors: {} } };   // ⚠️ 真实插件在 core.mjs 里初始化 preStepErrors（错误分支会写它）
+  const apiE49 = mkM3e49(stE49);
+  apiE49.noteSessionEvent({ id: 'sE' }, { type: 'compaction/start', seq: 9 });
+  await apiE49.preStepCompaction({ agent: { session: { id: 'sE' } }, signal: AbortSignal.timeout(2000) });
+  ok('R49 端到端：锁生效 ⇒ pre-step **一次都没发起**压缩，且**不消费意图**（下一步可重试）',
+    calls49.length === 0 && stE49.m3.lastLockSkip?.sessionId === 'sE' && stE49.m3.lastLockSkip?.wanted === true,
+    `实际调用=${JSON.stringify(calls49)} lockSkip=${JSON.stringify(stE49.m3.lastLockSkip)}`);
+  /* 对照：清锁后同一路径**必须**照常发起（防"让路变成永久不压"的回归）。
+   * 桩不足时后续步骤可能抛错 ⇒ 只断言"已经越过让路点"（takeIntent + 进入压缩），不要求整条链跑通。 */
+  apiE49.noteSessionEvent({ id: 'sE' }, { type: 'compaction/end' });
+  try { await apiE49.preStepCompaction({ agent: { session: { id: 'sE' } }, signal: AbortSignal.timeout(2000) }); } catch { /* 桩不足，忽略 */ }
+  ok('R49 对照：清锁后**照常发起**（证明让路不是"永久不压"）',
+    calls49.includes('takeIntent') && (calls49.includes('compactRegion') || calls49.includes('compactIfNeeded')),
+    `实际调用=${JSON.stringify(calls49)}`);
+
+  /* --- R49.1：错误分支必须**不抛**并留下 lastPreStepError（原实现引用 try 内 `const sid` ⇒ catch 自身
+   * ReferenceError ⇒ `lastPreStepError` 与"吞掉继续"全丢，异常还冒泡给 DSH）。用"取 session 就抛"的
+   * payload 强制进 catch。 --- */
+  const stErr49 = { m3: { preStepErrors: {} } };
+  const apiErr49 = mkM3e49(stErr49);
+  let threw49 = null;
+  try {
+    await apiErr49.preStepCompaction({ agent: { get session() { throw new Error('boom-R49.1'); } }, signal: AbortSignal.timeout(1000) });
+  } catch (e) { threw49 = String(e?.message ?? e); }
+  ok('R49.1 错误分支：pre-step 抛错时 catch **自己吞掉**并写下 lastPreStepError（不得再抛一次）',
+    threw49 === null && (stErr49.m3.preStepErrors?.err ?? 0) >= 1
+    && /boom-R49\.1/.test(String(stErr49.m3.lastPreStepError?.message ?? '')),
+    `实际 threw=${threw49} errors=${JSON.stringify(stErr49.m3.preStepErrors)} last=${JSON.stringify(stErr49.m3.lastPreStepError)?.slice(0, 160)}`);
 }
 
 /* ═══════════ 汇总 ═══════════ */

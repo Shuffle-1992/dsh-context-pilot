@@ -3441,3 +3441,34 @@ R46 把函数体写长后它就误报（把共享函数自己的模板当成了�
 **验证**：**752 断言全绿**（contract **603** / static 74 / report 54 / boot 21）。
 **变异 5/5 CAUGHT**：去掉 engines / 范围丢预发布后缀 / `summarizeBreakdown` 拒吃扁平形状 /
 新增未复核官方依赖 / 快照删掉在用事件 —— 各自红 1 条。
+
+### R49 用 DSH 0.2.1-rc.2 的新能力做**正向优化**（2026-10-17，用户要求「确保上正向提升」）
+
+**前置：升级后检查全绿**（`engines.dsh` 放行 0.2.1-rc.2 ✓ / 用量行 ✓ / m3 pre-step 在跑 ✓ /
+4 个 hook 注册 ✓ / 压缩工具注册 ✓ / schemastery 已解析 ✓ / **HUD typert 客户端轮询命中** ✓ /
+事件管道含 0.2.1 新增 `job/registered|settled` ✓ / `preStepErrors` 空 ✓ / 契约守卫 752 全绿 ✓）。
+另：**rc.1 → rc.2 九个关键包逐字相同**（hash 相等）⇒ 基于 rc.1 的复核对 rc.2 完整适用。
+
+**两项落地**（都依据**官方源码实证**，且**匹配不到/无锁 ⇒ 与旧行为逐字一致**，纯增量）：
+
+1. **按「当前模型」的官方阈值**（`threshold.mjs`）：官方 `resolveTargetPolicy(config, target)` 支持
+   `config.modelPolicies[]` 按 **provider+model 精确匹配**覆盖 `thresholdRatio`/`headroomTokens`；
+   插件原先只读默认 `thresholdRatio` ⇒ 用户配了 modelPolicies 时会与"当前模型"的官方阈值错位
+   （插件线可能反而**高于**引擎线 ⇒ 失去"确定性先行"）。现按 m3 从 `model/selection` 记的 route 匹配
+   同一条策略；`via` **只在策略真的覆盖了阈值**时标 `modelPolicies`（否则取证失真），并把命中的 route
+   写进 `engineCapProbe`（报告里一眼看出"按哪条策略钳的"）。
+2. **压缩锁避让**（`m3.compact.mjs`）：官方 `assertCompactionInactive` —— **未匹配的 `compaction/start`
+   即持久锁**，官方 `/compact` 与插件共用，且 `/compact` 仅限空闲 ⇒ 同时发起必有一方吃 `busy`。
+   现只用**已文档化的会话事件**记账（`compaction/start` 记锁；`compaction/end`、`session/end-seed` 清锁），
+   pre-step 与 idle 两条路径都让路，且**让路发生在消费意图之前**（意图保留 ⇒ 下一步可重试，F5 同款纪律）。
+   ⚠️ **锁带 10 分钟 TTL**：陈旧锁不得让插件永久失去压缩能力（最坏情况 = 旧行为）。
+   刻意**不采用**未公开的 `session.seq` / 反向扫日志（脆弱耦合）。
+
+**顺手修掉一个既有隐患（R49.1，被测试暴露）**：pre-step 的 `catch` 引用了 `try` 块内 `const sid`
+⇒ **错误分支自身 ReferenceError**（`preStepErrors` 记上了，但 `lastPreStepError` 与「吞掉、本轮照常继续」
+全丢，异常还冒泡给 DSH）。真机从未触发（`preStepErrors` 为空）⇒ 一直潜伏。修法：`sid` 提到 `try` **之外**、
+块内只赋值；⚠️ **也不能在 catch 里重算**（payload 的 `session` 可能就是抛错源，取一次抛一次）。
+
+**验证**：**762 断言全绿**（contract **613** / static 74 / report 54 / boot 21）。
+**变异 6/6 CAUGHT**：不查锁 / 锁无 TTL / 不读 modelPolicies / 不做 provider+model 匹配 /
+`compaction/end` 不清锁 / 复现 R49.1 原缺陷 —— 各自红 1–2 条。
