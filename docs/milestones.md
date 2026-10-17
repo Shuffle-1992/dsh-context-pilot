@@ -3396,3 +3396,48 @@ R46 把函数体写长后它就误报（把共享函数自己的模板当成了�
 - **深压8% 的实测落点**：等真的达到压缩线、按 8% 档执行时再取数。用户原话：
   「**8% 应该没问题，后面达压缩线了再测**」。届时核对：保留预算 ÷ factor、回执的「稳定后预计」、
   以及面板落点是否 ≈ 11%（= 8% + ~3pp）。
+
+### R48 DSH 0.2.1 升级兼容（2026-10-17，只做兼容、不加功能）
+
+**背景**：用户要求「**只做针对新版兼容性相关的优化**，确保更新 DSH 后插件正常运行」，升级后再做后续优化。
+复核结论见 `DSH-0.2.1-COMPAT-REVIEW.md`（含 §七 独立复核）：**0 项破坏性冲突**。
+
+**逐包 diff（npm 0.2.1-rc.1 vs 安装版 0.2.0-rc.2）**：
+
+| 包 | 改动 | 插件依赖点 | 结论 |
+| --- | --- | --- | --- |
+| `dsh-compaction-basic` | **逐字节相同** | `compactIfNeeded` / `compactRegion` / `compactNow` / 锁 | 安全 |
+| `dsh-compaction` | 4 行（仅注释） | 契约类型 | 安全 |
+| `dsh-command-compact` | `lib/index.js` 0 行 | 不调用 | 安全 |
+| `dsh-session` | `lib/index.js` 0 行 | `registerMessageProjection`（两版都有） | 安全 |
+| `dsh-token-meter` | 内部重写（stateVersion 5→6、claim 状态机） | `contextBreakdown` / `contextPressure` **公开视图两版逐字相同** | 安全 + **新约束** |
+| `dsh-llm` | 63+/24− | **`createUserMessage` 导出 + 实现逐字相同** | 安全 |
+| `dsh-tools` | 383+/287− | **`defineTool` 导出 + 实现前缀逐字相同** | 安全 |
+| `dsh-typert-protocol` | +230/−28（**动了 `bindTypertRemote` / marker 区域**） | 插件用 `typertRemote` 绑定 + `remote-methods` 标记 | **需冒烟 HUD** |
+| `dsh-client-ui-*`（注入 7 包） | — | `conversation.input.right` 槽位 | 安全（槽位仍在） |
+| `schemastery` | 版本独立（3.18.4） | 配置 schema（有兜底链） | 安全 |
+
+**本轮落地（4 项）**：
+
+1. **`engines.dsh`**：**根清单 + `plugin/package.json` 都加** `">=0.2.0-rc.2 <0.3.0-0"`（npm 装读根清单、
+   本地 junction 读 `plugin/` 清单）。判定用 `semver.satisfies(v, range, { includePrerelease: true })`
+   ⇒ **必须带预发布后缀**：真 semver 7.8.5 实测 `>=0.2.0 <0.3.0` ⇒ **0.2.0-rc.2 = false**（会把当前版排除）。
+2. **R48 兼容守卫（7 条断言）**：engines 范围带预发布后缀且两清单同源 / `summarizeBreakdown` **吃扁平视图**
+   （0.2.1 的实际形状，此前只测了嵌套）/ 插件用到的**会话事件**与 **hook 事件** ⊆ 契约快照且源码里确在用 /
+   **官方运行时依赖白名单**（新增官方依赖必须再做兼容复核）/ HUD typert 冒烟提醒。
+3. **契约快照 + 刷新工具**：`docs/reference/dsh-contract.json`（`sessionEvents` 取自
+   `dsh-session@0.2.1-rc.1` 的 `known-event-types.js`＝59 项；`hookEvents` 从 asar 扫描＝19 项）+
+   `docs/reference/tools/make-contract.cjs`（**升级 DSH 后重跑刷新**）。
+   ⚠️ **服务名不纳入快照**（host 服务不以字面量 `provide()` 注册，扫描不可靠）⇒ 服务契约靠升级后冒烟。
+4. **新约束注释**（`m3.compact.mjs`）：0.2.1 的 `contextBreakdown` 要求**计量替换必须有相邻 claim**
+   （`compaction/summary|prune` 先武装影子价），否则投影**抛错** ⇒ 插件**必须继续走官方压缩服务**；
+   官方 `compactRegion` 自带配对事件 ⇒ 天然满足。
+
+**自我更正两处**（复核中发现的初判错误）：① 插件 HUD **不用 `Remote` 装饰器**，而是用 typert 低层约定
+（`typertRemote` + `remote-methods` 标记）⇒ 冒烟理由更强（0.2.1 恰好改了那片区域）；
+② 我一度以为 md 推荐的 `engines.dsh` 范围匹配不上 0.2.1 —— 查 `dsh-app-boot#satisfies` 后发现用的是
+`includePrerelease: true`，**推荐范围正确**。
+
+**验证**：**752 断言全绿**（contract **603** / static 74 / report 54 / boot 21）。
+**变异 5/5 CAUGHT**：去掉 engines / 范围丢预发布后缀 / `summarizeBreakdown` 拒吃扁平形状 /
+新增未复核官方依赖 / 快照删掉在用事件 —— 各自红 1 条。

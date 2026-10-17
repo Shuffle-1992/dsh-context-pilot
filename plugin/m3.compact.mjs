@@ -463,7 +463,14 @@ export function createM3Compaction(deps) {
       try {
         /* R16.13：本条 `compactRegion` **不带 sourceCommandId**（引擎签名无此参数）
          * ⇒ 它产生的 compaction/start|end 事件与「引擎自动压缩」在事件流里**无法区分**。
-         * 故用「在飞标记」把窗口圈出来：事件监听器据此判定「这是我自己的压缩」并跳过补记。 */
+         * 故用「在飞标记」把窗口圈出来：事件监听器据此判定「这是我自己的压缩」并跳过补记。
+         * ═══ R48（DSH 0.2.1 兼容，逐包 diff 复核）：**必须继续走官方压缩服务，不要自己替换区间** ═══
+         * 0.2.1 的 `dsh-token-meter` 把 `contextBreakdown` 改成「claim 影子价」状态机：`compaction/summary`
+         * 或 `compaction/prune` 会先"武装"一个 claim（含 `shadowedRange`/`shadowedTokenCount`/被阴影的
+         * system seq），随后任何**计量替换**若区间不匹配或缺相邻 claim，投影会**抛错**：
+         *   `context breakdown: replace at seq … has no adjacent shadow price (armed claim covers …)`
+         * 官方 `compactRegion`/`compactIfNeeded` 会自己发出配对的 `compaction/summary` ⇒ 天然满足该不变量；
+         * **绕过官方服务直接改 surface 就会踩这个抛错**（0.2.0-rc.2 无此检查，所以这是升级后才出现的新约束）。 */
         markOwnCompaction(sid);
         let result;
         try {

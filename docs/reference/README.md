@@ -72,6 +72,27 @@ node tools/session-records.cjs <session.v4.jsonl.zstd> --json
 > ⇒ 引擎只保护 surface 头，`isSystemHead` 是载荷性逻辑。
 
 
+## 契约快照（R48，供升级守卫用）
+
+| 文件 | 内容 | 来源 |
+| --- | --- | --- |
+| `dsh-contract.json` | `sessionEvents`（会话事件类型清单）+ `hookEvents`（宿主 hook 名） | 会话事件来自官方包 `@deepseek-ai/dsh-session` 的 `lib/types/known-event-types.js`（快照内标注版本）；hook 名从 `app.asar` 内 `@deepseek-ai` 各包扫 `ctx.on(...)` / `dispatch.waterfall(...)` |
+
+用途：`test/contract.mjs` 的 **R48 块**据此断言「插件用到的事件名 ⊆ DSH 清单」——DSH 侧改名时守卫报红。
+**服务名不纳入**（host 服务不以字面量 `provide()` 注册，扫描不可靠）⇒ 服务契约靠升级后冒烟验证。
+
+### 刷新快照（**升级 DSH 后必做**）
+
+```bash
+node docs/reference/tools/make-contract.cjs \
+  --asar "D:\DeepSeek\resources\app.asar" \
+  --session-version "<新版本号>"     # --session 省略时自动从 asar 内抽 known-event-types.js
+npm test                             # R48 守卫会告诉你插件用到的事件名是否还在新清单里
+```
+
+> 想拿「升级目标版本」的清单（而不是当前安装版）：用 `--session <本地 known-event-types.js 路径>` 指定
+> （从 npm 包 `@deepseek-ai/dsh-session@<ver>` 解包即得）。
+
 ## 政策（对齐 `zcode-dispatch` 仓库惯例）
 
 - 第三方材料**带许可/来源说明可入库**，无来源说明的不入库；

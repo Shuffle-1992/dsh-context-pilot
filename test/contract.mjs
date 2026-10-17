@@ -12,7 +12,7 @@
  * 用法：node test/contract.mjs
  * 退出码：0 = 全通过；1 = 有漂移
  */
-import { readFileSync, statSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -4029,6 +4029,70 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
   ok('R45 反例：**没有实测样本**时如实说「暂无实测回落值」，不得凭空给「稳定后预计」',
     /本会话暂无实测回落值/.test(out45b?.text ?? '') && !/稳定后预计/.test(out45b?.text ?? ''),
     `实际：${String(out45b?.text ?? '').slice(0, 300)}`);
+}
+
+/* ═══ 6.41 R48：DSH 升级兼容守卫（升级 DSH 后先跑这一块）═══
+ * 背景（2026-10-17 逐包 diff 复核 0.2.0-rc.2 → 0.2.1-rc.1）：**无破坏性改动**，但有三处契约面
+ * 必须钉住，否则升级后可能"静默失效"：
+ *   ① `engines.dsh` 范围——0.2.1 起兼容性优先按它判定，且判定带 `includePrerelease: true`
+ *      ⇒ 范围**必须带预发布后缀**（写成 `>=0.2.0 <0.3.0` 会排除当前安装的 0.2.0-rc.2）；
+ *   ② `contextBreakdown` 的**公开视图形状**——两版都是**扁平三行**（`view: state => state.breakdown`），
+ *      而插件内部注释记的是更早的嵌套形状 ⇒ 必须两种都吃（否则升级后组成读不到 ⇒ 折算因子失效）；
+ *   ③ 插件用到的**事件名**与**官方运行时依赖**——DSH 侧改名即静默失效，用快照守卫提前发现。 */
+{
+  const core48 = await import(pathToFileURL(join(PLUGIN, 'core.mjs')).href);
+  const readJson48 = (p) => JSON.parse(readFileSync(p, 'utf8'));
+  const pkgRoot48 = readJson48(join(ROOT, 'package.json'));
+  const pkgPlug48 = readJson48(join(PLUGIN, 'package.json'));
+  /* 0.2.1 的 `dsh-app-boot#unmetRequirements`：**有 engines.dsh 就只看它**（peerDependencies 被忽略）；
+   * `satisfies()` 用 `semver.satisfies(v, range, { includePrerelease: true })`。
+   * 真 semver 7.8.5 实测：`>=0.2.0-rc.2 <0.3.0-0` ⇒ 0.2.0-rc.2 ✓ 0.2.1-rc.1 ✓；`>=0.2.0 <0.3.0` ⇒ 0.2.0-rc.2 ✗。 */
+  ok('R48 兼容：两个清单都声明 `engines.dsh` 且范围**带预发布后缀**（否则排除 0.2.0-rc.2）',
+    /^>=\d+\.\d+\.\d+-[A-Za-z0-9.]+ </.test(pkgRoot48.engines?.dsh ?? '')
+    && pkgPlug48.engines?.dsh === pkgRoot48.engines?.dsh,
+    `实际 root=${JSON.stringify(pkgRoot48.engines)} plugin=${JSON.stringify(pkgPlug48.engines)}`
+    + '（两处必须同源：npm 安装读根清单、本地 junction 读 plugin 清单）');
+  /* R48：0.2.1 的 `contextBreakdown` wire.view 返回**扁平**三行（与 0.2.0-rc.2 逐字相同）。 */
+  const sb48 = core48.summarizeBreakdown;
+  const flat48 = sb48({ systemTokens: 2162, toolsTokens: 15751, messageTokens: 244360 });
+  const nest48 = sb48({ nodes: [{ seq: 1, heuristicTokens: 5, system: true }], breakdown: { systemTokens: 2162, toolsTokens: 15751, messageTokens: 244360 } });
+  ok('R48 兼容：`summarizeBreakdown` 吃 **0.2.1 的扁平视图**（也是 0.2.0-rc.2 的实际形状）与嵌套形状',
+    flat48?.system === 2162 && flat48?.tools === 15751 && flat48?.messages === 244360
+    && nest48?.system === 2162 && nest48?.tools === 15751,
+    `实际 flat=${JSON.stringify(flat48)} nested=${JSON.stringify(nest48)}`);
+  /* R48：契约快照守卫（`docs/reference/dsh-contract.json`，升级 DSH 后用 make-contract.cjs 刷新）。
+   * 双向钉住：清单里必须有它、插件源码里也必须真在用（任一侧漂移都会红）。 */
+  const contract48 = readJson48(join(ROOT, 'docs/reference/dsh-contract.json'));
+  /* 扫**全部**插件文件（含 wire.host.mjs / plugin-config.schema.mjs / client.js）——漏文件会让守卫误报"源码里缺失"。 */
+  const src48 = readdirSync(PLUGIN).filter((f) => /\.(mjs|js)$/.test(f))
+    .map((f) => readFileSync(join(PLUGIN, f), 'utf8')).join('\n');
+  const sessUsed48 = ['assistant/message', 'compaction/end', 'developer/message', 'system/message', 'user/message', 'model/selection'];
+  const hookUsed48 = ['agent/pre-step', 'agent/request', 'agent/status', 'session/created', 'session/event'];
+  ok('R48 兼容：插件用到的**会话事件** ⊆ DSH 清单（快照 0.2.1-rc.1）且源码里确在用',
+    sessUsed48.every((e) => contract48.sessionEvents.includes(e) && src48.includes(e)),
+    `不在清单=${sessUsed48.filter((e) => !contract48.sessionEvents.includes(e)).join(',') || '(无)'}`
+    + `；源码里缺失=${sessUsed48.filter((e) => !src48.includes(e)).join(',') || '(无)'}`);
+  ok('R48 兼容：插件用到的 **hook 事件** ⊆ DSH 清单且源码里确在用',
+    hookUsed48.every((e) => contract48.hookEvents.includes(e) && src48.includes(e)),
+    `不在清单=${hookUsed48.filter((e) => !contract48.hookEvents.includes(e)).join(',') || '(无)'}`
+    + `；源码里缺失=${hookUsed48.filter((e) => !src48.includes(e)).join(',') || '(无)'}`);
+  /* R48：官方运行时依赖白名单——0.2.1 已逐包 diff 过这 4 个（`createUserMessage` / `defineTool`
+   * 均"导出 + 实现逐字相同"；typert 的 `Remote` 仍导出但装饰器有改动 ⇒ 升级后需 HUD 冒烟）。 */
+  const deps48 = [...new Set([...src48.matchAll(/await import\('(@deepseek-ai\/[a-z0-9-]+)'\)/g)].map((m) => m[1]))];
+  const allowed48 = ['@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-tools', '@deepseek-ai/schemastery', '@deepseek-ai/dsh-typert-protocol'];
+  ok('R48 兼容：官方运行时依赖 ⊆ 已复核白名单（新增官方依赖必须再做一次兼容复核）',
+    deps48.length >= 3 && deps48.every((d) => allowed48.includes(d)),
+    `实际 ${deps48.join(', ')}（白名单 ${allowed48.length} 个）`);
+  /* R48：**更正我自己的初判**——插件并不用 `Remote` 装饰器，而是用 typert 的**低层约定**：
+   * `this.typertRemote = {service, serviceKey, namespace}` 绑定 + `remote-methods` 原型标记键
+   * （`@deepseek-ai/dsh-typert-protocol/remote-methods`）+ `ctx.provide(FACE_NAME, face)` 兜底。
+   * 而 0.2.1 的 typert diff（+230/−28）恰好动了 `bindTypertRemote` / `TypertRemoteService` /
+   * marker initializer 那片区域 ⇒ **升级后必须冒烟 HUD**。 */
+  const wire48 = readFileSync(join(PLUGIN, 'wire.host.mjs'), 'utf8');
+  ok('R48 冒烟提醒：HUD 远端面用 typert 的 `typertRemote` 绑定 + `remote-methods` 标记（0.2.1 改过该区域）',
+    /@deepseek-ai\/dsh-typert-protocol\/remote-methods/.test(wire48) && /typertRemote/.test(wire48)
+    && /ctx\.provide\(/.test(readFileSync(join(PLUGIN, 'host.impl.mjs'), 'utf8')),
+    '升级 DSH 后先看 HUD 是否仍有数据（DSH-0.2.1-COMPAT-REVIEW.md §六-4 / §7.6）');
 }
 
 /* ═══════════ 汇总 ═══════════ */
