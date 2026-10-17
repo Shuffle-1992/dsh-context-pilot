@@ -1,8 +1,8 @@
 {
   "provenance": {
-    "sessionEvents": "官方包 @deepseek-ai/dsh-session 0.2.1-rc.1（升级目标） 的 lib/types/known-event-types.js（权威清单）",
-    "hookEvents": "D:\\DeepSeek\\resources\\app.asar 内 @deepseek-ai 各包扫描 ctx.on(...) / dispatch.waterfall(...)（1186 个文件）",
-    "extractedAt": "2026-10-17T08:44:00.288Z",
+    "sessionEvents": "官方包 @deepseek-ai/dsh-session 0.2.1-rc.2（已升级） 的 lib/types/known-event-types.js（权威清单）",
+    "hookEvents": "D:\\DeepSeek\\resources\\app.asar 内 @deepseek-ai 各包扫描 ctx.on(...) / dispatch.waterfall(...)（1631 个文件）",
+    "extractedAt": "2026-10-17T09:52:23.568Z",
     "purpose": "插件契约守卫：插件用到的会话事件 / hook 事件必须 ⊆ 本清单；升级 DSH 后重跑刷新本文件。",
     "caution": "服务名不纳入本快照（host 服务不以字面量 provide，扫描不可靠）⇒ 服务契约靠升级后冒烟。"
   },
