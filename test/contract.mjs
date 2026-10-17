@@ -3999,7 +3999,7 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
     && /const budget = useAnchor \? anchorBudget : tierBudgetHeur;/.test(m3src),
     '锚点被折算 ⇒ 保留边界越过锚点 ⇒ 违背「锚点之后一律原样保留」（R21 护栏）');
   ok('R39 接线：宿主把 `summarizeBreakdown`（可见组成单源）与 R50 事实账本工厂注入 m3',
-    /summarizeBreakdown, createFacts: fm\.createSessionFacts/.test(host) && /summarizeBreakdown,/.test(m3src),
+    /summarizeBreakdown, createFacts: fm\?\.createSessionFacts/.test(host) && /summarizeBreakdown,/.test(m3src),
     'm3 拿不到可见组成 ⇒ 折算因子恒为 1（静默失效）');
   ok('R39 接线：pre-step **每轮刷新因子**（否则本会话首次压缩仍用 factor=1，"名副其实"要等第二次）',
     /recordRatioSample\(sid, ratio, mr\);[\s\S]{0,260}?noteRetainFactor\(sid, mr, agent\.session\);/.test(m3src),
@@ -4307,6 +4307,13 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
     && /^import \{ mkdirSync, readFileSync, writeFileSync \} from 'node:fs';$/m.test(factsSrc50)
     && /import\(`\.\/session-facts\.mjs\?ts=\$\{IMPL_TS\}`\)/.test(readFileSync(join(PLUGIN, 'host.impl.mjs'), 'utf8')),
     '互引 ⇒ 依赖图不再是叶子；漏 ?ts= ⇒ 热换不生效（P16）');
+  /* 审查发现的回归风险：账本与 m3 **必须各自加载**——塞进同一个 Promise.all 时任一失败会连带 M3 整域
+   * 失效（`m3Ctl` 恒 null ⇒ 工具回 ok 但永不压缩、模型无感）。断言宿主给账本**单独的 catch** 且传 null。 */
+  const host50 = readFileSync(join(PLUGIN, 'host.impl.mjs'), 'utf8');
+  ok('R50 强制性保证：事实账本**独立降级**（失败只退化，绝不让 M3 压缩整域失效）',
+    /import\(`\.\/session-facts\.mjs\?ts=\$\{IMPL_TS\}`\)\.catch\(/.test(host50)
+    && /createFacts: fm\?\.createSessionFacts/.test(host50),
+    '两个 import 共用一个 catch ⇒ 账本失败连带压缩整域失效（静默降级）');
   /* --- ⑤ 强制性不变量（结构性）：让路必须在**消费意图之前**；持久化的样本必须被**消费** --- */
   const m3s50 = readFileSync(join(PLUGIN, 'm3.compact.mjs'), 'utf8');
   const m2s50 = readFileSync(join(PLUGIN, 'm2.inject.mjs'), 'utf8');
