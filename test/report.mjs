@@ -154,10 +154,24 @@ ok('criticalCap 传 Agent 本体（不得传 .session）',
 
 /* ═══════════ ④ 真实报告结构自洽（有报告才跑）═══════════ */
 console.log('\n== 4. 真实报告结构自洽 ==');
+/* R50：读「**活插件正在写**的 JSON」——有界重读。
+ * 真机实测（2026-10-17 18:26）：会话活跃时插件边跑边写 `.data/*.json`，测试若撞上写盘窗口，
+ * `JSON.parse` 会拿到半截文件（`Unterminated string`）⇒ 套件**假红**。这不是产品缺陷而是测试竞态。
+ * 重读到成功或超时；仍失败才抛（真损坏照样报错，不掩盖问题）。 */
+const readJsonRetry = (p, tries = 6) => {
+  let last = null;
+  for (let i = 0; i < tries; i += 1) {
+    try { return JSON.parse(readFileSync(p, 'utf8')); } catch (e) {
+      last = e;
+      try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200); } catch { /* ignore */ }
+    }
+  }
+  throw last;
+};
 if (!existsSync(REPORT)) {
   console.log('  ⚠️ 跳过（报告不存在：' + REPORT + '）');
 } else {
-  const rep = JSON.parse(readFileSync(REPORT, 'utf8'));
+  const rep = readJsonRetry(REPORT);
   ok('顶层含 history 数组', Array.isArray(rep.history));
   const hist = rep.history ?? [];
   ok(`history 非空（${hist.length} 条）`, hist.length > 0);
@@ -212,7 +226,7 @@ console.log('\n== 5. 压缩历史持久化（hud-acts.json）==');
 if (!existsSync(HUD_ACTS)) {
   console.log('  ⚠️ 跳过（文件不存在，下次压缩时会创建）');
 } else {
-  const j = JSON.parse(readFileSync(HUD_ACTS, 'utf8'));
+  const j = readJsonRetry(HUD_ACTS);   // R50：同样防"活插件写盘窗口"竞态
   ok('含 version 字段', typeof j.version === 'number');
   ok('含 acts 数组', Array.isArray(j.acts));
   const acts = j.acts ?? [];

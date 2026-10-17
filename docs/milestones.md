@@ -3472,3 +3472,45 @@ R46 把函数体写长后它就误报（把共享函数自己的模板当成了�
 **验证**：**762 断言全绿**（contract **613** / static 74 / report 54 / boot 21）。
 **变异 6/6 CAUGHT**：不查锁 / 锁无 TTL / 不读 modelPolicies / 不做 provider+model 匹配 /
 `compaction/end` 不清锁 / 复现 R49.1 原缺陷 —— 各自红 1–2 条。
+
+### R50 解耦 + 简化 + 强制性优化 + 全面 review（2026-10-17，用户要求「自己安排，完成所有优化内容，
+完成全面 review、simplify、强制性优化、解耦、测试验收」）
+
+**① 解耦：抽出会话事实账本 `plugin/session-facts.mjs`（叶子模块）**
+四类「由测量与事件喂养、只被读、不决定行为」的事实从 `m3.compact.mjs`（800+ 行，决策 + 记账混杂）
+搬出：**折算因子**（R39）/ **稳定回落样本**（R45 + R50 落盘）/ **压缩锁**（R49）/ **当前模型路由**（R49）。
+纪律：模块间**零互引**（宿主用 `?ts=` 动态 import 后**注入工厂**）；事实状态仍落 `state.m3.*`
+⇒ 消费方（threshold 读 route、m2 读样本、m1 报告快照）**零改动**；m3 里只剩**一行一个的薄委托**。
+
+**② 强制性优化（不是"尽量"，是结构性保证 + 守卫断言）**
+- **缺依赖必须退化**：不注入事实账本 ⇒ `factor=1 / 无样本 / 无锁`，且**不得抛错**（最坏 = 旧行为）；
+- **让路必须在消费意图之前**：`lockSkip(...)` 在源码里必须早于 `tool.takeIntent(sid)`（否则工具已回
+  `scheduled`、实际没压且不会重试 —— F5 真机踩过的静默降级）；
+- **持久化必须被消费**：只落盘不消费等于白做 ⇒ 断言 m3 用 `settleDropAny` 出数、回执按 `settleScope`
+  标明来源。
+
+**③ 优化①（落地）：稳定回落样本落盘 + 跨会话参考**
+写 `plugin/.data/settle-drop.json`（`{version,savedAt,bySid}`，照 compact-tier.json 范式）⇒ 跨重启 /
+跨 toggle 仍在；本会话无样本时给**跨会话中位数**并标 `scope:'global'`，回执据此写
+「**参考其他会话**实测回落」——**绝不冒充**本会话实测（R45 的诚实原则不变）。
+
+**④ 简化**：pre-step 与 idle 的「让路」原是两段近乎相同的代码（判锁 + 留痕 + 日志 + 返回）⇒ 收敛为
+一个判据函数 `lockSkip(sid, ratio, wanted, where)`（改一处漏一处、日志措辞漂移的风险消除）。
+
+**⑤ 顺手修测试竞态**：`report.mjs` 读的是**活插件正在写**的 `.data/*.json`，撞上写盘窗口会拿到半截
+文件（`Unterminated string`）⇒ 套件**假红**（真机 18:26 实测）。改为**有界重读**（6 次 × 200ms，
+仍失败才抛 —— 真损坏照样报错，不掩盖）。
+
+**⑥ 全面 review 结论（评估后**不做**的项 + 理由，避免"为改而改"）**
+| 候选 | 结论 | 理由 |
+| --- | --- | --- |
+| `command/run`/`done` 识别手动 `/compact` | **不做** | 已有等价能力：`noteEngineCompaction` 用 `sourceCommandId` 区分 manual/engine（R16.13/R29） |
+| `job/*` 纳入趋势估算 | **不做** | job 输出最终落为工具结果，已被 `ratioHist` 采样覆盖 ⇒ 增量近零 |
+| `registerMessageProjection` | **不做** | 需把占用历史写进 DSH 投影注册表 ⇒ **新增对官方内部注册表的耦合**，而外部取证工具已读 `m1-report.json` |
+| 阈值对表（`headroomTokens`/输出上限） | **不做** | 会**移动用户已校准的落点**（24% 档 ⇒ 表盘 26%），净收益为负 |
+| 事实账本进报告 | **已自动覆盖** | `m1.snapshot` 用 `...state.m3` 展开 ⇒ `compactLock`/`route`/`settleDrop`/`lockSkips` 自动可见，无死代码 |
+
+**验证**：**773 断言全绿**（contract **621** / static **77** / report 54 / boot 21；static +3 是新模块
+自动被「`?ts=` 热换 / 零互引」守卫覆盖）。
+**变异 6/6 CAUGHT**：回落估计退回只用本会话样本 / 回执不标跨会话参考 / 样本不落盘 /
+`settleDropAny` 永远标 session / **让路挪到消费意图之后** / 缺事实账本不再退化。

@@ -364,10 +364,13 @@ export function createM2Injection(deps) {
        * R45（用户实测观察）：回落量按**本会话已观测样本**（中位数）折算；没有样本时如实说"暂无实测值"。 */
       const settledPct = Number.isFinite(v.settledRatio) ? Math.round(v.settledRatio * 100) : null;
       const settledK = Number.isFinite(v.settledUsed) ? Math.round(v.settledUsed / 1000) : null;
+      /* R50：样本来源必须写清——本会话实测 vs **跨会话参考**（持久化后升级首压/换会话也有依据，
+       * 但不能冒充"本会话量到的"）。R45 的诚实原则不变：宁可说"暂无"，也不编数字。 */
+      const settleBasis = v.settleScope === 'global' ? '，**参考其他会话**实测回落' : '';
       const after = Number.isFinite(v.ratioAfter)
         ? `**压缩后占用 ≈${Math.round(v.ratioAfter * 100)}%${Number.isFinite(v.usedAfter) ? `（${Math.round(v.usedAfter / 1000)}k）` : ''}**`
           + (settledPct != null
-            ? `（provider 未刷新）⇒ **稳定后预计 ≈${settledPct}%${settledK != null ? `（${settledK}k）` : ''}**`
+            ? `（provider 未刷新）⇒ **稳定后预计 ≈${settledPct}%${settledK != null ? `（${settledK}k）` : ''}**${settleBasis}`
             : '（provider 未刷新，下次请求后会回落；本会话暂无实测回落值）')
           + '——档位名里的百分比是**保留预算比例、不是占用**'
         : null;

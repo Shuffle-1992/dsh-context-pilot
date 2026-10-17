@@ -343,11 +343,11 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
    * `source:'none'`；两个编排入口直接 no-op 并留痕。实测窗口只在激活后头几个微任务内。 */
   let m3Ctl = null;
 
-  const m3Ready = import(`./m3.compact.mjs?ts=${IMPL_TS}`)
-    .then((m) => {
+  const m3Ready = Promise.all([import(`./m3.compact.mjs?ts=${IMPL_TS}`), import(`./session-facts.mjs?ts=${IMPL_TS}`)])
+    .then(([m, fm]) => {
       m3Ctl = m.createM3Compaction({
         svc, tryOf, state, M3, effEnabled, criticalCapOf, engineThreshold, resolveCompactionFor,
-        log, msg, pick, nfmt, errCodeOf, schedule, projectedFromPressure, summarizeBreakdown, // R39：真实口径折算要用"可见组成"单源
+        log, msg, pick, nfmt, errCodeOf, schedule, projectedFromPressure, summarizeBreakdown, createFacts: fm.createSessionFacts, pluginDir, // R39：真实口径折算要用"可见组成"单源 · R50：注入会话事实账本工厂（未注入 ⇒ m3 退化为安全默认）
         publishHud, recordHudAct, formatAct, clearBriefed, extractEventText, // R21：锚点 text 定位用它（文本提取单一真相）
         /* range 模块与压缩工具的生命周期都由宿主拥有 ⇒ 交给模块 async 取用口。 */
         awaitRange: async () => rangeApi ?? (await rangeReady),

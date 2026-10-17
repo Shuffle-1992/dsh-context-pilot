@@ -67,6 +67,8 @@ export function createM3Compaction(deps) {
     publishHud, recordHudAct, formatAct, clearBriefed,
     /* 取用口（模块生命周期由宿主拥有） */
     awaitRange, getCompactTool, extractEventText,
+    /* R50：会话事实账本工厂（宿主用 `?ts=` 动态 import 后注入；未注入 ⇒ 事实退化为安全默认） */
+    createFacts, pluginDir,
     /* 常量 */
     COMPACT_TIMEOUT_MS, SET_CAP,
   } = deps;
@@ -283,129 +285,25 @@ export function createM3Compaction(deps) {
     } catch { return null; }
   };
 
-  /* ═══ R39：真实口径折算因子（每会话一份；**只用非 stale 的实测**更新）═══
-   * `visible` = 系统 + 工具 + 消息（`summarizeBreakdown` 单源）——即"三行组成"；
-   * `factor = 表盘真实 / visible`，夹在 [1,2]。stale（刚压完的过渡值）时**不更新**：
-   * 过渡值里 provider 旧报还扛着压缩前的大数，用它折算会把预算压过头。 */
-  const noteRetainFactor = (sid, mr, session) => {
-    try {
-      if (!sid || !mr?.ok || mr.stale) return null;
-      /* ⚠️ R39.1（真机 bug，2026-10-16）：三行组成**不在 `measure` 里**，而是
-       * `svc('sessionProjections').stateOf(session, 'contextBreakdown')`（与 m1 账本同款取法）。
-       * 第一版把整个 `measure` 传给 `summarizeBreakdown` ⇒ 按契约返回 null ⇒ 因子恒为 1
-       * （真机证据：`retainBudgetHeur: 240000` / `retainFactor: 1` ⇒ 折算完全没生效）。 */
-      const sp = svc('sessionProjections');
-      const bv = summarizeBreakdown?.(tryOf(() => sp?.stateOf?.(session, 'contextBreakdown')).value ?? null)
-        /* 兜底：拿不到 `contextBreakdown` 时**退回 measure**，但只接受"三行齐全"的结果——
-         * `summarizeBreakdown(measure)` 只会给出 system 行（tools/messages 为 null），
-         * 用它算比值会把 2,162 当分母 ⇒ factor 直接顶到上限 2 ⇒ **压过头**。宁可不算（factor=1）。 */
-        ?? summarizeBreakdown?.(mr.measure);
-      const hasAllRows = bv && Number.isFinite(bv.tools) && Number.isFinite(bv.messages);
-      const vis = hasAllRows ? (Number(bv.system) || 0) + bv.tools + bv.messages : null;
-      if (!Number.isFinite(vis) || vis <= 0 || !Number.isFinite(mr.used)) return null;
-      const factor = Math.min(Math.max(mr.used / vis, 1), 2);
-      const bySid = state.m3.retainFactor = state.m3.retainFactor ?? {};
-      bySid[sid] = { factor: +factor.toFixed(2), at: new Date().toISOString(), real: mr.used, visible: vis };
-      const keys = Object.keys(bySid);
-      if (keys.length > 64) delete bySid[keys[0]];   // 有界化
-      return factor;
-    } catch { return null; }
-  };
-  const retainFactorOf = (sid) => {
-    try { const f = state.m3.retainFactor?.[sid]?.factor; return Number.isFinite(f) ? f : 1; } catch { return 1; }
-  };
-
-  /* ═══ R45（用户实测观察，2026-10-16）：压缩刚完成时那个「压后占用」是 **provider 未刷新**的
-   * 投影值——真机：回执显示 19%，稳定后回落到 10%（差 ~9pp ≈ 90k token）。**行为没问题**
-   * （压缩确实生效了），问题在**回执把中间值当成了结果** ⇒ 用户会以为"压完还剩 19%"。
-   * 修法：压缩完成时挂一个「稳定观察」（settleWatch），在下一次**非 stale** 实测里量出真实回落量，
-   * 存成每会话样本（中位数，抗单次抖动）；之后回执直接给出「稳定后预计 ≈X%」。
-   * ⚠️ 只用**非 stale** 实测（stale 时 provider 旧报还扛着压缩前的大数 ⇒ 量出的"回落"是假的）。 */
-  const SETTLE_SAMPLES_CAP = 8;
-  const SETTLE_SID_CAP = 64;
-  const noteCompactSettle = (sid, mr) => {
-    try {
-      if (!sid || !mr?.ok || mr.stale || !Number.isFinite(mr.used)) return null;
-      const w = state.m3.settleWatch?.[sid];
-      if (!w || !Number.isFinite(w.used)) return null;
-      delete state.m3.settleWatch[sid];
-      const drop = w.used - mr.used;
-      if (!(drop > 0)) return null;
-      const bySid = state.m3.settleDrop = state.m3.settleDrop ?? {};
-      const arr = bySid[sid] = bySid[sid] ?? [];
-      arr.push({ drop: Math.round(drop), from: w.used, to: mr.used, at: new Date().toISOString() });
-      while (arr.length > SETTLE_SAMPLES_CAP) arr.shift();
-      const keys = Object.keys(bySid);
-      if (keys.length > SETTLE_SID_CAP) delete bySid[keys[0]];   // 有界化
-      return drop;
-    } catch { return null; }
-  };
-  const settleDropOf = (sid) => {
-    try {
-      const arr = state.m3.settleDrop?.[sid];
-      if (!Array.isArray(arr) || arr.length === 0) return null;
-      const ds = arr.map((x) => Number(x.drop)).filter((x) => Number.isFinite(x) && x > 0).sort((a, b) => a - b);
-      if (ds.length === 0) return null;
-      return { drop: ds[Math.floor(ds.length / 2)], n: ds.length, last: ds[ds.length - 1] };   // 中位数
-    } catch { return null; }
-  };
-
-  /* ═══ R49（DSH 0.2.1-rc.2 正向优化，2026-10-17）：压缩锁避让 + 当前模型路由记账 ═══
-   * 依据（**官方源码实证**，逐包 diff 复核过 0.2.0-rc.2 → 0.2.1-rc.1/rc.2）：
-   *  · `dsh-compaction-basic#assertCompactionInactive(unmatchedCompactionStart, latestEndSeedSeq, stage)`：
-   *    **未匹配的 `compaction/start`（其后没有更晚的 `session/end-seed`）即持久锁**；事务进行中任何其他
-   *    发起者（含插件的 `compactRegion`）都会被拒并抛 `ManualCompactionError('busy')`。官方 `/compact`
-   *    与插件**共用这把锁**，且 `/compact` **仅限空闲**（命令自身不排队）⇒ 同时发起必有一方吃 `busy`。
-   *  · `resolveTargetPolicy(config, target)`：`config.modelPolicies[]` 按 **provider+model 精确匹配**
-   *    覆盖 `thresholdRatio`/`headroomTokens` ⇒ 插件只读**默认** `thresholdRatio` 会与"当前模型"的
-   *    官方阈值错位（插件线可能反而高于引擎线）。见 threshold.mjs 的 R49 段。
-   * 实现纪律：**只用已文档化的会话事件**记账（不去碰未公开的 `session.seq` / 反向扫日志），
-   *   `compaction/start` ⇒ 记锁；`compaction/end` 或 `session/end-seed` ⇒ 清锁；`model/selection` ⇒ 记路由。
-   * ⚠️ 锁带 **TTL**：日志修复/崩溃后若永远没有 end 事件，插件不能永久让路（宁可让路超时后恢复自己的
-   *    兜底，也不能永久失去压缩能力）——这是"正向提升"的底线：最坏情况 = 旧行为。 */
-  const COMPACT_LOCK_TTL_MS = 10 * 60_000;
-  const R49_SID_CAP = 64;
-  const boundMap = (m, cap) => {
-    try {
-      const ks = Object.keys(m);
-      if (ks.length > cap) delete m[ks[0]];
-    } catch { /* ignore */ }
-  };
-  const noteSessionEvent = (session, event) => {
-    try {
-      const t = event?.type;
-      if (!t) return null;
-      const sid = String(pick(session?.id, session?.header?.id, ''));
-      if (!sid) return null;
-      const m3s = state.m3;
-      if (t === 'compaction/start') {
-        m3s.compactLock = m3s.compactLock ?? {};
-        m3s.compactLock[sid] = { at: Date.now(), seq: event.seq ?? null, turn: event.data?.turn ?? null };
-        boundMap(m3s.compactLock, R49_SID_CAP);
-        return 'lock-set';
-      }
-      if (t === 'compaction/end' || t === 'session/end-seed') {
-        if (m3s.compactLock?.[sid]) { delete m3s.compactLock[sid]; return 'lock-cleared'; }
-        return null;
-      }
-      if (t === 'model/selection') {
-        m3s.route = m3s.route ?? {};
-        m3s.route[sid] = { at: Date.now(), provider: event.data?.provider ?? null, model: event.data?.model ?? null };
-        boundMap(m3s.route, R49_SID_CAP);
-        return 'route-set';
-      }
-      return null;
-    } catch { return null; }
-  };
-  const compactionLockActive = (sid) => {
-    try {
-      const rec = state.m3.compactLock?.[sid];
-      if (!rec || !Number.isFinite(rec.at)) return false;
-      if (Date.now() - rec.at > COMPACT_LOCK_TTL_MS) { delete state.m3.compactLock[sid]; return false; }   // TTL 过期 ⇒ 不永久让路
-      return true;
-    } catch { return false; }
-  };
-  const currentRouteOf = (sid) => { try { return state.m3.route?.[sid] ?? null; } catch { return null; } };
+  /* ═══════════ R50：会话事实账本**解耦**（折算因子 / 稳定回落样本（含落盘）/ 压缩锁 / 当前模型路由）═══════════
+   * 实现已搬进 `plugin/session-facts.mjs`（叶子模块，宿主用 `?ts=` 动态 import 后**注入工厂**）。
+   * 这里只留**薄委托**（一行一个，无逻辑重复）：
+   *   · 有 `createFacts` ⇒ 全部事实由账本提供（生产路径）；
+   *   · 没有（老测试桩/宿主加载失败）⇒ 退化为**安全默认**：factor=1 / 无样本 / 无锁 ⇒ 行为回到 R45 之前，
+   *     绝不因为缺依赖而抛错或压过头（"最坏情况 = 旧行为"的底线）。
+   * 事实状态仍落在 `state.m3.*` ⇒ threshold（读 route）与 m2（读样本）**零改动**。 */
+  const facts = (() => {
+    try { return typeof createFacts === 'function' ? createFacts({ state, log, pick, svc, summarizeBreakdown, tryOf, pluginDir }) : null; } catch { return null; }
+  })();
+  const noteRetainFactor = (sid, mr, session) => (facts ? facts.noteRetainFactor(sid, mr, session) : null);
+  const retainFactorOf = (sid) => (facts ? facts.retainFactorOf(sid) : 1);
+  const armSettleWatch = (sid, used, ratio) => (facts ? facts.armSettleWatch(sid, used, ratio) : null);
+  const noteCompactSettle = (sid, mr) => (facts ? facts.noteCompactSettle(sid, mr) : null);
+  const settleDropOf = (sid) => (facts ? facts.settleDropOf(sid) : null);
+  const settleDropAny = (sid) => (facts ? facts.settleDropAny(sid) : null);
+  const noteSessionEvent = (session, event) => (facts ? facts.noteSessionEvent(session, event) : null);
+  const compactionLockActive = (sid) => (facts ? facts.compactionLockActive(sid) : false);
+  const currentRouteOf = (sid) => (facts ? facts.currentRouteOf(sid) : null);
   /* R49：让路留痕（取证用；也便于测试断言"真的没发起"）。 */
   const noteLockSkip = (sid, ratio, wanted) => {
     try {
@@ -416,10 +314,22 @@ export function createM3Compaction(deps) {
       };
     } catch { /* ignore */ }
   };
-  /* R46：由「当前实测 + 本会话回落样本」推出稳定后比例（面板行后缀用；无样本 ⇒ null，不编数字）。 */
+  /* R50 简化：pre-step 与 idle 的「让路」是同一件事（判锁 + 留痕 + 日志 + 返回 true）⇒ 收敛为一个判据，
+   * 避免两处各写一遍（R49 首版就是两段近乎相同的代码：改一处漏一处、日志措辞还会漂移）。
+   * ⚠️ **必须在消费意图之前调用**（让路时意图要保留，见 pre-step 调用点注释）。 */
+  const lockSkip = (sid, ratio, wanted, where) => {
+    if (!compactionLockActive(sid)) return false;
+    noteLockSkip(sid, ratio, wanted);
+    log('info', `${where}：官方压缩事务进行中（未匹配 compaction/start）⇒ 本轮让路`
+      + `（占用 ${(ratio * 100).toFixed(1)}%，意图保留=${wanted}）`);
+    return true;
+  };
+  /* R46：由「当前实测 + 回落样本」推出稳定后比例（面板行后缀用；无样本 ⇒ null，不编数字）。
+   * R50：本会话无样本时用**跨会话中位数**（`scope:'global'`）——持久化的意义就在这里：升级后第一次
+   * 压缩、或刚换会话时，也能给一个**有依据**的预计，而不是"暂无实测值"。 */
   const settledRatioOf = (sid, mr) => {
     try {
-      const rec = settleDropOf(sid);
+      const rec = settleDropAny(sid);
       if (!rec || !Number.isFinite(mr?.used) || !Number.isFinite(mr?.window) || mr.window <= 0) return null;
       return Math.max(0, mr.used - rec.drop) / mr.window;
     } catch { return null; }
@@ -650,12 +560,7 @@ export function createM3Compaction(deps) {
       /* R49：官方压缩事务进行中（未匹配的 `compaction/start`）⇒ **本轮让路**——官方 `/compact` 或引擎
        * 正在压，此刻发起必然撞 `busy`（官方 assertCompactionInactive）。⚠️ 放在**消费意图之前**：
        * 让路时意图必须保留（F5 同款纪律：工具已回 scheduled，实际没执行 ⇒ 下一步要能重试）。 */
-      if (compactionLockActive(sid)) {
-        noteLockSkip(sid, ratio, wanted);
-        log('info', `M3.5 pre-step 先压：官方压缩事务进行中（未匹配 compaction/start）⇒ 本轮让路`
-          + `（占用 ${(ratio * 100).toFixed(1)}%，意图保留=${wanted}）`);
-        return;
-      }
+      if (lockSkip(sid, ratio, wanted, 'M3.5 pre-step 先压')) return;   // R49/R50：官方事务进行中 ⇒ 让路（意图保留）
       const compaction = resolveCompactionFor(agent);
       if (!compaction.service) {
         /* R15：**未执行**也要留回执——这是模型自检的唯一依据。
@@ -764,7 +669,7 @@ export function createM3Compaction(deps) {
       state.m3.preStepOk += 1;
       /* R45/R46：稳定后预计值**先算成局部量**——回执（verify）与面板行后缀（occupancyActSuffix）共用，
        * 两处必须是同一个数（单源），否则用户会在两个地方看到不同百分比。 */
-      const settleRec = settleDropOf(sid);
+      const settleRec = settleDropAny(sid);   // R50：本会话无样本时给跨会话中位数（带 scope 供回执标明来源）
       const settledUsed = (Number.isFinite(usedAfter) && settleRec) ? Math.max(0, usedAfter - settleRec.drop) : null;
       const settledRatio = (settledUsed != null && Number.isFinite(mr.window) && mr.window > 0)
         ? settledUsed / mr.window : null;
@@ -800,6 +705,8 @@ export function createM3Compaction(deps) {
          * R46：同一组数也喂给面板行后缀（见下方 occupancyActSuffix 的第三个实参）。 */
         settleDropTokens: settleRec?.drop ?? null,
         settleSamples: settleRec?.n ?? 0,
+        /* R50：样本来源——`session` = 本会话实测；`global` = 跨会话中位数（回执必须据此写"参考其他会话"）。 */
+        settleScope: settleRec?.scope ?? null,
         settledUsed,
         settledRatio,
         skipWhy: out.skipWhy ?? null,
@@ -808,11 +715,8 @@ export function createM3Compaction(deps) {
         read: false, // M2 域读到后置 true（一次性回执）
       });
       /* R45：刚压完 ⇒ 挂「稳定观察」——下一次**非 stale** 实测里量出真实回落量（见 noteCompactSettle）。
-       * 只在 stale（provider 未刷新）时挂：那时值会回落，正是要量的对象。 */
-      if (Number.isFinite(usedAfter) && staleAfter) {
-        state.m3.settleWatch = state.m3.settleWatch ?? {};
-        state.m3.settleWatch[sid] = { at: Date.now(), used: usedAfter, ratio: ratioAfter };
-      }
+       * 只在 stale（provider 未刷新）时挂：那时值会回落，正是要量的对象。R50：改由事实账本挂（含落盘）。 */
+      if (Number.isFinite(usedAfter) && staleAfter) armSettleWatch(sid, usedAfter, ratioAfter);
       /* R5 取证口径：rangeSource 说明**实际用了哪条保留策略**（own=自选范围 / official=官方 overflow 兜底 /
        * own+official=自选后仍越线再收口 / none=判定无需压）。retainBudget 是自选预算（token）。 */
       const rangeInfo = {
@@ -907,12 +811,7 @@ export function createM3Compaction(deps) {
       /* C-own：safety-net 同样钳到「引擎阈值 − 5pp」之下（同 pre-step，理由见 threshold.mjs） */
       if (mr.ratio < Math.min(M3.criticalRatio, criticalCapOf(agent))) return; // 仅越强制线才兜底
       if (now - (state.m3.sweeps[sid] ?? 0) < M3.sweepMinIntervalMs) return; // 兜底受冷却限制
-      /* R49：idle 兜底同样让路给进行中的官方压缩事务（同 pre-step 理由；不消耗冷却，下次还能补）。 */
-      if (compactionLockActive(sid)) {
-        noteLockSkip(sid, mr.ratio, false);
-        log('info', `M3 idle 扫除：官方压缩事务进行中 ⇒ 本轮让路（占用 ${(mr.ratio * 100).toFixed(1)}%）`);
-        return;
-      }
+      if (lockSkip(sid, mr.ratio, false, 'M3 idle 扫除')) return;   // R49/R50：同 pre-step（不消耗冷却，下次还能补）
       const reason = 'safety-net';
       const compaction = resolveCompactionFor(agent);
       if (!compaction.service) {
@@ -989,5 +888,5 @@ export function createM3Compaction(deps) {
     }
   };
 
-  return { measureRatio, compactWithOwnRange, preStepCompaction, idleSweep, setCompactVerify, takeCompactVerify, isCompactionInFlight, noteEngineCompaction, noteRetainFactor, retainFactorOf, noteCompactSettle, settleDropOf, noteSessionEvent, compactionLockActive, currentRouteOf };
+  return { measureRatio, compactWithOwnRange, preStepCompaction, idleSweep, setCompactVerify, takeCompactVerify, isCompactionInFlight, noteEngineCompaction, noteRetainFactor, retainFactorOf, noteCompactSettle, settleDropOf, settleDropAny, noteSessionEvent, compactionLockActive, currentRouteOf };
 }

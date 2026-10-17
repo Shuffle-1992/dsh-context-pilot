@@ -12,7 +12,7 @@
  * 用法：node test/contract.mjs
  * 退出码：0 = 全通过；1 = 有漂移
  */
-import { readFileSync, readdirSync, statSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -592,7 +592,7 @@ ok('R16.13 接线：host 把 compaction/end 转发给 m3；m3 三处自己的压
     && /if \(isCompactionInFlight\(\)\) return null;/.test(m3src13)
     && (m3src13.match(/markOwnCompaction\(sid\)/g) ?? []).length >= 3
     && (m3src13.match(/clearOwnCompaction\(\)/g) ?? []).length >= 3
-    && /isCompactionInFlight, noteEngineCompaction, noteRetainFactor, retainFactorOf, noteCompactSettle, settleDropOf, noteSessionEvent, compactionLockActive, currentRouteOf \}/.test(m3src13),
+    && /isCompactionInFlight, noteEngineCompaction, noteRetainFactor, retainFactorOf, noteCompactSettle, settleDropOf, settleDropAny, noteSessionEvent, compactionLockActive, currentRouteOf \}/.test(m3src13),
   '任一环缺位 ⇒ 引擎压缩仍无记录，或自家压缩被重复记录');
 ok('R16.13 文案：m5 为两种「非插件压缩」提供标签（不与「强制压缩」混淆）',
   /reason === 'engine-auto' \? '引擎自动压缩'/.test(m5src) && /reason === 'engine-manual' \? '手动压缩（\/compact）'/.test(m5src),
@@ -3899,6 +3899,8 @@ console.log('\n== 6.38 R38：压后占用后缀单源 ==');
 console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
 {
   const m3Mod39 = await import(pathToFileURL(join(PLUGIN, 'm3.compact.mjs')).href);
+  /* R50：事实账本（折算因子 / 稳定回落样本 / 压缩锁 / 路由）已搬进 session-facts.mjs。 */
+  const factsMod39 = await import(pathToFileURL(join(PLUGIN, 'session-facts.mjs')).href);
   const f39 = m3Mod39.scaleRetainBudget;
   ok('R39 行为级：`scaleRetainBudget` = budget/factor，夹在 [1,2]，**只减不增**',
     f39(240000, 1) === 240000 && f39(240000, 1.4) === 171429 && f39(240000, 2) === 120000
@@ -3917,6 +3919,8 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
     svc: (k) => (k === 'sessionProjections' ? { stateOf: () => bdValue } : null),
     projectedFromPressure: () => ({ used: null, projected: null, reported: null, surface: null, sampled: null, basis: 'x' }),
     summarizeBreakdown: coreMod39.summarizeBreakdown,   // **真函数**
+    /* R50：事实账本由宿主注入工厂（折算因子已搬进 session-facts.mjs）⇒ 测试同样注入，否则按设计退化为 factor=1。 */
+    createFacts: factsMod39.createSessionFacts, pluginDir: null,
     M3: {}, effEnabled: () => true, criticalCapOf: () => 0.75, resolveCompactionFor: () => ({ service: null, via: 'stub' }),
     publishHud: () => {}, recordHudAct: () => {}, formatAct: () => '', clearBriefed: () => {},
     awaitRange: async () => null, getCompactTool: () => null, COMPACT_TIMEOUT_MS: 1000, SET_CAP: 10,
@@ -3994,8 +3998,8 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
     && !/scaleRetainBudget\(anchorBudget/.test(m3src)
     && /const budget = useAnchor \? anchorBudget : tierBudgetHeur;/.test(m3src),
     '锚点被折算 ⇒ 保留边界越过锚点 ⇒ 违背「锚点之后一律原样保留」（R21 护栏）');
-  ok('R39 接线：宿主把 `summarizeBreakdown`（可见组成单源）注入 m3',
-    /summarizeBreakdown, \/\/ R39/.test(host) && /summarizeBreakdown,/.test(m3src),
+  ok('R39 接线：宿主把 `summarizeBreakdown`（可见组成单源）与 R50 事实账本工厂注入 m3',
+    /summarizeBreakdown, createFacts: fm\.createSessionFacts/.test(host) && /summarizeBreakdown,/.test(m3src),
     'm3 拿不到可见组成 ⇒ 折算因子恒为 1（静默失效）');
   ok('R39 接线：pre-step **每轮刷新因子**（否则本会话首次压缩仍用 factor=1，"名副其实"要等第二次）',
     /recordRatioSample\(sid, ratio, mr\);[\s\S]{0,260}?noteRetainFactor\(sid, mr, agent\.session\);/.test(m3src),
@@ -4106,6 +4110,8 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
 {
   const thMod49 = await import(pathToFileURL(join(PLUGIN, 'threshold.mjs')).href);
   const m3Mod49 = await import(pathToFileURL(join(PLUGIN, 'm3.compact.mjs')).href);
+  /* R50：事实账本由宿主注入工厂 ⇒ 测试必须同样注入（否则 m3 按设计退化为安全默认：无锁/无样本/factor=1）。 */
+  const factsMod50 = await import(pathToFileURL(join(PLUGIN, 'session-facts.mjs')).href);
   const tryOf49 = (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } };
   const mkTh49 = (state, cfg) => thMod49.createThreshold({
     svc: (k) => (k === 'agentPresets' ? { serviceFor: () => ({ compactNow: () => {}, config: cfg }) } : null),
@@ -4142,6 +4148,7 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
     resolveCompactionFor: () => ({ service: null, via: 'stub' }), publishHud: () => {}, recordHudAct: () => {},
     formatAct: () => '', clearBriefed: () => {}, awaitRange: async () => null, getCompactTool: () => null,
     COMPACT_TIMEOUT_MS: 1000, SET_CAP: 10,
+    createFacts: factsMod50.createSessionFacts, pluginDir: null,   // R50：注入事实账本工厂
   });
   const stB = { m3: {} };
   const apiB49 = mkM3b49(stB);
@@ -4193,6 +4200,7 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
     formatAct: () => '', clearBriefed: () => {}, awaitRange: async () => null, getCompactTool: () => tool49,
     COMPACT_TIMEOUT_MS: 1000, SET_CAP: 10,
     engineThreshold: () => 0.8, getRangeApi: () => null,
+    createFacts: factsMod50.createSessionFacts, pluginDir: null,   // R50：注入事实账本工厂
   });
   const stE49 = { m3: { preStepErrors: {} } };   // ⚠️ 真实插件在 core.mjs 里初始化 preStepErrors（错误分支会写它）
   const apiE49 = mkM3e49(stE49);
@@ -4222,6 +4230,96 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
     threw49 === null && (stErr49.m3.preStepErrors?.err ?? 0) >= 1
     && /boom-R49\.1/.test(String(stErr49.m3.lastPreStepError?.message ?? '')),
     `实际 threw=${threw49} errors=${JSON.stringify(stErr49.m3.preStepErrors)} last=${JSON.stringify(stErr49.m3.lastPreStepError)?.slice(0, 160)}`);
+}
+
+/* ═══ 6.43 R50：会话事实账本**解耦** + 稳定回落样本**落盘** ═══
+ * 解耦：折算因子 / 稳定回落样本 / 压缩锁 / 当前模型路由 四类事实，从 `m3.compact.mjs`（决策 + 记账
+ * 混在 800+ 行里）搬进叶子模块 `session-facts.mjs`，由宿主注入工厂（模块间禁止互引）。
+ * 两条**强制性保证**（不是"尽量"）：
+ *   ① 落盘：样本写 `.data/settle-drop.json` ⇒ 跨重启/跨 toggle 仍在；本会话无样本时给跨会话中位数并
+ *      标 `scope:'global'`（回执据此写"参考其他会话"，**绝不冒充**本会话实测）。
+ *   ② 缺依赖必须退化：不注入工厂 ⇒ factor=1 / 无样本 / 无锁，且**不得抛错**（最坏情况 = 旧行为）。 */
+{
+  const fMod50 = await import(pathToFileURL(join(PLUGIN, 'session-facts.mjs')).href);
+  const m3Mod50 = await import(pathToFileURL(join(PLUGIN, 'm3.compact.mjs')).href);
+  const dir50 = mkdtempSync(join(tmpdir(), 'cp-facts-'));
+  const mk50 = (state, dir) => fMod50.createSessionFacts({
+    state, pluginDir: dir, log: () => {},
+    pick: (...a) => a.find((x) => x != null),
+    svc: () => null, summarizeBreakdown: () => null,
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+  });
+
+  /* --- ① 落盘：跨"重启"（新实例、state 全新）仍在 --- */
+  const f50a = mk50({ m3: {} }, dir50);
+  f50a.armSettleWatch('sA', 200000, 0.19);
+  const drop50 = f50a.noteCompactSettle('sA', { ok: true, used: 110000, stale: false });
+  const file50 = join(dir50, '.data', 'settle-drop.json');
+  const saved50 = existsSync(file50) ? JSON.parse(readFileSync(file50, 'utf8')) : null;
+  ok('R50 落盘：稳定回落样本写入 `.data/settle-drop.json`（version / savedAt / bySid 形状）',
+    drop50 === 90000 && saved50?.version === 1 && Array.isArray(saved50?.bySid?.sA) && saved50.bySid.sA[0].drop === 90000,
+    `实际 drop=${drop50} file=${String(JSON.stringify(saved50)).slice(0, 150)}`);
+  const f50b = mk50({ m3: {} }, dir50);   // 新实例 = 模拟重启/toggle
+  const after50 = f50b.settleDropOf('sA');
+  ok('R50 跨重启：新实例仍读到该会话样本（R45 只活在内存时缺的正是这个）',
+    after50?.drop === 90000 && after50?.n === 1, `实际 ${JSON.stringify(after50)}`);
+
+  /* --- ② 跨会话参考（明确标注来源）--- */
+  const any50 = f50b.settleDropAny('sBrandNew');
+  ok('R50 跨会话参考：本会话无样本 ⇒ 全局中位数 + `scope:"global"`（本会话有 ⇒ `session`）',
+    any50?.scope === 'global' && any50?.drop === 90000 && f50b.settleDropAny('sA')?.scope === 'session',
+    `实际 any=${JSON.stringify(any50)} own=${JSON.stringify(f50b.settleDropAny('sA'))}`);
+
+  /* --- ③ 缺依赖必须退化（强制性保证）--- */
+  const mkNoFacts50 = (state) => m3Mod50.createM3Compaction({
+    state, log: () => {}, msg: (e) => String(e), pick: (...a) => a.find((x) => x != null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    nfmt: (n) => String(n), errCodeOf: (e) => String(e?.code ?? 'err'), schedule: () => {},
+    svc: () => null, projectedFromPressure: () => ({ used: null, projected: null, reported: null, surface: null, sampled: null, basis: 'x' }),
+    summarizeBreakdown: () => null, M3: {}, effEnabled: () => true, criticalCapOf: () => 0.75,
+    resolveCompactionFor: () => ({ service: null, via: 'stub' }), publishHud: () => {}, recordHudAct: () => {},
+    formatAct: () => '', clearBriefed: () => {}, awaitRange: async () => null, getCompactTool: () => null,
+    COMPACT_TIMEOUT_MS: 1000, SET_CAP: 10,   // 刻意**不传** createFacts
+  });
+  let threw50 = null; let deg = null;
+  try {
+    const api50 = mkNoFacts50({ m3: {} });
+    api50.noteSessionEvent({ id: 'sX' }, { type: 'compaction/start', seq: 1 });
+    deg = {
+      lock: api50.compactionLockActive('sX'), factor: api50.retainFactorOf('sX'),
+      drop: api50.settleDropOf('sX'), any: api50.settleDropAny('sX'), route: api50.currentRouteOf('sX'),
+    };
+  } catch (e) { threw50 = String(e?.message ?? e); }
+  ok('R50 强制性保证：**不注入事实账本** ⇒ factor=1 / 无样本 / 无锁，且**不抛错**（最坏 = 旧行为）',
+    threw50 === null && deg?.lock === false && deg?.factor === 1 && deg?.drop === null && deg?.any === null && deg?.route === null,
+    `实际 threw=${threw50} deg=${JSON.stringify(deg)}`);
+
+  /* --- ④ 解耦结构守卫：实现必须真的搬走（不是复制两份）--- */
+  const m3src50 = readFileSync(join(PLUGIN, 'm3.compact.mjs'), 'utf8');
+  const factsSrc50 = readFileSync(join(PLUGIN, 'session-facts.mjs'), 'utf8');
+  ok('R50 解耦：事实**实现**已在 session-facts.mjs，m3 只剩薄委托（不得留两份实现 ⇒ 口径会漂移）',
+    /COMPACT_LOCK_TTL_MS = 10 \* 60_000/.test(factsSrc50) && !/COMPACT_LOCK_TTL_MS/.test(m3src50)
+    && /SETTLE_SAMPLES_CAP = 8/.test(factsSrc50) && !/SETTLE_SAMPLES_CAP/.test(m3src50)
+    && /typeof createFacts === 'function'/.test(m3src50) && !/writeFileSync/.test(m3src50),
+    '实现若留在 m3 ⇒ 解耦是假的');
+  ok('R50 解耦：叶子模块**零互引**（只 import node 内置）+ 宿主 `?ts=` 动态加载',
+    !/from '\.\//.test(factsSrc50)
+    && /^import \{ mkdirSync, readFileSync, writeFileSync \} from 'node:fs';$/m.test(factsSrc50)
+    && /import\(`\.\/session-facts\.mjs\?ts=\$\{IMPL_TS\}`\)/.test(readFileSync(join(PLUGIN, 'host.impl.mjs'), 'utf8')),
+    '互引 ⇒ 依赖图不再是叶子；漏 ?ts= ⇒ 热换不生效（P16）');
+  /* --- ⑤ 强制性不变量（结构性）：让路必须在**消费意图之前**；持久化的样本必须被**消费** --- */
+  const m3s50 = readFileSync(join(PLUGIN, 'm3.compact.mjs'), 'utf8');
+  const m2s50 = readFileSync(join(PLUGIN, 'm2.inject.mjs'), 'utf8');
+  const iLock50 = m3s50.indexOf('lockSkip(sid, ratio, wanted');
+  const iTake50 = m3s50.indexOf('tool.takeIntent(sid)');
+  ok('R50 强制性不变量：**让路在消费意图之前**（否则工具已回 scheduled、实际没压，且不会重试）',
+    iLock50 > 0 && iTake50 > 0 && iLock50 < iTake50, `实际 lockSkip@${iLock50} takeIntent@${iTake50}`);
+  ok('R50 强制性不变量：持久化的样本必须被**消费**——m3 用 settleDropAny 出数、回执按 scope 标明来源',
+    /const rec = settleDropAny\(sid\)/.test(m3s50) && /const settleRec = settleDropAny\(sid\)/.test(m3s50)
+    && /settleScope: settleRec\?\.scope/.test(m3s50)
+    && /v\.settleScope === 'global'/.test(m2s50) && /参考其他会话/.test(m2s50),
+    '只落盘不消费 ⇒ 持久化是白做的（这正是"优化"与"改动"的分界）');
+  rmSync(dir50, { recursive: true, force: true });
 }
 
 /* ═══════════ 汇总 ═══════════ */
