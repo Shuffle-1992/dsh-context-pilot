@@ -3534,3 +3534,27 @@ m3 自身加载失败仍照旧 reject 并留痕；宿主**代码行数净增 0**
 新增守卫断言 + 变异验证（去掉独立 catch ⇒ 红）。
 
 **验证**：**774 断言全绿**（contract **622** / static 77 / report 54 / boot 21）；变异 **7/7 CAUGHT**。
+
+### R52 独立审计发现 #1（已修）：`official()` 闭包的 TDZ —— "压了却报未执行"（2026-10-17）
+
+**来源**：**B 路独立审计**（`qoder/Qwen3.8-Flash`）。任务书里**没有**提示这条 —— 是它自己读代码
+发现的；它甚至用独立脚本复现了同款 TDZ（`THREW: ReferenceError :: Cannot access 'retainSource'
+before initialization`，且当时 `compactIfNeeded` 已真的执行）。
+
+**缺陷**：`m3.compact.mjs#compactWithOwnRange` 的 `official()` 兜底闭包引用了
+`retainSource` / `useAnchor` / `tierInfo` —— 三者声明在闭包**之后**。当 `awaitRange()` 返回 null
+（`compact-range.mjs` 加载失败 ⇒ 宿主 `rangeReady.catch` 返回 null）时，`official('no-range-module')`
+被**立刻**调用 ⇒ 对象字面量求值抛 **TDZ ReferenceError**。
+**后果比报错更坏**：`compactIfNeeded` 在 await 里**已经真的压了**，随后才抛 ⇒ 调用方 catch 写下
+`not-executed` 回执 ⇒ **模型看到"未执行"、实际已执行**（假阴性），且 `preStepOk` / HUD 记录双丢
+—— 正是本项目最怕的「静默降级」。
+
+**修法**：把**不依赖 api** 的 `anchorBudget`/`useAnchor`/`retainSource` 提到 `official()` **之前**；
+`tierInfo` 先给安全默认（`{ tier:'standard' }`）、拿到 api 后覆盖 ⇒ 正常路径行为**逐字不变**
+（这些值本来就是同一批计算，只是提前算）。
+
+**验证**：**776 断言全绿**（contract **624** / static 77 / report 54 / boot 21），新增 **2 条守卫**：
+- 行为级：`awaitRange→null` 时**不得抛**，且回报 `source:'official'` + `retainSource` + `anchorFailReason`；
+- 结构级：三项声明必须在 `const official = async` **之前**（防有人挪回去让 TDZ 复活）。
+**变异 2/2 CAUGHT**：把 `retainSource` 声明挪回下方 ⇒ 两条守卫同时红。
+顺带：`.gitignore` 补 `collab/`（派发台以仓库为 cwd 时写的运行期日志，避免污染工作区）。

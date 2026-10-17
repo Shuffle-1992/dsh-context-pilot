@@ -4329,6 +4329,56 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
   rmSync(dir50, { recursive: true, force: true });
 }
 
+/* ═══ 6.45 R52：独立审计发现 —— `official()` 闭包的 TDZ（"压了却报未执行"）═══
+ * 来源：**B 路独立审计**（qoder/Qwen3.8-Flash，任务书未提示这条）在 `compactWithOwnRange` 的
+ * `official()` 兜底闭包里发现：`awaitRange()` 返回 null（compact-range.mjs 加载失败）时**立刻**调
+ * `official()`，而它引用的 `retainSource`/`useAnchor`/`tierInfo` 三个 const 声明在更后面 ⇒ 对象字面量
+ * 求值抛 TDZ ReferenceError。更糟：`compactIfNeeded` 在 await 里**已经真的压了**，随后才抛 ⇒
+ * 调用方写 `not-executed` 回执（**假阴性**）+ preStepOk/HUD 记录双丢 = 静默降级。
+ * 本块 = 回归守卫（行为级 + 结构级）。 */
+{
+  const m3Mod52 = await import(pathToFileURL(join(PLUGIN, 'm3.compact.mjs')).href);
+  const calls52 = [];
+  const svc52 = {
+    compactNow: () => { calls52.push('compactNow'); },
+    compactRegion: () => { calls52.push('compactRegion'); return {}; },
+    compactIfNeeded: async () => { calls52.push('compactIfNeeded'); return { shadowedTokenCount: 123 }; },
+  };
+  const api52 = m3Mod52.createM3Compaction({
+    state: { m3: {} }, log: () => {}, msg: (e) => String(e), pick: (...a) => a.find((x) => x != null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    nfmt: (n) => String(n), errCodeOf: (e) => String(e?.code ?? 'err'), schedule: () => {},
+    svc: () => null,
+    projectedFromPressure: () => ({ used: null, projected: null, reported: null, surface: null, sampled: null, basis: 'x' }),
+    summarizeBreakdown: () => null, M3: { criticalRatio: 0.75 }, effEnabled: () => true, criticalCapOf: () => 0.75,
+    resolveCompactionFor: () => ({ service: svc52, via: 'stub' }), publishHud: () => {}, recordHudAct: () => {},
+    formatAct: () => '', clearBriefed: () => {},
+    awaitRange: async () => null,   // ← 关键：模拟 compact-range.mjs 不可用（宿主 rangeReady.catch 返回 null）
+    getCompactTool: () => null, COMPACT_TIMEOUT_MS: 1000, SET_CAP: 10,
+  });
+  let out52 = null; let err52 = null;
+  try {
+    out52 = await api52.compactWithOwnRange({ session: { id: 's52' } }, { service: svc52, via: 'stub' },
+      { forced: false, sig: AbortSignal.timeout(2000), sid: 's52', window: 1000000, measure: {}, tierName: 'standard',
+        retainOverride: null, anchorSeq: null, anchorFailReason: 'text:not-found' });
+  } catch (e) { err52 = String(e?.message ?? e); }
+  ok('R52 行为级：`compact-range` 不可用 ⇒ 官方兜底**不得抛 TDZ**，且必须回报 source=official + 保留来源',
+    err52 === null && out52?.source === 'official' && calls52.includes('compactIfNeeded')
+    && out52?.retainSource === 'tier' && out52?.anchorFailReason === 'text:not-found',
+    `实际 err=${err52} out=${JSON.stringify(out52)} calls=${JSON.stringify(calls52)}`);
+  /* 结构守卫：`official()` 依赖的三项必须在它之前声明（防有人把声明再挪回去 ⇒ TDZ 复活）。 */
+  const m3src52 = readFileSync(join(PLUGIN, 'm3.compact.mjs'), 'utf8');
+  const iOfficial52 = m3src52.indexOf('const official = async');
+  const iRetain52 = m3src52.indexOf('const retainSource = useAnchor');
+  const iUseAnchor52 = m3src52.indexOf('const useAnchor = Number.isFinite(anchorBudget)');
+  const iTierInfo52 = m3src52.indexOf('let tierInfo = { tier:');
+  ok('R52 结构守卫：`retainSource`/`useAnchor`/`tierInfo` 必须在 `official()` **之前**声明（TDZ 前移）',
+    iOfficial52 > 0 && iRetain52 > 0 && iRetain52 < iOfficial52
+    && iUseAnchor52 > 0 && iUseAnchor52 < iOfficial52
+    && iTierInfo52 > 0 && iTierInfo52 < iOfficial52,
+    `实际 official@${iOfficial52} retainSource@${iRetain52} useAnchor@${iUseAnchor52} tierInfo@${iTierInfo52}`);
+}
+
 /* ═══════════ 汇总 ═══════════ */
 console.log(`\n${'='.repeat(52)}`);
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);

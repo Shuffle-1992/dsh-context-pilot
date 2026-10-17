@@ -344,6 +344,20 @@ export function createM3Compaction(deps) {
    */
   const compactWithOwnRange = async (agent, compaction, ctx) => {
     const { forced, sig, sid, window, measure, tierName, retainOverride, anchorSeq, anchorFailReason } = ctx;
+    /* ═══ R52（独立审计 A/B 路发现，2026-10-17）：`official()` 闭包**引用了在它之后才声明的 const** ═══
+     * 真机形态：`awaitRange()` 返回 null（`compact-range.mjs` 加载失败 ⇒ 宿主 rangeReady 的 catch 返回 null）
+     * ⇒ 第 365 行**立刻**调用 `official('no-range-module')`，而 `retainSource`/`useAnchor`/`tierInfo`
+     * 三次声明**都还没执行** ⇒ 对象字面量求值时抛
+     *   `ReferenceError: Cannot access 'retainSource' before initialization`（TDZ）。
+     * 后果比"报错"更坏：`compactIfNeeded` 在 await 里**已经真的压了**，随后才抛 ⇒ 调用方 catch 写一条
+     * `not-executed` 回执 ⇒ **模型看到"未执行"、实际已执行**（假阴性），且 preStepOk / HUD 记录双双丢失
+     * —— 正是本项目最怕的「静默降级」。审计方才用独立脚本复现了同款 TDZ 才报过来。
+     * 修法：把**不依赖 api** 的两项提到 `official` 之前；`tierInfo` 先给安全默认、拿到 api 后覆盖。
+     * ⚠️ 正常路径（api 就绪）行为**逐字不变**：这些值本来就是在 368/377/386 行算出来的同一个值。 */
+    const anchorBudget = Number(retainOverride?.budget);
+    const useAnchor = Number.isFinite(anchorBudget) && anchorBudget > 0;
+    const retainSource = useAnchor ? String(retainOverride?.source ?? 'anchor') : 'tier';
+    let tierInfo = { tier: 'standard' };   // api 未就绪时的安全默认（官方兜底回执只读 .tier）
     const official = async (why) => {
       markOwnCompaction(sid);
       try {
@@ -365,16 +379,16 @@ export function createM3Compaction(deps) {
     if (!api) return official('no-range-module');
     /* R16：档位 → 保留预算。resolveTier 内含夹取（下限 40k、上限窗口 50%）与未知档位回落；
      * 调用方负责从会话档位偏好里解析 tierName（强制线/idle/工具触发三路同源）。 */
-    const tierInfo = typeof api.resolveTier === 'function'
+    /* R52：`tierInfo` 已提到 `official` 之前（先给安全默认）⇒ 这里是**覆盖**而不是声明。 */
+    tierInfo = typeof api.resolveTier === 'function'
       ? api.resolveTier(tierName ?? 'standard', window)
       : { tier: 'standard', ratio: api.RETAIN_RATIO, budget: api.retainBudgetTokens(window, api.RETAIN_RATIO), clamped: false, fallback: false };
     const ratioKept = tierInfo.ratio;
     const tierBudget = tierInfo.budget > 0 ? tierInfo.budget : api.retainBudgetTokens(window, ratioKept);
     /* R21：语义锚点优先（`retainOverride` 由调用方在**压缩这一刻**解析好）——
      * 解析成功 ⇒ 预算 = 锚点→末尾 token + 余量；解析失败/未登记 ⇒ 原样用档位预算（就是兜底三档）。
-     * 无论走哪条都要留痕：`retainSource` 会进 rangeProbe 与回执（静默降级是本项目大忌）。 */
-    const anchorBudget = Number(retainOverride?.budget);
-    const useAnchor = Number.isFinite(anchorBudget) && anchorBudget > 0;
+     * 无论走哪条都要留痕：`retainSource` 会进 rangeProbe 与回执（静默降级是本项目大忌）。
+     * R52：`anchorBudget` / `useAnchor` 已提到 `official` 之前（那里就要用，见上方 TDZ 注释）。 */
     /* R39/R42：**只有档位预算**按真实口径折算（因子来自非 stale 实测；只减不增，夹在 [1,2]）。
      * ⚠️ **锚点预算绝不折算**（用户 2026-10-16 明确要求"准确保留之前的逻辑"）：锚点是**位置承诺**
      * （"从这条消息起之后一律原样保留"），折算会越过锚点 ⇒ 违背 R21 护栏「宁可多留，绝不丢新需求」。
@@ -383,7 +397,7 @@ export function createM3Compaction(deps) {
     const retainFactor = retainFactorOf(sid);
     const tierBudgetHeur = scaleRetainBudget(tierBudget, retainFactor);
     const budget = useAnchor ? anchorBudget : tierBudgetHeur;   // ← 锚点原样（不折算）
-    const retainSource = useAnchor ? String(retainOverride?.source ?? 'anchor') : 'tier';
+    /* R52：`retainSource` 已提到 `official` 之前（兜底回执也要带它，见上方 TDZ 注释）。 */
     const sel = api.selectRange({ session: agent.session, measurement: measure, retainTokens: budget, keepFromSeq: useAnchor ? anchorSeq : null });
     /* 取证：无论成败都留一次范围读数（范围不对时这是唯一的现场）。
      * ⚠️ **必须同时记 surface 位置（startIdx/endIdx）**：seq 是全局事件序号，**在 surface 上并不单调**——
