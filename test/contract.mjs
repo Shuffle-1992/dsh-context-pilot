@@ -570,17 +570,40 @@ ok('R16.12 冷却期间不提示（避免「让你切但工具必然拒绝」的
       return t === null && acts.length === before;
     })(),
     '插件自己的压缩被重复补记 ⇒ 面板出现两条同一次压缩');
-  ok('R16.13 行为级：跳过「自己的压缩在飞」窗口（pre-step 的 compactRegion 无标记）',
+  ok('R16.13 行为级：跳过「**本会话**自己的压缩在飞」窗口（pre-step 的 compactRegion 无标记）',
     (() => {
       const before = acts.length;
-      st13.m3.ownCompact = { at: 'now', sessionId: 'sess-13', until: Date.now() + 5000 };
+      st13.m3.ownCompact = { 'sess-13': { at: 'now', sessionId: 'sess-13', until: Date.now() + 5000 } };
       const t = m3x.noteEngineCompaction?.({ type: 'compaction/end', data: { compactionId: 'c5' } }, sess13);
       st13.m3.ownCompact = null;
       return t === null && acts.length === before;
     })(),
     '无标记的自家压缩被当引擎压缩补记 ⇒ 重复记录');
+  /* R53（自审发现 #3）：在飞标记必须**按会话**——A 会话在压时，B 会话的引擎压缩不能被吞掉。
+   * 旧实现是全局单槽 ⇒ 这条**一定红**（B 被漏记）。 */
+  ok('R53 行为级：**别的会话**在飞 ⇒ 本会话的引擎压缩照常补记（全局单槽会吞掉它）',
+    (() => {
+      const before = acts.length;
+      st13.m3.ownCompact = { 'sess-other': { at: 'now', sessionId: 'sess-other', until: Date.now() + 5000 } };
+      const t = m3x.noteEngineCompaction?.({ type: 'compaction/end', data: { compactionId: 'c5b' } }, sess13);
+      st13.m3.ownCompact = null;
+      return typeof t === 'string' && acts.length === before + 1;
+    })(),
+    '全局单槽 ⇒ 别的会话在飞期间本会话的引擎压缩被静默吞掉（漏记）');
+  ok('R53 行为级：在飞判定按会话隔离（`isCompactionInFlight(sid)`）',
+    (() => {
+      st13.m3.ownCompact = { 'sess-a': { until: Date.now() + 5000 }, 'sess-b': { until: Date.now() + 5000 } };
+      const iso = m3x.isCompactionInFlight('sess-a') === true
+        && m3x.isCompactionInFlight('sess-b') === true
+        && m3x.isCompactionInFlight('sess-c') === false
+        && m3x.isCompactionInFlight() === true;      // 不传 sid ⇒ 任一在飞（旧调用点语义不变）
+      st13.m3.ownCompact = null;
+      return iso && m3x.isCompactionInFlight() === false;
+    })(),
+    '在飞判定不按会话隔离 ⇒ 多会话互相干扰（漏记/重复记录）');
   ok('R16.13 计数与取证留痕（engineCompacts / lastEngineCompact）',
-    st13.m3.engineCompacts === 3 && typeof st13.m3.lastEngineCompact === 'object' && st13.m3.lastEngineCompact.ok === false,
+    /* R53：新增的「别的会话在飞」用例也补记了一条 ⇒ 计数 3→4；最后一条是成功补记（c5b）⇒ ok === true。 */
+    st13.m3.engineCompacts === 4 && typeof st13.m3.lastEngineCompact === 'object' && st13.m3.lastEngineCompact.ok === true,
     `实际：compacts=${st13.m3.engineCompacts} last=${JSON.stringify(st13.m3.lastEngineCompact)}`);
 }
 /* ⚠️ m3src 在本文件稍后（L677）才声明 ⇒ 这里就地取一份，避免 TDZ。 */
@@ -589,9 +612,9 @@ ok('R16.13 接线：host 把 compaction/end 转发给 m3；m3 三处自己的压
   /if \(event\?\.type === 'compaction\/end'\) m3Ctl\?\.noteEngineCompaction\?\.\(event, session\);/.test(host)
     && /noteEngineCompaction/.test(m3src13)
     && /if \(src === 'context-pilot'\) return null;/.test(m3src13)
-    && /if \(isCompactionInFlight\(\)\) return null;/.test(m3src13)
+    && /if \(isCompactionInFlight\(sidE\)\) return null;/.test(m3src13)
     && (m3src13.match(/markOwnCompaction\(sid\)/g) ?? []).length >= 3
-    && (m3src13.match(/clearOwnCompaction\(\)/g) ?? []).length >= 3
+    && (m3src13.match(/clearOwnCompaction\(sid\)/g) ?? []).length >= 4
     && /isCompactionInFlight, noteEngineCompaction, noteRetainFactor, retainFactorOf, noteCompactSettle, settleDropOf, settleDropAny, noteSessionEvent, compactionLockActive, currentRouteOf \}/.test(m3src13),
   '任一环缺位 ⇒ 引擎压缩仍无记录，或自家压缩被重复记录');
 ok('R16.13 文案：m5 为两种「非插件压缩」提供标签（不与「强制压缩」混淆）',
@@ -4304,7 +4327,7 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
     '实现若留在 m3 ⇒ 解耦是假的');
   ok('R50 解耦：叶子模块**零互引**（只 import node 内置）+ 宿主 `?ts=` 动态加载',
     !/from '\.\//.test(factsSrc50)
-    && /^import \{ mkdirSync, readFileSync, writeFileSync \} from 'node:fs';$/m.test(factsSrc50)
+    && /^import \{ [^}]*writeFileSync[^}]*\} from 'node:fs';$/m.test(factsSrc50)
     && /import\(`\.\/session-facts\.mjs\?ts=\$\{IMPL_TS\}`\)/.test(readFileSync(join(PLUGIN, 'host.impl.mjs'), 'utf8')),
     '互引 ⇒ 依赖图不再是叶子；漏 ?ts= ⇒ 热换不生效（P16）');
   /* 审查发现的回归风险：账本与 m3 **必须各自加载**——塞进同一个 Promise.all 时任一失败会连带 M3 整域
@@ -4377,6 +4400,31 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
     && iUseAnchor52 > 0 && iUseAnchor52 < iOfficial52
     && iTierInfo52 > 0 && iTierInfo52 < iOfficial52,
     `实际 official@${iOfficial52} retainSource@${iRetain52} useAnchor@${iUseAnchor52} tierInfo@${iTierInfo52}`);
+}
+
+/* ═══ 6.46 R53（自审发现 #2）：`.data` 落盘**必须原子**（同目录 tmp + rename）═══
+ * 直写目标路径会在写入中途留下半截 JSON ⇒ 并发读者（面板 / 报告工具 / 插件下次启动的
+ * `loadReportBase`）读到 `Unterminated string in JSON` ⇒ 记录/报告**整份丢失**。
+ * 现场证据：test/report.mjs 曾因读到半写文件真实报过这个错；R13 的"报告断档"同形。
+ * 结构守卫：五个落盘点都走 `writeJsonAtomic`，且没有任何一处直接 `writeFileSync(目标路径, …)`。 */
+{
+  const sites46 = [
+    ['core.mjs', 'reportPath'], ['m5.hud.mjs', 'hudActsPath'], ['session-facts.mjs', 'settlePath'],
+    ['compact-tool.mjs', 'tierPath'], ['effort.mjs', 'statsPath'],
+  ];
+  const problems46 = [];
+  for (const [f, target] of sites46) {
+    const src = read(f);
+    if (!src.includes('const writeJsonAtomic = (p, obj) => {')) problems46.push(`${f}: 缺 writeJsonAtomic`);
+    if (!src.includes(`writeJsonAtomic(${target},`)) problems46.push(`${f}: ${target} 未走原子写`);
+    if (src.includes(`writeFileSync(${target},`)) problems46.push(`${f}: 仍在直写 ${target}`);
+  }
+  ok('R53 落盘原子性：五个 `.data` 写入点全部走 `writeJsonAtomic`（同目录 tmp + rename），无直写',
+    problems46.length === 0, `实际问题：${JSON.stringify(problems46)}`);
+  const srcCore46 = read('core.mjs');
+  ok('R53 原子写实现：先写「同目录 tmp」再 `renameSync` 覆盖（读者只见旧的或新的完整内容）',
+    srcCore46.includes('${p}.${process.pid}.${Date.now().toString(36)}.tmp') && /renameSync\(tmp, p\)/.test(srcCore46),
+    '实现不是 tmp+rename ⇒ 半截 JSON 仍可能出现（名字叫 atomic 但行为不是）');
 }
 
 /* ═══════════ 汇总 ═══════════ */

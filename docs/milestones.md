@@ -3558,3 +3558,36 @@ before initialization`，且当时 `compactIfNeeded` 已真的执行）。
 - 结构级：三项声明必须在 `const official = async` **之前**（防有人挪回去让 TDZ 复活）。
 **变异 2/2 CAUGHT**：把 `retainSource` 声明挪回下方 ⇒ 两条守卫同时红。
 顺带：`.gitignore` 补 `collab/`（派发台以仓库为 cwd 时写的运行期日志，避免污染工作区）。
+
+### R53 自审报告 + 两个自审发现的修复：落盘原子性 / 在飞标记按会话（2026-10-17）
+
+独立审计两路都没跑成（A 路免费 flash 三次未产出报告、末次卡死被终止；B 路 `qoder/Qwen3.8-Flash`
+在抓到 **R52 那条 TDZ** 之后被中断/删除）⇒ 改由**我自己**完成审计，产出
+`docs/reviews/r51-audit-self.md`（**明确声明是自审、不是独立审计**，九条假设逐条给结论，
+并按来源分级标注可信度）。
+
+**发现 #2（中）：`.data` 落盘非原子** —— 5 处 `writeFileSync(目标路径)` 直写
+（`m1-report.json` / `hud-acts.json` / `settle-drop.json` / 档位表 / 换档统计）⇒ 写入中途的
+**半截 JSON** 会被并发读者读到（面板、报告工具、插件自己下次启动的 `loadReportBase`）⇒
+报告/记录**整份丢失**（R13 那次"报告断档"同形）。现场证据：`test/report.mjs` 曾真实报过
+`Unterminated string in JSON`，当时只是加了 `readJsonRetry` **绕开症状**、缺陷一直在。
+修法：5 个域各留一份 `writeJsonAtomic`（同目录 tmp + `renameSync`；Windows 目标被占用时
+退化直写并清 tmp）——同目录 rename ⇒ 读者只见旧的或新的完整内容，永不见半截。
+⚠️ helper 复制 5 份是刻意的：本项目禁止域间 import（依赖必须由宿主注入）。
+
+**发现 #3（低）：`state.m3.ownCompact` 全局单槽** —— A 会话压缩期间，B 会话的引擎压缩被
+`isCompactionInFlight()` 误判为"自己的"而**漏记**；A 的 `finally` 清槽后，B 自己的压缩事件
+又不再被跳过 ⇒ **重复补记**（面板/报告出现双条）。修法：按 sid 分槽（`SET_CAP` 有界化）+
+`clearOwnCompaction(sid)` 只清自己 + `isCompactionInFlight(sid)` 按会话看
+（**无参仍是"任一在飞"**，旧调用点语义不变）；`noteEngineCompaction` 里 `sidE` 的计算提前到
+在飞判定之前。热换兼容：旧的单槽形状（带 `until`）读到时直接丢弃重建。
+
+**验证**：**780 断言全绿**（contract **628** / static 77 / report 54 / boot 21）。
+新增守卫：行为级（别的会话在飞 ⇒ 本会话引擎压缩照常补记；在飞判定按会话隔离）+ 结构级
+（五个写入点必须走 `writeJsonAtomic`、不得直写，且 helper 必须是 tmp+rename）。
+**变异 2/2 CAUGHT**：在飞判定改回全局 ⇒ 3 条红；报告改回直写 ⇒ 结构守卫红。
+另：R16.13 的旧夹具在 #3 修复后**真的红了**（它编码的是旧语义）⇒ 反过来证明断言有效。
+
+**如实记录的未修项**：`preStepOk` 在"引擎判定无需压"（`result == null`）时也 +1 —— 语义偏差，
+但实际压缩量另有 `shadowedTokens`/`lastPreStep.acted` 精确表达，改它会让历史报告的数前后不可比、
+零用户可见影响 ⇒ **记录不改**（详见自审报告 §4）。

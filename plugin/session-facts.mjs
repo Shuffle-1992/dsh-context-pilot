@@ -27,7 +27,7 @@
  * - 事实状态仍写在 `state.m3.*`（**刻意**）：消费方（threshold 读 route、m2 读样本）零改动，
  *   抽取是纯搬迁而非行为变更。将来若要让 m3 彻底不持有事实，把 `state.m3` 换成 `state.facts` 即可。
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 
 export function createSessionFacts({ state, log, pick, svc, summarizeBreakdown, tryOf, pluginDir }) {
@@ -96,11 +96,27 @@ export function createSessionFacts({ state, log, pick, svc, summarizeBreakdown, 
       if (e?.code !== 'ENOENT') log?.('warn', `settle-drop.json 读取失败（忽略，按无样本）：${e?.message ?? e}`);
     }
   };
+  /* R53（自审发现 #2）：**原子落盘**（同目录 tmp + rename）——直写会留半截 JSON，
+   * 读取侧（本模块自己的 loadSettle 与面板/工具）会读到 `Unterminated string in JSON` ⇒ 样本全丢。
+   * ⚠️ 各域各留一份：本项目禁止域间 import（依赖由宿主注入）。 */
+  const writeJsonAtomic = (p, obj) => {
+    const body = JSON.stringify(obj, null, 2);
+    const tmp = `${p}.${process.pid}.${Date.now().toString(36)}.tmp`;
+    try {
+      writeFileSync(tmp, body);
+      renameSync(tmp, p);
+      return true;
+    } catch {
+      try { unlinkSync(tmp); } catch { /* 吞 */ }
+      writeFileSync(p, body);   // Windows 目标被占用 ⇒ rename EBUSY ⇒ 退化直写
+      return true;
+    }
+  };
   const saveSettle = () => {
     if (!settlePath) return;
     try {
       mkdirSync(join(pluginDir, '.data'), { recursive: true });
-      writeFileSync(settlePath, JSON.stringify({ version: 1, savedAt: new Date().toISOString(), bySid: M().settleDrop ?? {} }, null, 2));
+      writeJsonAtomic(settlePath, { version: 1, savedAt: new Date().toISOString(), bySid: M().settleDrop ?? {} });
     } catch (e) { log?.('warn', `settle-drop.json 写入失败（吞）：${e?.message ?? e}`); }
   };
   /** 压缩完成时挂观察（只有 stale 才值得观察：非 stale 说明 provider 已刷新，没有"回落"可量）。 */

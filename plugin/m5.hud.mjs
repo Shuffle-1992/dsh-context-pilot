@@ -24,7 +24,7 @@
  * - 由宿主 `import(\`./m5.hud.mjs?ts=${IMPL_TS}\`)` 加载（漏 `?ts=` ⇒ P16 永久缓存）。
  * - **不抛错**：读写失败一律吞 + 留痕；**读路径不写盘**（`buildHudResponse` 只写 `state.m5.hudPollReq` 取证）。
  */
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 
 export function createM5Hud(deps) {
@@ -88,10 +88,28 @@ export function createM5Hud(deps) {
     return null; // 文件缺失/损坏 → null（调用方回退报告回填）
   };
 
+  /* R53（自审发现 #2，2026-10-17）：**原子落盘**（同目录 tmp + rename）。
+   * 直写会在写入中途留下**半截 JSON** ⇒ 并发读者（面板/工具/下次启动的 load）读到
+   * `Unterminated string in JSON`，记录整份丢失。语义：读者只见旧完整或新完整内容。
+   * ⚠️ 各域各留一份：本项目禁止域间 import（依赖由宿主注入）⇒ 复制 8 行比引入耦合安全。 */
+  const writeJsonAtomic = (p, obj) => {
+    const body = JSON.stringify(obj, null, 2);
+    const tmp = `${p}.${process.pid}.${Date.now().toString(36)}.tmp`;
+    try {
+      writeFileSync(tmp, body);
+      renameSync(tmp, p);   // 同目录 rename：要么旧文件、要么新文件，永无半截
+      return true;
+    } catch {
+      try { unlinkSync(tmp); } catch { /* 吞 */ }
+      writeFileSync(p, body);   // Windows 目标被占用 ⇒ rename EBUSY ⇒ 退化直写（宁可非原子，也别丢这次）
+      return true;
+    }
+  };
+
   const saveHudActs = (acts) => {
     try {
       mkdirSync(dirname(hudActsPath), { recursive: true });
-      writeFileSync(hudActsPath, JSON.stringify({ version: 1, savedAt: new Date().toISOString(), acts: acts.slice(0, HUD_ACTS_CAP) }, null, 2));
+      writeJsonAtomic(hudActsPath, { version: 1, savedAt: new Date().toISOString(), acts: acts.slice(0, HUD_ACTS_CAP) });
     } catch (e) {
       log('warn', `hud-acts.json 写入失败（吞）：${msg(e)}`);
     }

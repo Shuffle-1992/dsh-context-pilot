@@ -36,7 +36,7 @@
  */
 
 /** 工具名（模型可见；与注入教学文本必须同源，见 contract §6.15）。 */
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 
 export const TOOL_NAME = 'compact_context';
@@ -113,13 +113,28 @@ export function createCompactTool(deps) {
     }
     return out;
   };
+  /* R53（自审发现 #2）：**原子落盘**（同目录 tmp + rename）——直写会留半截 JSON，
+   * 下次启动读档会整份丢弃（档位/锚点静默消失）。⚠️ 各域各留一份：禁止域间 import。 */
+  const writeJsonAtomic = (p, obj) => {
+    const body = JSON.stringify(obj, null, 2);
+    const tmp = `${p}.${process.pid}.${Date.now().toString(36)}.tmp`;
+    try {
+      writeFileSync(tmp, body);
+      renameSync(tmp, p);
+      return true;
+    } catch {
+      try { unlinkSync(tmp); } catch { /* 吞 */ }
+      writeFileSync(p, body);
+      return true;
+    }
+  };
   const saveTiers = () => {
     try {
       if (!tierPath) return;
       mkdirSync(dirname(tierPath), { recursive: true });
       const bySidOut = {};
       for (const [sid, v] of tierBySid) bySidOut[sid] = { tier: v.tier, at: v.at ?? 0, seq: v.seq ?? 0, anchor: v.anchor ?? null };
-      writeFileSync(tierPath, JSON.stringify({ version: 1, savedAt: new Date().toISOString(), bySid: bySidOut }, null, 2));
+      writeJsonAtomic(tierPath, { version: 1, savedAt: new Date().toISOString(), bySid: bySidOut });
     } catch (e) {
       log('warn', `compact-tier.json 写入失败（吞）：${msg(e)}`);
     }

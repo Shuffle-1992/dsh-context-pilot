@@ -151,15 +151,43 @@ export function createM3Compaction(deps) {
    * 「我自己的压缩」圈出来，供 session/event 监听器跳过补记（只有引擎/手动压缩才补记）。
    * TTL 兜底：某条路径异常未清（await 抛错等）时，窗口过期即失效，不会永久吞掉引擎事件。 */
   const OWN_COMPACT_TTL_MS = 90000;
+  /* R53（自审发现 #3，2026-10-17）：**按 sid 分槽** —— 原先是**全局单槽** `state.m3.ownCompact`：
+   *   ① A 会话压缩期间，B 会话的引擎压缩被 `isCompactionInFlight()` 误判为「我自己的」⇒ **漏记**；
+   *   ② A 的 finally 清槽又会**提前解除** B 的窗口 ⇒ B 自己的压缩被**重复补记**（面板/报告双条）。
+   * 单槽还有个更隐蔽的后果：两条路径同时压缩时，先结束的那条会替另一条「解封」，两边的记录都失真。
+   * 现在按 sid 存（有界化 SET_CAP），`clearOwnCompaction(sid)` 只清自己那个槽；无 sid 时保持旧的「全清」语义。 */
   const markOwnCompaction = (sid) => {
-    try { state.m3.ownCompact = { at: new Date().toISOString(), sessionId: String(sid ?? ''), until: Date.now() + OWN_COMPACT_TTL_MS }; } catch { /* 吞 */ }
+    try {
+      const prev = state.m3.ownCompact;
+      /* 兼容热换后的旧单槽形状（旧的带 `until`、无 sid 键）⇒ 直接丢弃重建。 */
+      const m = (prev && typeof prev === 'object' && !Number.isFinite(prev.until)) ? prev : {};
+      const key = String(sid ?? '');
+      m[key] = { at: new Date().toISOString(), sessionId: key, until: Date.now() + OWN_COMPACT_TTL_MS };
+      const keys = Object.keys(m);
+      if (keys.length > SET_CAP) for (const k of keys.slice(0, keys.length - SET_CAP)) delete m[k];
+      state.m3.ownCompact = m;
+    } catch { /* 吞 */ }
   };
-  const clearOwnCompaction = () => { try { state.m3.ownCompact = null; } catch { /* 吞 */ } };
-  /** 是否有「我们自己的压缩」正在进行（事件监听器据此跳过补记）。 */
-  const isCompactionInFlight = () => {
+  const clearOwnCompaction = (sid) => {
+    try {
+      const m = state.m3.ownCompact;
+      if (!m || typeof m !== 'object' || Number.isFinite(m.until)) { state.m3.ownCompact = null; return; }
+      const key = String(sid ?? '');
+      if (!key) { state.m3.ownCompact = null; return; }   // 无 sid ⇒ 全清（旧语义，兼容未改的调用点）
+      delete m[key];
+      if (!Object.keys(m).length) state.m3.ownCompact = {};
+    } catch { /* 吞 */ }
+  };
+  /** 是否有「我们自己的压缩」正在进行（事件监听器据此跳过补记）。
+   * 传 sid ⇒ **只看该会话**（发现 #3 的修法）；不传 ⇒ 任一在飞（保持旧调用点的语义）。 */
+  const isCompactionInFlight = (sid) => {
     try {
       const o = state.m3.ownCompact;
-      return !!(o && Number(o.until) > Date.now());
+      if (!o || typeof o !== 'object' || Number.isFinite(o.until)) return false;
+      const now = Date.now();
+      const want = sid == null || sid === '' ? null : String(sid);
+      const keys = want ? [want] : Object.keys(o);
+      return keys.some((k) => Number(o[k]?.until) > now);
     } catch { return false; }
   };
 
@@ -196,9 +224,10 @@ export function createM3Compaction(deps) {
       const d = event?.data ?? {};
       const src = d.sourceCommandId;
       if (src === 'context-pilot') return null; // 插件 idle 路径（已在 idle 里记过）
-      if (isCompactionInFlight()) return null;  // 插件 pre-step 路径（在飞窗口内）
+      /* R53（自审发现 #3）：sid 必须**先算**——在飞判定要按会话看，不能全局一刀切。 */
       const sidE = String(pick(session?.id, session?.header?.id, ''));
       if (!sidE) return null;
+      if (isCompactionInFlight(sidE)) return null;  // 插件 pre-step 路径（该会话的在飞窗口内）
       const kind = typeof src === 'string' && src.startsWith('cmd') ? 'manual' : 'engine';
       const mr = measureRatio(session);
       const ratioAfter = mr?.ok && Number.isFinite(mr.ratio) ? mr.ratio : null;
@@ -373,7 +402,7 @@ export function createM3Compaction(deps) {
           tier: tierInfo.tier,
           walkBacks: 0,
         };
-      } finally { clearOwnCompaction(); }
+      } finally { clearOwnCompaction(sid); }
     };
     const api = await awaitRange();
     if (!api) return official('no-range-module');
@@ -466,7 +495,7 @@ export function createM3Compaction(deps) {
         let result;
         try {
           result = await compaction.service.compactRegion(sel.start, end, agent, sig);
-        } finally { clearOwnCompaction(); }
+        } finally { clearOwnCompaction(sid); }
         /* R39/R40：报**实际生效的那个预算**——
          * · 档位路径：报档位承诺（**真实口径**，实际交给范围选择的是折算后的 `retainBudgetHeur`）；
          * · **锚点路径：报锚点预算（启发式口径）且不折算**——锚点是**位置承诺**（"之后一律原样保留"），
@@ -896,7 +925,7 @@ export function createM3Compaction(deps) {
           log('warn', `M3 idle 扫除失败（${code}）：${msg(e)}`);
           schedule('m3-act', 500);
         })
-        .finally(() => { clearOwnCompaction(); sweepInFlight.delete(sid); });
+        .finally(() => { clearOwnCompaction(sid); sweepInFlight.delete(sid); });
     } catch (e) {
       log('warn', `M3 idle 扫除异常（吞）：${msg(e)}`);
     }

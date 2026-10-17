@@ -94,7 +94,7 @@ export function parseEffortInput(input, options) {
 
 /* R16.7：换档统计持久化需要 fs/path。m5.hud.mjs 已有同款先例（hud-acts.json），
  * static 护栏只查「模块存在」不限制叶子模块的 node 内建 import ⇒ 合法。 */
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 
 /** 默认冷却（毫秒）：防频繁换档反复打断前缀缓存。可被 config 覆盖。 */
@@ -136,6 +136,21 @@ export function createEffort(deps) {
       return {};
     }
   };
+  /* R53（自审发现 #2）：**原子落盘**（同目录 tmp + rename）——直写会留半截 JSON，
+   * 下次启动读档会整份丢弃（换档统计静默归零）。⚠️ 各域各留一份：禁止域间 import。 */
+  const writeJsonAtomic = (p, obj) => {
+    const body = JSON.stringify(obj, null, 2);
+    const tmp = `${p}.${process.pid}.${Date.now().toString(36)}.tmp`;
+    try {
+      writeFileSync(tmp, body);
+      renameSync(tmp, p);
+      return true;
+    } catch {
+      try { unlinkSync(tmp); } catch { /* 吞 */ }
+      writeFileSync(p, body);
+      return true;
+    }
+  };
   const savedStats = loadStats();
   const saveStats = () => {
     try {
@@ -145,7 +160,7 @@ export function createEffort(deps) {
       for (const [sid, s] of bySid) {
         if (s.switchCount > 0 || s.lastSwitch) out[sid] = { switchCount: s.switchCount || 0, lastSwitch: s.lastSwitch ?? null };
       }
-      writeFileSync(statsPath, JSON.stringify({ version: 1, savedAt: new Date().toISOString(), bySid: out }, null, 2));
+      writeJsonAtomic(statsPath, { version: 1, savedAt: new Date().toISOString(), bySid: out });
     } catch (e) {
       log('warn', `effort-stats.json 写入失败（吞）：${msg(e)}`);
     }

@@ -21,7 +21,7 @@
  * `attachSnapshot({buildSnapshot, slimSnapshot, isSlimReason})`。未注入时用**最小快照 + FULL 档位**
  * 兜底（宁可多写字段，也不要报告断档——R13 真事故就是这个形态）。
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -676,10 +676,31 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
       }
       data.history = next;
       mkdirSync(dirname(reportPath), { recursive: true });
-      writeFileSync(reportPath, JSON.stringify(data, null, 2));
+      writeJsonAtomic(reportPath, data);
       lastWrittenAt = entry.at;
     } catch (e) {
       log('warn', `报告写入失败：${msg(e)}`);
+    }
+  };
+
+  /* R53（自审发现 #2，2026-10-17）：**原子落盘**（同目录 tmp + rename）。
+   * 直写目标文件会在写入中途留下**半截 JSON**；任何并发读者（面板 / 报告工具 / 插件下次启动的
+   * `loadReportBase`）都会读到 `Unterminated string in JSON` ⇒ 记录/报告**整份丢失**
+   * （test/report.mjs 曾真实报过这个错 = 现场证据；R13 的"报告断档"是同一形态）。
+   * 语义：读者只会看到**旧的完整内容**或**新的完整内容**，永不看半截。
+   * ⚠️ 该 helper 在多个域各留一份（m5 / session-facts / compact-tool / effort）：
+   *    本项目禁止域间 import（依赖必须由宿主注入）⇒ 复制 8 行比引入耦合安全。 */
+  const writeJsonAtomic = (p, obj) => {
+    const body = JSON.stringify(obj, null, 2);
+    const tmp = `${p}.${process.pid}.${Date.now().toString(36)}.tmp`;
+    try {
+      writeFileSync(tmp, body);
+      renameSync(tmp, p);   // 同目录 rename：要么旧文件、要么新文件，永无半截
+      return true;
+    } catch {
+      try { unlinkSync(tmp); } catch { /* 吞 */ }
+      writeFileSync(p, body);   // Windows 目标被占用时 rename 会 EBUSY ⇒ 退化为直写（宁可非原子，也别丢这次）
+      return true;
     }
   };
 
