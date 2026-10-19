@@ -4534,11 +4534,10 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
     /injected: state\.m2\?\.lastInjection \?\? null,/.test(m5src) && /config: \(\(\) => \{/.test(m5src)
     && /engineCapProbe: state\.m3\?\.engineCapProbe \?\? null,/.test(m5src),
     'HUD 未下发 ⇒ 面板拿不到（用户无法逐字核对插件到底注入了什么）');
-  ok('R55①：client 渲染「本轮注入」只读区（复制 + 刷新，六段原文）',
-    /const injSec = el\("div", \{ className: "dcp-inj" \}/.test(client) && /injSec,/.test(client)
-    && /injBlock\("用量行"/.test(client) && /injBlock\("决策卡"/.test(client)
-    && /injBlock\("一次性说明"/.test(client) && /injBlock\("压缩自检回执"/.test(client),
-    '面板未渲染 ⇒ 「暴露到面板」这条没落地');
+  ok('R65：面板不再渲染「本轮注入」整段（用户要求撤掉），改由三个模板行提供查看/复制内置文案',
+  !/className: "dcp-inj"/.test(client) && !/injSec/.test(client) && !/injBlock/.test(client)
+  && /"查看内置文案"/.test(client) && /"复制内置文案"/.test(client),
+  '注入区仍在渲染 ⇒ 与内置文案重复、面板太乱（用户实测「太乱了」）；或模板行缺少查看/复制按钮');
   /* ② 参数可配：阈值余量（活读）+ 三档比例（整组校验 + 顺序约束） */
   ok('R55②：阈值余量活读配置（写死常量已退为默认值）',
     /const marginOf = \(\) => \{/.test(threshold) && /const v = M3\?\.engineCapMargin;/.test(threshold)

@@ -227,6 +227,7 @@ window.__ModuleLoader__.load({
 			 * 现独立 .dcp-tpl（min-height 150px、等宽字体、可纵向拉伸），旁边一枚「查看内置文案」按钮。 */
 			".dcp-tplcol{display:flex;flex-direction:column;gap:6px;flex:1 1 auto;min-width:0}",
 			".dcp-tplwrap{display:flex;gap:8px;align-items:flex-start;width:100%}",
+			".dcp-tplbtns{display:flex;flex-direction:column;gap:6px;flex:none}",
 			".dcp-tpl{flex:1 1 auto;width:100%;min-height:150px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.45));border-radius:6px;background:transparent;color:var(--dsw-alias-label-primary,currentColor);padding:6px 8px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;line-height:1.55;resize:vertical;box-sizing:border-box}",
 			".dcp-tpl:disabled{opacity:.6}",
 			".dcp-builtin{margin:0;padding:8px 10px;border:1px dashed var(--dsw-alias-border-l2,rgba(128,128,128,.45));border-radius:6px;background:var(--dsw-alias-bg-layer-1,transparent);white-space:pre-wrap;word-break:break-word;font-size:11.5px;line-height:1.5;max-height:340px;overflow:auto}",
@@ -358,9 +359,6 @@ window.__ModuleLoader__.load({
 			const [cfg, setCfg] = react.useState(null);
 			/* R57：哪一行模板正在展开「内置文案」（null = 全部收起）。必须与其他 hook 同层无条件调用。 */
 			const [tplOpen, setTplOpen] = react.useState(null);
-			/* R61（2026-10-19 用户反馈「查看按钮重复了」）：整段**一个**开关——六段原文一起展开/收起，
-			 * 不再每行一个「查看」（6 个一模一样的按钮属重复）。同上，无条件同层调用。 */
-			const [injAll, setInjAll] = react.useState(false);
 			const pullInj = react.useCallback(async () => {
 				try {
 					if (!hudRemoteSvc || typeof hudRemoteSvc.getHud !== "function") return void 0;
@@ -372,16 +370,6 @@ window.__ModuleLoader__.load({
 					return got; // R62：返回本轮注入，供「刷新注入数据」给可见反馈
 				} catch { return void 0; /* 吞：拿不到就显示"尚未取到"，绝不影响设置面板本身 */ }
 			}, [hudRemoteSvc]);
-			/* R62（2026-10-19 用户反馈「2 个按钮点击没什么反应」）：手动刷新必须**有可见反馈**——
-			 * 原先点完和没点一样（数据没变就什么都不动）。现在点完回一句状态。 */
-			const refreshInj = react.useCallback(async () => {
-				const got = await pullInj();
-				try {
-					setMessage(got
-						? { kind: "ok", text: `已刷新注入数据（最近一轮 ${String(got.at || "").slice(11, 19)}）` }
-						: { kind: "ok", text: "已刷新：host 侧本轮还没有注入记录（等下一轮注入，或确认已 toggle 加载新版 host）" });
-				} catch { /* 忽略 */ }
-			}, [pullInj]);
 			react.useEffect(() => { pullInj(); }, [pullInj]);
 			react.useEffect(() => {
 				let alive = true;
@@ -578,89 +566,12 @@ window.__ModuleLoader__.load({
 							: "设置命名空间尚未就绪，当前只读；就绪后自动显示当前值。"),
 				);
 			}
-			/* ═══ R55（2026-10-19 用户要求：「决策卡/提示词/用量行暴露到面板，方便设置」）═══
-			 * 注入原文展示块（只读 + 一键复制）。刻意保持**只读**：面板里能改的只有配置项本身，
-			 * 注入文本不可直接编辑——否则会出现"改了显示、却影响不了注入"的错觉（要改文本就改
-			 * 上面的模板字段，改完下一轮生效）。 */
-			/* R64（2026-10-19 用户实测「只剩 2 个？」）：一次性说明 / 思考强度教学 / 换档提示 / 回执
-			 * 都是**按时机**注入的，普通一轮里本来就是空的。原先「空 ⇒ 整行不渲染」⇒ 用户只看到 2 行，
-			 * 会以为功能坏了或丢了。现改为**六行恒显**：空的那行写「本轮未注入（原因）」。 */
-			const injBlock = (title, text, when = "") => {
-				if (inj === null) return null; // 没有本轮注入记录 ⇒ 外面已有统一提示
-				const has = typeof text === "string" && text.length > 0;
-				return el("div", { className: "dcp-inj-b", key: title },
-					el("div", { className: "dcp-inj-t" },
-						el("span", null, title),
-						/* R60/R61：默认收起，由板块标题行「展开全部原文」统一开合；每行只留「复制」。 */
-						has
-							? el("button", {
-								className: "dcp-mini", title: "复制这段原文",
-								onClick: () => {
-									try {
-										navigator.clipboard?.writeText(String(text));
-										setMessage({ kind: "ok", text: `已复制「${title}」` });
-									} catch { /* 吞：剪贴板不可用不影响面板 */ }
-								},
-							}, "复制")
-							: el("span", { className: "dcp-hint" }, when ? `本轮未注入（${when}）` : "本轮未注入"),
-					),
-					has && injAll ? el("pre", { className: "dcp-inj-p" }, String(text)) : null,
-				);
-			};
-			const injSec = el("div", { className: "dcp-inj" },
-				/* ═══ R59（2026-10-19 用户要求：「下面的那些内容移到**板块**里面显示」）═══
-				 * 把「本轮活值」「生效配置」并进**板块标题行**——原先它们落在板块最底部：要读完六段
-				 * 注入原文才看到活值，与"先看结论"的阅读顺序相反。一行放不下由 .dcp-inj-h 换行。 */
-				el("div", { className: "dcp-inj-h" },
-					el("span", null, "本轮注入（只读）"),
-					el("span", { className: "dcp-inj-n" }, inj
-						? `最近一轮 ${String(inj.at || "").slice(11, 19)}${inj.receiptOnly ? "（量测失败，仅回执）" : ""}`
-						: "尚未取到"),
-					/* R61/R62：刷新按钮**说清刷什么**并给可见反馈；展开按钮在无注入时**禁用**（否则点了没反应）。 */
-					el("button", {
-						className: "dcp-mini", type: "button", title: "重新拉取本轮注入原文与生效配置（内置文案也走这条）",
-						onClick: () => { refreshInj(); },
-					}, "刷新注入数据"),
-					el("button", {
-						className: "dcp-mini", type: "button", disabled: inj === null,
-						title: inj === null
-							? "本轮还没有注入记录，没有原文可展开（点「刷新注入数据」，或等下一轮注入）"
-							: "展开/收起六段注入原文",
-						onClick: () => setInjAll((v) => !v),
-					}, injAll ? "收起全部原文" : "展开全部原文"),
-					inj ? el("span", { className: "dcp-inj-n" },
-						`本轮活值：占用 ${inj.values?.ratio != null ? `${Math.round(inj.values.ratio * 100)}%` : "?"}`
-						+ ` · 生效强制线 ${inj.values?.effCrit != null ? `${Math.round(inj.values.effCrit * 100)}%` : "?"}`
-						+ ` · 档位 ${inj.tier || "（本会话未登记）"}`
-						+ ` · 模板 ${inj.tpl?.brief || inj.tpl?.card ? "已启用" : "内置"}`) : null,
-					cfg ? el("span", { className: "dcp-inj-n" },
-						`生效配置：强制线 ${Math.round(cfg.criticalRatio * 100)}% · 智能线 ${Math.round(cfg.markerMinRatio * 100)}%`
-						+ ` · 阈值余量 ${Math.round(cfg.engineCapMargin * 100)}pp`
-						+ ` · 档位 ${Math.round(cfg.retainRatioLight * 100)}/${Math.round(cfg.retainRatioStandard * 100)}/${Math.round(cfg.retainRatioHeavy * 100)}%`
-						+ (cfg.tplBrief || cfg.tplCard ? " · 模板已启用" : "")
-						+ (cfg.tplFallbacks ? ` · ⚠️ 模板回退 ${cfg.tplFallbacks} 次（缺 {tool}）` : "")) : null,
-				),
-				el("div", { className: "dcp-inj-n" }, "插件实际写进上下文的内容，逐字可核；要改文本请用上面的模板字段。"),
-				inj
-					? [
-						injBlock("用量行", inj.usageText ? `${inj.usageText}${inj.effSuffix ? ` ｜ ${inj.effSuffix}` : ""}` : null, "每轮都注入"),
-						injBlock("决策卡", inj.cardText, "占用达智能压缩线时注入"),
-						injBlock("一次性说明", inj.briefText, "只在会话首轮注入一次"),
-						injBlock("思考强度教学", inj.effBriefText, "只在会话首轮注入一次（开启智能思考时）"),
-						injBlock("换档提示", inj.nudgeText, "只在建议换档时注入"),
-						injBlock("压缩自检回执", inj.receiptText, "只在压缩实际执行后注入"),
-					]
-					: el("div", { className: "dcp-inj-n" }, "（点「刷新」，或等下一轮注入）"),
-			);
-			/* R63（2026-10-19 用户实测「下面显示的全部，跟上面的内置文案不是一样的么？2 处重复的？」）：
-			 * 模板留空时，注入的就是**内置文案本身** ⇒ 再显示一份「查看内置文案」纯属重复展示。
-			 * 规则：模板留空 **且** 已有本轮注入 ⇒ 不显示按钮（改为一句说明，指向下方「本轮注入」同名段）；
-			 * 模板非空（注入≠内置，需要参照物）或还没有注入记录（内置是唯一来源）时才显示。 */
-			const TPL_BLOCK = { tplBrief: "一次性说明", tplCard: "决策卡", tplEffBrief: "思考强度教学" };
+			/* R65（2026-10-19 用户要求）：面板不再展示「本轮注入」整段——太乱，且模板留空时与内置文案重复。
+			 * 内置文案改为**只在三个模板行**按需查看/复制：查看=展开、复制=写剪贴板（复制不需要先展开）。
+			 * 数据来源：本轮注入里的 builtin*（若已有注入）否则 HUD config.builtins（host 随时可读）。 */
 			const builtinTextOf = (field) => (field.key === "tplBrief" ? (inj?.builtinBrief ?? cfg?.builtins?.brief)
 				: field.key === "tplCard" ? (inj?.builtinCard ?? cfg?.builtins?.card)
 					: (inj?.builtinEffBrief ?? cfg?.builtins?.effBrief));
-			const tplIsDupOfInj = (field) => String(valueOf(field) ?? "").trim() === "" && inj !== null;
 			return el("div", { className: "dcp-panel" },
 				el("div", { className: "dcp-grid" },
 					FIELDS.map((field) => el("div", { className: "dcp-row", key: field.key },
@@ -684,22 +595,31 @@ window.__ModuleLoader__.load({
 											value: String(valueOf(field)),
 											onChange: (e) => setField(field, e.target.value),
 										}),
-										/* R57：内置文案查看按钮（放在输入框**旁边**）。显示 host 落档的
-										 * **内置原文**——即模板留空时插件实际会用的那段文字，可逐字复制后再改。
-										 * R63：模板留空且已有本轮注入时不显示（那就是下方同名段，重复）。 */
-										tplIsDupOfInj(field)
-											? el("span", { className: "dcp-hint dcp-tplnote" },
-												`留空 = 内置文案；本轮注入的「${TPL_BLOCK[field.key]}」就是它（见下方板块，不重复展示）`)
-											: el("button", {
+										/* R65（2026-10-19 用户要求）：「本轮注入」整段撤掉后，内置文案成为唯一查看入口 ⇒
+										 * 三个模板行各给两个按钮：**查看内置文案** + **复制内置文案**（复制不需要先展开）。 */
+										el("div", { className: "dcp-tplbtns" },
+											el("button", {
 												className: "dcp-mini", type: "button",
 												title: "查看内置文案（模板留空时插件实际使用的原文）",
 												onClick: () => setTplOpen((v) => (v === field.key ? null : field.key)),
 											}, tplOpen === field.key ? "收起内置文案" : "查看内置文案"),
+											el("button", {
+												className: "dcp-mini", type: "button", title: "复制内置文案到剪贴板",
+												onClick: () => {
+													const t = builtinTextOf(field);
+													if (!t) { setMessage({ kind: "error", text: "暂无内置文案：先 toggle 插件（关→开）让 host 下发，再试" }); return; }
+													try {
+														navigator.clipboard?.writeText(String(t));
+														setMessage({ kind: "ok", text: `已复制「${field.label}」的内置文案` });
+													} catch { setMessage({ kind: "error", text: "复制失败：剪贴板不可用" }); }
+												},
+											}, "复制内置文案"),
+										),
 									),
-									(!tplIsDupOfInj(field) && tplOpen === field.key)
+									tplOpen === field.key
 										? el("pre", { className: "dcp-builtin" },
 											builtinTextOf(field)
-												|| "（暂无内置文案：点「刷新注入数据」重拉；若一直为空，先 toggle 插件（关→开）加载新版 host）")
+												|| "（暂无内置文案：先 toggle 插件（关→开）加载新版 host，再点上方「刷新页面」后重试）")
 										: null,
 								)
 								: el("input", {
@@ -711,10 +631,6 @@ window.__ModuleLoader__.load({
 							}),
 						el("span", { className: "dcp-hint" }, hintFor(field)),
 					)),
-					/* R62（用户要求「本轮注入那些，移到强制压缩下面，再一个板块，现在没包含进去」）：
-					 * 放进 .dcp-grid（就是那个带边框的卡片）的最后一个子节点 ⇒ 落在「强制压缩冷却」行
-					 * 之下、**同一张卡片里**，作为它自己的一个板块（.dcp-inj 自带顶部分隔线）。 */
-					injSec,
 				),
 				el("div", { className: "dcp-actions" },
 					el("button", {

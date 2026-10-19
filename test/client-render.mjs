@@ -236,9 +236,6 @@ ok('C / page：渲染出只读占位', C.page.classes.includes('dcp-panel'), `cl
 ok('B / page：**渲染出配置网格 dcp-grid**（用户要的表单本体）',
   B.page.classes.includes('dcp-grid'),
   `class=${B.page.classes.join(',')} ⇒ 只有占位说明命名空间没绑上`);
-ok('B / page：**渲染出「本轮注入（只读）」区 dcp-inj**（R55 新增能力）',
-  B.page.classes.includes('dcp-inj'),
-  '注入原文区没渲染 ⇒ 用户看不到决策卡/提示词原文');
 ok('B / page：配置行数量与 FIELDS 对得上（≥12 行 dcp-row）',
   B.page.classes.filter((c) => c === 'dcp-row').length >= 12,
   `实际 ${B.page.classes.filter((c) => c === 'dcp-row').length} 行`);
@@ -249,88 +246,30 @@ ok('B / summary：渲染出汇总行（dcp-summary），不抛',
   B.summary.threw === null && B.summary.classes.includes('dcp-summary'),
   `抛了 ${B.summary.threw ?? '无 dcp-summary'}`);
 
-/* ── R57：模板输入框放大 + 「查看内置文案」按钮（用户 2026-10-19 要求）── */
+/* ── R57/R65（2026-10-19 用户要求）：模板行放大 + 查看/复制内置文案；「本轮注入」整段撤掉 ── */
 const tplAreas = B.page.nodes.filter((n) => n.type === "textarea");
 ok('R57b：空模板必须显示**空白**（不是 0）—— Number("") === 0 的老坑',
-  tplAreas.length >= 2 && tplAreas.every((n) => n.props.value === ""),
-  `实际 value=${JSON.stringify(tplAreas.map((n) => n.props.value))} ⇒ 显示 0 会让用户以为模板该填数字（用户实测反馈）`);
-ok('R57：模板输入框放大（rows ≥ 8 + 独立 class dcp-tpl，不再与只读 pre 共用小样式）',
-  tplAreas.length >= 2 && tplAreas.every((n) => n.props.rows >= 8 && n.props.className === "dcp-tpl"),
-  `实际 ${tplAreas.length} 个 textarea：${tplAreas.map((n) => `${n.props.className}/rows=${n.props.rows}`).join(', ')}`);
-ok('R57：每个模板框**旁边**有「查看内置文案」按钮',
-  B.page.nodes.filter((n) => n.type === "button" && String(n.props.children ?? "").includes("查看内置文案")).length >= 2,
-  '按钮缺失 ⇒ 用户无法查看内置原文（需求原话：改成一个按钮，点击查看，放在输入框旁边）');
-ok('R57：内置文案来自 host 下发的 inj.builtinBrief/builtinCard（不在 client 复制一份）',
-  /inj\?\.builtinBrief/.test(SRC) && /inj\?\.builtinCard/.test(SRC),
-  'client 自持一份内置文案 ⇒ 与 host 漂移（改一处忘另一处）');
-
-/* ── R60（2026-10-19 用户实测）：① 缺「思考强度教学」输入框 ② 六段原文要点按钮才展开 ── */
-ok('R60：模板输入框有**三个**（新增「思考强度教学模板」——用户要求补的）',
-  tplAreas.length >= 3,
-  `实际 ${tplAreas.length} 个 textarea ⇒ 思考强度教学仍缺输入框（用户实测反馈）`);
-ok('R61：六段注入原文**默认收起**，且**整段一个**开关（用户反馈「查看按钮重复了」）',
-  /const \[injAll, setInjAll\] = react\.useState\(false\)/.test(SRC)
-  && /injAll \? el\("pre"/.test(SRC)
-  && /"收起全部原文" : "展开全部原文"/.test(SRC)
-  && !/setInjOpen/.test(SRC),
-  '仍每行一个「查看」⇒ 6 个重复按钮（用户实测反馈）；或未默认收起 ⇒ 一屏上千行');
-
-ok('R58/R62：内置文案缺席时给出**可操作**提示（点「刷新注入数据」+ toggle 加载新版 host）',
-  /toggle 插件/.test(SRC) && /刷新注入数据/.test(SRC),
-  '只说"暂无" ⇒ 用户不知道该怎么办（PANEL-HOWTO §0：host 改动要 toggle 或重启）');
-
-/* ── R62（2026-10-19 用户实测三条）：板块放进卡片 / 按钮有反应 / 内置文案不空 ── */
-const iGrid = SRC.indexOf('className: "dcp-grid"');
-const iInjSec = SRC.indexOf("injSec,");
-const iActions = SRC.indexOf('className: "dcp-actions"', iGrid);
-ok('R62：本轮注入板块已**放进带边框的卡片**（.dcp-grid 内、强制压缩冷却之后）',
-  iGrid > 0 && iInjSec > iGrid && iActions > 0 && iInjSec < iActions,
-  'injSec 仍是 .dcp-grid 的兄弟节点 ⇒ 板块落在卡片外面（用户实测「现在没包含进去」）');
-ok('R62：刷新按钮有**可见反馈**，且无注入时展开按钮禁用（用户反馈「2 个按钮点击没什么反应」）',
-  /refreshInj/.test(SRC) && /已刷新注入数据/.test(SRC)
-  && /disabled: inj === null/.test(SRC) && /本轮还没有注入记录，没有原文可展开/.test(SRC),
-  '点了没任何反馈 / 无内容时展开按钮仍可点 ⇒ 用户以为按钮坏了');
-
-/* ── R63（2026-10-19 用户实测）：模板留空时「内置文案」与本轮注入同名段重复 ── */
-ok('R63：模板留空且已有注入时**不重复展示**内置文案（改为指向下方同名段的一句话）',
-  /const tplIsDupOfInj = \(field\) => String\(valueOf\(field\) \?\? ""\)\.trim\(\) === "" && inj !== null;/.test(SRC)
-  && /tplIsDupOfInj\(field\)/.test(SRC)
-  && /见下方板块，不重复展示/.test(SRC),
-  '仍无条件给「查看内置文案」⇒ 与下方「本轮注入」同名段一模一样（用户实测：2 处重复）');
-ok('R63：模板非空或尚无注入记录时仍可查看内置文案（那时它不是重复）',
-  /!tplIsDupOfInj\(field\) && tplOpen === field\.key/.test(SRC),
-  '一律隐藏 ⇒ 设了模板的人反而看不到对照的默认文案');
-
-/* ── R64（2026-10-19 用户实测「只剩 2 个？」）：按时机注入的四段普通一轮就是空的 ── */
-ok('R64：六段注入原文**恒显六行**，空的行写明「本轮未注入（原因）」',
-  (SRC.match(/injBlock\("/g) ?? []).length >= 6
-  && /本轮未注入（\$\{when\}）/.test(SRC)
-  && !/const injBlock = \(title, text\) => \(text \?/.test(SRC),
-  '空段直接不渲染 ⇒ 普通一轮只看得到 2 行，用户会以为功能丢了（实测「只剩 2 个？」）');
-
-/* ── R59：本轮活值 / 生效配置必须并进板块标题行（用户要求「移到板块里面」）──
- * ⚠️ 渲染层断不到「活值」文本：它来自 `inj`，而 `inj` 由 `hudRemoteSvc.getHud()` 填充
- * （句柄经 `ctx.inject` 注入）——沙箱不桩这条远端链路 ⇒ `inj` 恒 null。故本条用**源码形状**断言
- * （精确限定在 `className: "dcp-inj-h"` 块内），渲染层只断言标题行本身存在且能折行。 */
-const injHdrBlock = (() => {
-  const i = SRC.indexOf('className: "dcp-inj-h"');
-  if (i < 0) return "";
-  const j = SRC.indexOf('className: "dcp-inj-n" }, "插件实际写进上下文', i);
-  return SRC.slice(i, j < 0 ? i + 3000 : j);
-})();
-ok('R59：本轮活值 + 生效配置已并入「本轮注入」板块**标题行**（不再散落在板块底部）',
-  /本轮活值/.test(injHdrBlock) && /生效配置/.test(injHdrBlock),
-  '标题行块（dcp-inj-h）里没有活值/生效配置 ⇒ 又跑回板块底部了');
-ok('R59：板块底部不再残留活值/生效配置（防"两处都渲染"的重复）',
-  !/className: "dcp-inj-n", key: "vals"/.test(SRC),
-  '底部仍保留 key:"vals" 那行 ⇒ 同一信息渲染两次');
-const injHdrRendered = B.page.nodes.find((n) => n.props?.className === "dcp-inj-h");
-ok('R59：标题行确实渲染出来（含板块名 + 刷新按钮）',
-  injHdrRendered !== undefined && /刷新/.test(JSON.stringify(injHdrRendered?.props?.children ?? null)),
-  '标题行没渲染或缺刷新按钮');
-ok('R59：标题行是可换行的 flex 行（并进来后一行放不下，必须能折行）',
-  /\.dcp-inj-h\{display:flex;flex-wrap:wrap/.test(SRC),
-  '标题行不是 flex-wrap ⇒ 内容溢出或挤成一团');
+  tplAreas.length >= 3 && tplAreas.every((n) => n.props.value === ""),
+  `实际 value=${JSON.stringify(tplAreas.map((n) => n.props.value))} ⇒ 显示 0 会让用户以为模板该填数字`);
+ok('R57：模板输入框放大（rows ≥ 8 + 独立 class dcp-tpl）',
+  tplAreas.length >= 3 && tplAreas.every((n) => n.props.rows >= 8 && n.props.className === "dcp-tpl"),
+  `实际 ${tplAreas.length} 个 textarea`);
+const btnText = (kw) => B.page.nodes.filter((n) => n.type === "button" && String(n.props.children ?? "").includes(kw)).length;
+ok('R65：三个模板行各有「查看内置文案」+「复制内置文案」两个按钮',
+  btnText("查看内置文案") >= 3 && btnText("复制内置文案") >= 3,
+  `查看=${btnText("查看内置文案")} 复制=${btnText("复制内置文案")}（各需 ≥3）`);
+ok('R65：「本轮注入（只读）」板块**整段撤掉**（用户：「太乱了…可以不要」）',
+  !/className: "dcp-inj"/.test(SRC) && !/injSec/.test(SRC) && !/injBlock/.test(SRC) && !/injAll/.test(SRC),
+  '注入区仍在渲染 ⇒ 与三个模板的内置文案重复，面板太乱');
+ok('R65：内置文案仍来自 host（inj.builtinBrief ?? cfg.builtins.brief），不在 client 复制一份',
+  /inj\?\.builtinBrief \?\? cfg\?\.builtins\?\.brief/.test(SRC) && /cfg\?\.builtins\?\.effBrief/.test(SRC),
+  'client 自持一份内置文案 ⇒ 与 host 漂移');
+ok('R65：复制内置文案有可见反馈（已复制 / 暂无内置文案）',
+  /"复制内置文案"/.test(SRC) && /已复制「/.test(SRC) && /暂无内置文案/.test(SRC),
+  '复制按钮没说清结果 ⇒ 用户不知道复制是否成功');
+ok('R58/R62：内置文案缺席时给出**可操作**提示（toggle 加载新版 host）',
+  /toggle 插件/.test(SRC),
+  '不提示 toggle ⇒ 用户不知道 host 改动需要 toggle（PANEL-HOWTO §0）');
 
 /* ── R56d：失败必须可见（结构 + 行为）── */
 const src = SRC;
