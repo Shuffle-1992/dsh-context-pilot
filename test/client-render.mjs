@@ -3,24 +3,27 @@
  * test/client-render.mjs —— **客户端配置卡真渲染冒烟**（R56b 新增；此前是明确的验证盲区）。
  *
  * ## 为什么必须有这一套
- * 用户连续两轮实测「插件详情页没有看到配置卡」。真因：`apply()` 里 `scope.getSnapshot` 的
- * **兜底分支写的是 `settingsScope.getSnapshot()`**，而下方 `settingsScope = scope` 又把它指回
- * 自己 ⇒ 命名空间未就绪时 `getSnapshot` **自我递归** ⇒ 渲染期
- * `RangeError: Maximum call stack size exceeded` ⇒ 被 `CardBoundary` 捕获 ⇒ `return null`
- * ⇒ **配置卡从来就没渲染过**（用户历次截图里那块空白）。
+ * 用户连续三轮实测「插件详情页没有看到配置卡」。前两轮真因：
+ *   ① `scope.getSnapshot` 兜底分支写 `settingsScope.getSnapshot()` 而 `settingsScope = scope`
+ *      指回自己 ⇒ 命名空间未就绪时**自我递归** ⇒ `RangeError`；
+ *   ② `pct1` 定义在 `hintFor` 内部、却在 summary 分支外面调用 ⇒ `ReferenceError`。
+ * 两者都被 `CardBoundary` 捕获 ⇒ 页面**一片空白**，只在控制台留一条 warn。
  *
- * ⚠️ 这类 bug 的共同形态：**渲染期异常被错误边界吞掉** ⇒ 页面"什么都没有"，只在控制台留一条
- * `console.warn`。而 `contract.mjs` / `static.mjs` 都是**源文本断言**，对「未定义标识符 / 自递归」
- * 完全无效（`node --check` 也只查语法）——本项目已经栽过四次（R54 F1/F3、§6.17 `PriceCalculator`、
- * R56 `pct1`、R56b 自递归）。⇒ 必须有**真把组件跑起来**的测试。这一套就是它。
+ * ⚠️ 这类 bug 的共同形态：**渲染期/effect 期异常被错误边界吞掉**。`contract.mjs` / `static.mjs`
+ * 都是**源文本断言**，对「未定义标识符 / 自递归 / Hook 顺序」完全无效（`node --check` 只查语法）。
+ * 本项目已栽过四次（R54 F1/F3、§6.17 `PriceCalculator`、R56 `pct1`、R56b 自递归）
+ * ⇒ 必须有**真把组件跑起来**的测试。
  *
- * ## 它做什么
+ * ## 它做什么（尽量贴近真机，别只跑 render 体）
  * 把 `plugin/client.js` 装进 `vm` 沙箱（React 桩 + 宽松 DOM 桩），**真跑** `apply(ctx)`，
- * 拿到注册进 `plugins.bundle.config` 的组件，再**真调用**它的 render 体（`page` / `summary`），
- * 覆盖三种运行时：
- *   A `configForms` 不可用     ⇒ 只读占位必须渲染（不得抛）
- *   B `configForms` 就绪       ⇒ **必须渲染出配置网格 `dcp-grid` 与「本轮注入」区 `dcp-inj`**
- *   C 命名空间未列出           ⇒ 只读占位必须渲染（不得抛）
+ * 拿到注册进 `plugins.bundle.config` 的组件，然后：
+ *   - **真调用** render 体（`page` / `summary`）；
+ *   - **真执行** `useEffect` 的回调（R56d 补：effect 里抛错同样会被边界吞掉，而旧版探针**不跑 effect** ⇒ 漏检）；
+ *   - **校验 Hook 顺序**（同一 view 连渲两次，调用序列必须一致——React 的
+ *     "Rendered fewer hooks than expected" 就是这么判的）；
+ *   - **捕获沙箱 console.warn/error**（边界失败时会 warn ⇒ 断言"渲染全程零告警"是最直接的护栏）；
+ *   - 断言失败时**卡片必须可见**（R56d：`CardBoundary` 不再 `return null`）。
+ * 覆盖三种运行时：A `configForms` 不可用 / B 就绪 / C 命名空间未列出。
  *
  * 退出码：0 = 全通过；1 = 有失败。
  */
@@ -43,17 +46,6 @@ const ok = (name, cond, detail) => {
 
 const SRC = readFileSync(join(ROOT, 'plugin', 'client.js'), 'utf8');
 
-/* ── React 桩：够跑通函数组件的 render 体（hook 只需返回可用值，不需要真调度） ── */
-const mkReact = () => ({
-  createElement: (type, props, ...children) => ({ $$v: true, type, props: { ...(props ?? {}), children } }),
-  useState: (init) => [typeof init === 'function' ? init() : init, () => {}],
-  useEffect: () => {}, useCallback: (f) => f, useMemo: (f) => f(), useRef: (init) => ({ current: init }),
-  Fragment: 'Fragment',
-  Component: class {
-    constructor(props) { this.props = props ?? {}; this.state = {}; }
-    setState(next) { Object.assign(this.state, typeof next === 'function' ? next(this.state) : next); }
-  },
-});
 /* 宽松 DOM 桩：只为不干扰「组件渲染体」这条路径（不是 DOM 测试） */
 const anyProxy = new Proxy(function () {}, {
   get: (t, k) => (k === Symbol.toPrimitive ? () => '' : k === 'toString' ? () => '[proxy]' : anyProxy),
@@ -70,7 +62,7 @@ const mkForms = (namespaces) => ({
   get: () => ({ getSnapshot: () => ({ status: 'ready', writable: true, value: READY_VALUE }), subscribe: () => () => {}, set: async () => true }),
 });
 
-/** 只走 vnode（`$$v`）的遍历——绝不进 `props` 本体，否则会自环（写探针时真踩过）。 */
+/** 只走 vnode（`$$v`）的遍历——绝不进 `props` 本体，否则会自环；数组要显式展开（`FIELDS.map` 是嵌套数组）。 */
 const classesOf = (root) => {
   const out = [];
   const walk = (node) => {
@@ -84,10 +76,33 @@ const classesOf = (root) => {
   return out;
 };
 
-/** 装沙箱 → 跑 apply → 拿注册 → 真调 render 体。返回 { page, summary } 各自的结果。 */
+/** 装沙箱 → 跑 apply → 拿注册 → 真渲两遍 + 真跑 effect。 */
 function renderCard(ctxGet) {
   let captured = null;
   let registration = null;
+  const warnings = [];
+  const hookLog = [];
+  const effects = [];
+
+  const mkReact = () => ({
+    createElement: (type, props, ...children) => ({ $$v: true, type, props: { ...(props ?? {}), children } }),
+    useState: (init) => { hookLog.push('useState'); return [typeof init === 'function' ? init() : init, () => {}]; },
+    useEffect: (fn) => { hookLog.push('useEffect'); effects.push(fn); },
+    useCallback: (fn) => { hookLog.push('useCallback'); return fn; },
+    useMemo: (fn) => { hookLog.push('useMemo'); return fn(); },
+    useRef: (init) => { hookLog.push('useRef'); return { current: init }; },
+    Fragment: 'Fragment',
+    Component: class {
+      constructor(props) { this.props = props ?? {}; this.state = {}; }
+      setState(next) { Object.assign(this.state, typeof next === 'function' ? next(this.state) : next); }
+    },
+  });
+
+  const sandboxConsole = {
+    info: () => {}, log: () => {},
+    warn: (...a) => warnings.push(['warn', ...a].map(String).join(' ')),
+    error: (...a) => warnings.push(['error', ...a].map(String).join(' ')),
+  };
   const win = {
     __ModuleLoader__: { load: (def) => { captured = def; } },
     __DSH_CONTEXT_PILOT__: {}, addEventListener: () => {}, removeEventListener: () => {},
@@ -99,7 +114,7 @@ function renderCard(ctxGet) {
     window: win, document: anyProxy, navigator: win.navigator, localStorage: win.localStorage,
     MutationObserver: class { observe() {} disconnect() {} },
     setTimeout: win.setTimeout, clearTimeout: win.clearTimeout, setInterval: win.setInterval, clearInterval: win.clearInterval,
-    console: { info: () => {}, warn: () => {}, error: () => {}, log: () => {} },
+    console: sandboxConsole,
     JSON, Math, String, Number, Boolean, Array, Object, Date, RegExp, Error, Symbol, Promise, Set, Map,
     isNaN, parseInt, parseFloat,
   };
@@ -109,7 +124,7 @@ function renderCard(ctxGet) {
 
   const mod = captured.factory((name) => (name === 'react' ? mkReact() : anyProxy));
   const ctx = {
-    get: ctxGet, on: () => {}, effect: () => {}, logger: console,
+    get: ctxGet, on: () => {}, effect: () => {}, logger: sandboxConsole,
     slots: {
       inject: (name, factory) => { if (name === 'plugins.bundle.config') registration = factory(); return { dispose() {} }; },
       register: (cfg, comp) => ({ cfg, comp }),
@@ -119,19 +134,38 @@ function renderCard(ctxGet) {
   const api = mod.exports ?? mod;
   try { api.apply(ctx); } catch { /* apply 自身 try/catch，这里只保证测试继续 */ }
 
-  const out = { registered: registration !== null, cfg: registration?.cfg ?? null };
+  const out = { registered: registration !== null, cfg: registration?.cfg ?? null, warnings };
+  const firstOrder = {};
   for (const view of ['page', 'summary']) {
-    const r = { threw: null, failed: false, classes: [], root: null };
-    try {
-      const boundary = new registration.comp({ view });
-      const vnode = boundary.render();
-      if (boundary.state.failed) r.failed = true;
-      else {
-        const inner = vnode.type({ ...(vnode.props ?? {}), view });
-        r.root = inner?.type ?? typeof inner;
-        r.classes = classesOf(inner);
+    const r = { threw: null, failed: false, classes: [], root: null, hookOrderChanged: false, effectThrew: null };
+    for (const pass of [1, 2]) {
+      hookLog.length = 0;
+      effects.length = 0;
+      try {
+        const boundary = new registration.comp({ view });
+        const vnode = boundary.render();
+        if (boundary.state.failed) {
+          /* R56d：失败时边界必须渲染**可见**诊断，而不是 null（否则页面一片空白、无从排查） */
+          r.failed = true;
+          r.classes = classesOf(vnode);
+          r.root = vnode?.type ?? null;
+        } else {
+          const inner = vnode.type({ ...(vnode.props ?? {}), view });
+          r.root = inner?.type ?? typeof inner;
+          r.classes = classesOf(inner);
+        }
+      } catch (e) { r.threw = `${e.constructor.name}: ${e.message}`; }
+      const order = hookLog.join(',');
+      if (pass === 1) firstOrder[view] = order;
+      else if (order !== firstOrder[view]) r.hookOrderChanged = true;
+      /* 真跑 effect（只跑第一遍的，模拟挂载）；effect 抛错同样会被错误边界吞掉 ⇒ 必须检 */
+      if (pass === 1) {
+        for (const fn of effects) {
+          try { const ret = fn(); if (ret && typeof ret.then === 'function') ret.catch(() => {}); }
+          catch (e) { r.effectThrew = `${e.constructor.name}: ${e.message}`; }
+        }
       }
-    } catch (e) { r.threw = `${e.constructor.name}: ${e.message}`; }
+    }
     out[view] = r;
   }
   return out;
@@ -143,36 +177,36 @@ const B = renderCard((key) => (key === 'configForms'
   : undefined));
 const C = renderCard((key) => (key === 'configForms' ? mkForms([]) : undefined));
 
-console.log('\n== R56b 客户端配置卡真渲染冒烟（plugins.bundle.config）==');
+console.log('\n== R56b/d 客户端配置卡真渲染冒烟（plugins.bundle.config）==');
 
 ok('三种运行时都能拿到 plugins.bundle.config 注册',
   A.registered && B.registered && C.registered,
   '注册没拿到 ⇒ 卡片不可能出现在插件详情页');
-ok('注册 key = 包名 dsh-context-pilot（slot 契约：owner 按 pkg.name 派发）',
+ok('注册 key = 包名 dsh-context-pilot（slot 契约：owner 按 pkg.name 派发；profile 两个 junction 的 name 都是它）',
   B.cfg?.key === 'dsh-context-pilot',
   `实际 key=${B.cfg?.key} ⇒ 键写错则永不命中（页面空白）`);
 
-/* A：命名空间未就绪 ⇒ 只读占位，**绝不能抛**（自递归事故的回归点） */
-ok('A 命名空间未就绪 / page：渲染不抛（自递归回归护栏）',
-  A.page.threw === null && !A.page.failed,
-  `抛了 ${A.page.threw ?? 'CardBoundary failed'} ⇒ 整卡静默消失（用户实测事故）`);
-ok('A / page：渲染出只读占位（dcp-summary + dcp-panel）',
+/* ── 三场景 × 两视图的**硬门槛**：不抛、不 failed、effect 不抛、Hook 顺序稳定、零告警 ── */
+for (const [label, R] of [['A 未就绪', A], ['B 就绪', B], ['C 命名空间未列出', C]]) {
+  for (const view of ['page', 'summary']) {
+    const r = R[view];
+    ok(`${label} / ${view}：渲染不抛、边界未失败、effect 不抛`,
+      r.threw === null && !r.failed && r.effectThrew === null,
+      `render=${r.threw ?? 'ok'} boundary=${r.failed ? 'failed（卡片被摘掉）' : 'ok'} effect=${r.effectThrew ?? 'ok'}`);
+    ok(`${label} / ${view}：Hook 顺序两次渲染一致（React 会判 Rendered fewer hooks）`,
+      r.hookOrderChanged === false,
+      'Hook 顺序变化 ⇒ React 抛错 ⇒ 整卡消失');
+  }
+}
+ok('三种运行时渲染全程**零 console 告警**（边界失败必 warn ⇒ 这是最直接的护栏）',
+  A.warnings.length === 0 && B.warnings.length === 0 && C.warnings.length === 0,
+  `告警：${[...A.warnings, ...B.warnings, ...C.warnings].slice(0, 2).join(' | ')}`);
+
+/* ── 具体形态 ── */
+ok('A / page：渲染出只读占位（dcp-panel + dcp-summary）',
   A.page.classes.includes('dcp-panel') && A.page.classes.includes('dcp-summary'),
   `实际 class=${A.page.classes.join(',') || '（空）'}`);
-ok('A / summary：渲染出汇总行（dcp-summary），不抛',
-  A.summary.threw === null && A.summary.classes.includes('dcp-summary'),
-  `抛了 ${A.summary.threw ?? '无 dcp-summary'}`);
-
-/* C：configForms 在但没列出本命名空间 ⇒ 同 A */
-ok('C 命名空间未列出 / page：渲染不抛（同上回归点）',
-  C.page.threw === null && !C.page.failed,
-  `抛了 ${C.page.threw ?? 'CardBoundary failed'}`);
 ok('C / page：渲染出只读占位', C.page.classes.includes('dcp-panel'), `class=${C.page.classes.join(',')}`);
-
-/* B：就绪 ⇒ **用户要看的表单与注入区必须真渲染出来** */
-ok('B 命名空间就绪 / page：渲染不抛',
-  B.page.threw === null && !B.page.failed,
-  `抛了 ${B.page.threw ?? 'CardBoundary failed'}`);
 ok('B / page：**渲染出配置网格 dcp-grid**（用户要的表单本体）',
   B.page.classes.includes('dcp-grid'),
   `class=${B.page.classes.join(',')} ⇒ 只有占位说明命名空间没绑上`);
@@ -182,12 +216,22 @@ ok('B / page：**渲染出「本轮注入（只读）」区 dcp-inj**（R55 新�
 ok('B / page：配置行数量与 FIELDS 对得上（≥12 行 dcp-row）',
   B.page.classes.filter((c) => c === 'dcp-row').length >= 12,
   `实际 ${B.page.classes.filter((c) => c === 'dcp-row').length} 行`);
-ok('B / page：带出保存/恢复按钮（dcp-actions 存在）',
+ok('B / page：带出保存/恢复按钮',
   B.page.classes.some((c) => c.startsWith('dcp-action')) || B.page.classes.includes('dcp-actions'),
   `class=${B.page.classes.join(',')}`);
 ok('B / summary：渲染出汇总行（dcp-summary），不抛',
   B.summary.threw === null && B.summary.classes.includes('dcp-summary'),
   `抛了 ${B.summary.threw ?? '无 dcp-summary'}`);
+
+/* ── R56d：失败必须可见（结构 + 行为）── */
+const src = SRC;
+ok('R56d：CardBoundary 失败时**不再 return null**（渲染可见诊断块）',
+  /if \(this\.state\.failed\) \{[\s\S]{0,400}?className: "dcp-panel"/.test(src) &&
+  !/if \(this\.state\.failed\) return null;/.test(src),
+  '失败即 return null ⇒ 页面一片空白、用户无任何线索（三轮排查都栽在这里）');
+ok('R56d：诊断块里带**错误消息**（用户截图即可定位，不必开 F12）',
+  /错误：\$\{this\.state\.message\}/.test(src) && /getDerivedStateFromError\(error\)/.test(src),
+  '只显示"失败"而不显示原因 ⇒ 仍要用户开 F12 才能定位');
 
 console.log(`\n${'='.repeat(52)}\n客户端渲染冒烟：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}\n${'='.repeat(52)}`);
 process.exit(failures ? 1 : 0);

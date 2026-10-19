@@ -1567,10 +1567,17 @@ ok('自动钳制仅在可写 + 上限已知 + 就绪时执行',
 /* ═══ R7 审查（D5/E1/E6）：客户端三处结构性缺陷的护栏 ═══ */
 ok('CardBoundary 是**真正的** React 错误边界（不是只 try/catch 渲染期）',
   /class CardBoundary extends react\.Component/.test(client)
-  && /static getDerivedStateFromError\(\)/.test(client)
+  && /static getDerivedStateFromError\(/.test(client)
   && /componentDidCatch\(error\)/.test(client)
   && !/function CardBoundary\(props\)/.test(client),
   '仅 try/catch ⇒ effect / 事件回调 / 异步 setState 的异常仍会把整个插件详情页打崩（已出过一次真事故）');
+/* R56d：边界"隔离"不等于"静默" —— 失败必须可见（用户三轮排查都栽在 return null 的空白上） */
+ok('R56d：错误边界失败时渲染**可见诊断**（含错误消息），不再 return null',
+  /getDerivedStateFromError\(error\)/.test(client)
+  && /this\.state = \{ failed: false, message: "" \}/.test(client)
+  && /错误：\$\{this\.state\.message\}/.test(client)
+  && !/if \(this\.state\.failed\) return null;/.test(client),
+  '静默 return null ⇒ 页面一片空白、用户零线索（三轮排查都卡在这里）');
 ok('弹窗「距智能压缩线」的数据源真的搬进来了（E1 修）',
   /occupancyRatio: typeof r\.occupancyRatio === "number"/.test(client)
   && /occupancyWindow: typeof r\.occupancyWindow === "number"/.test(client)

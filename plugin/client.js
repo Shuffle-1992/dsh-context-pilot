@@ -734,16 +734,28 @@ window.__ModuleLoader__.load({
 		class CardBoundary extends react.Component {
 			constructor(props) {
 				super(props);
-				this.state = { failed: false };
+				this.state = { failed: false, message: "" };
 			}
-			static getDerivedStateFromError() {
-				return { failed: true };
+			static getDerivedStateFromError(error) {
+				return { failed: true, message: String((error && error.message) || error || "未知错误") };
 			}
 			componentDidCatch(error) {
 				console.warn(`${LOG} 卡片渲染失败（已隔离，面板其余部分不受影响）:`, error && error.message);
 			}
+			/* ═══ R56d（2026-10-19）：失败时**必须可见**，不许静默 return null ═══
+			 * 事故教训：用户连续三轮「插件详情页没有看到配置卡」，而卡片之所以"没有"，
+			 * 是渲染期异常被这里吞成 `return null` ⇒ 页面上**一片空白、零线索**（只有控制台
+			 * 一条 warn，而用户不会开 F12）⇒ 排查成本极高。
+			 * 现在失败时渲染一行**自解释**诊断（含错误消息），用户截图即可定位；
+			 * 隔离粒度不变：坏的只是这一张卡，插件详情页其余部分与宿主 UI 不受影响。 */
 			render() {
-				if (this.state.failed) return null;
+				if (this.state.failed) {
+					return el("div", { className: "dcp-panel" },
+						el("div", { className: "dcp-summary" }, "⚠️ 配置卡渲染失败（已隔离，不影响 DSH 其余部分）"),
+						el("div", { className: "dcp-hint" }, `错误：${this.state.message}`),
+						el("div", { className: "dcp-hint" }, "请把这一行截图给开发者；浏览器控制台有完整堆栈。"),
+					);
+				}
 				return el(PilotPanelCard, this.props);
 			}
 		}

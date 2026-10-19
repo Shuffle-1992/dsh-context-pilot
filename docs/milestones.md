@@ -3752,3 +3752,32 @@ keyed 槽位 key 写错静默不渲染；`dsh.client` 要 `{platform:'web', imme
   `getSnapshot` 自递归（R56b，v0.1.45 已修）。⇒ 面板"不显示"的第四种形态：
   **槽位里有你那条 active:true，但组件渲染时抛错 ⇒ 页面空白**。这类只能靠**真渲染**发现
   （`test/client-render.mjs`），Slots/Config inspect 与源断言都看不出来。
+
+### R56d 配置卡"静默消失"第三轮：让失败**可见** + 探针贴近真机（2026-10-19）
+
+用户重启后（v0.1.46）仍看不到配置卡。本轮查清并处理三件事：
+
+**1. key 无罪（证据）**：profile 里有两个 junction（`node_modules\dsh-context-pilot` 与
+`node_modules\@local\dsh-context-pilot`）**都指向 `F:\My Code\dsh-context-pilot\plugin`**，
+两者 package.json 的 `name` 都是 `dsh-context-pilot` ⇒ 与 owner 派发的 `pkg.name` 一致；
+实时 Slots 也显示我们的 occupant `active:true`。owner 的门槛是
+`bundles = keysOf("plugins.bundle.config")`（读 `entry.options.key`）⇒ **我们的 key 在集合里**
+⇒ **卡片是被派发、被渲染的**。⇒ 排除"键写错 / 没注册"。
+
+**2. 探针补盲（`test/client-render.mjs` 13 → 24 断言）**：旧探针**不跑 `useEffect`**、不校验
+Hook 顺序 ⇒ 漏掉两类同样会被边界吞掉的异常。现补：真执行 effect（含 promise 拒绝兜底）、
+同一 view 连渲两次校验 Hook 序列一致、捕获沙箱 `console.warn/error` 并断言"渲染全程零告警"。
+补完后三场景 × 两视图 **24/24 通过** ⇒ **组件本身健康** ⇒ 空白另有原因（下条）。
+
+**3. `CardBoundary` 失败必须可见（本轮产品级改动）**：原先失败 `return null` ⇒ 页面**一片空白、
+零线索**（只有控制台一条 warn，而用户不会开 F12）⇒ 三轮排查都卡在这里。
+现改为渲染一行**自解释诊断**：`⚠️ 配置卡渲染失败（已隔离…）` + `错误：<message>` + 提示看控制台。
+⇒ 用户下次截图即可定位，不必开 F12。隔离粒度不变（坏的只是这一张卡）。
+
+**下一步判据（三种结果都信息量十足）**：硬刷新（Ctrl+Shift+R）后——
+① 看到**完整表单** ⇒ 修好了（此前浏览器很可能跑的是缓存的旧 client.js）；
+② 看到**⚠️ 诊断块 + 错误消息** ⇒ 边界抓到具体错误 ⇒ 直接可修；
+③ **仍然一片空白** ⇒ 卡片根本没被派发 ⇒ 回 owner 派发侧继续查。
+
+**守卫**：contract 1 条（失败可见 + 带错误消息）、client-render 2 条（结构 + 行为）；
+变异（改回 `return null`）⇒ **2 条同时红** ✓ CAUGHT。

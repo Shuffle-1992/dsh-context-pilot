@@ -52,10 +52,12 @@ profile `package.json` 两处要改（以本机 `desktop` profile 为例）：
 
 **当前版本 `v0.1.8`** · 逐版本历史与实证记录见 [`docs/milestones.md`](docs/milestones.md)。
 
-### 最近更新（v0.1.6 → v0.1.46）
+### 最近更新（v0.1.6 → v0.1.47）
 
 | 版本 | 更新 | 为什么值得知道 |
 | --- | --- | --- |
+| **v0.1.47** | **配置卡失败必须可见（R56d）** | CardBoundary 原先失败 eturn null ⇒ 页面**一片空白零线索**（只有控制台 warn）⇒ 三轮排查都卡在这里。现渲染自解释诊断（含**错误消息**）。探针补盲：真跑 useEffect + 校验 Hook 顺序 + 捕获 console 告警，client-render 13 → **24 断言**；三场景 × 两视图全绿 ⇒ 组件本身健康。另用证据排除 key 问题（两个 junction 的 
+ame 都是 dsh-context-pilot，occupant ctive:true）。**859 断言** |
 | **v0.1.46** | **dsh.client 形状对齐 + 清单核对** | 补 immediately: true（对齐 dsh-dispatch；**不是**本次原因——zcode 无它照样渲染）；static 加 2 条守卫。逐条核对用户转来的排查清单：槽位 vailable:true、key = 包名、occupant **active:true** ⇒ 清单三条假设全部不成立；真因是清单之外的第四种形态——**注册成功但渲染期抛异常被边界吞掉**（R56b 自递归）。**847 断言** |
 | **v0.1.45** | **配置卡整卡消失的真根因（R56b）** | scope.getSnapshot 的兜底写 settingsScope.getSnapshot()，而 settingsScope = scope 指回自己 ⇒ 命名空间未就绪时**自我递归** ⇒ 渲染期 RangeError ⇒ 被 CardBoundary 吞掉 ⇒ **配置卡从来就没渲染过**（R56 修的 pct1 只是被它挡住的第二个 bug）。兜底改为独立常量 UNAVAILABLE_SCOPE。**新增第 5 套件 	est/client-render.mjs**（React 桩真渲染冒烟，三运行时 × 两 view，13 断言，变异 CAUGHT 5 条）⇒ **845 断言** |
 | **v0.1.44** | **配置卡整卡消失的根因修复（R56）** | pct1 定义在 hintFor **内部**、却在 summary 分支外面被调用 ⇒ 渲染期 ReferenceError ⇒ 被 CardBoundary 吞掉 ⇒ **整张配置卡静默消失**（用户实测「这个界面没有看到」）。已提到组件作用域；contract 加 3 条守卫（缩进锚定 + 单一声明 + 边界留痕），变异 CAUGHT。**这是本项目第三次同型事故**（R54 F1/F3、§6.17）⇒ 记录已知缺口：需要 AST 级未定义标识符扫描或 React 真渲染冒烟。**830 断言** |
@@ -346,7 +348,7 @@ Agent 自改档不应改掉新会话的默认档。
 **已完成**：M1–M5（用量读取 / 每轮注入 / 会话自说明 / HUD 弹窗 / 历史持久化）、R1–R21
 （智能思考 + 换档工具、压缩改工具触发、保留范围自算、全面审查加固、**压缩档位三选一**、
 工具后自检回执、回执按会话隔离、**用户手动改档的轮首知情**、**单档模型零注入 + 工具静默**）。**9 个域模块 + core**，`host.impl.mjs` **1836 → 518 行**。
-**测试**：contract 679 + static 79 + report 54 + boot 22 + client-render 13 = **847 断言**全绿；关键回归均有变异验证。
+**测试**：contract 680 + static 79 + report 54 + boot 22 + client-render 24 = **859 断言**全绿；关键回归均有变异验证。
 逐里程碑台账（含踩坑与实测数值）：[`docs/milestones.md`](docs/milestones.md)；
 早期进度历史存档：[`docs/status-archive.md`](docs/status-archive.md)。
 
@@ -368,7 +370,7 @@ npm run test:report   # 只跑报告形状
 | `report.mjs` | 54 | 产出侧字段契约；`republishFromReport`（原 `bfOnce`）回填链依赖；C3② 关键事件必须走 full 档（含**满环优先淘汰 slim**，防 FULL 取证被高频事件挤出）；**getHud 作用域与 criticalCap 实参契约**；**调查结论留档**（探针退役后结论不得丢）；真实报告结构自洽（**无嵌套条件断言** ⇒ 断言数不得随数据漂移）；`hud-acts.json` 去重；dump 工具可跑 | 报告形状无声破坏（踩过 2 次：顶层读 m3/m5、脚本读已删字段）；**证据静默丢失**（120 条全 slim、FULL 被挤光而断言全绿） |
 | `boot.mjs` | 21 | **宿主启动冒烟**：真跑 `apply(ctx, {}, {pluginDir, reportPath})`（桩 ctx）→ HUD 面注册 → **真调 `getHud(null)` 必须 `ok:true`** → `criticalCap`/occupancy/`effortEnabled` 三线 → 四个监听器 → **真调 pre-step handler**（abort 与 step=1 两次）→ **M2 注入路径留下记账**（`m2.skips` 有键或 injections>0）→ 有历史时 `m5.lastPublish==='ok'` → 报告落盘。副作用边界：报告写临时目录、`hud-acts.json` 只读不写 | **接线不可达**（R11 真事故：接线块被嵌进 `schedule()` 函数体、语法合法、423 条源断言全绿，**压缩与弹窗全链路静默失效**）——`node --check` 与源断言都看不见「代码在不在正确的函数里」 |
 
-合计 **847 条断言**（四套：contract / static / report / **boot**）。
+合计 **859 条断言**（四套：contract / static / report / **boot**）。
 
 **已验证有效**：注入 3 个人为 bug（`m3-act` 误入精简档 / client face 改名 / host 引用 client.js），
 三套件全部抓到且定位精准。**新增断言均实测验证过「对回归确实失败」**（两边都通过的测试等于没测）：
