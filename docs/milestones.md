@@ -3781,3 +3781,31 @@ Hook 顺序 ⇒ 漏掉两类同样会被边界吞掉的异常。现补：真执�
 
 **守卫**：contract 1 条（失败可见 + 带错误消息）、client-render 2 条（结构 + 行为）；
 变异（改回 `return null`）⇒ **2 条同时红** ✓ CAUGHT。
+
+### R56e 照 `PANEL-HOWTO.md`（dsh-connect-zcode 的实测经验文档）逐条自查（2026-10-19）
+
+用户转来 zcode 仓库新写的 `PANEL-HOWTO.md`（四处必配 + 生效链路表 + 「面板一直不显示」10 条排查表 +
+最小骨架自检）。逐条对照本插件：
+
+**已满足（有断言/实测）**：
+- ① `package.json`：`dsh.client`（platform=web / immediately / 7 项 inject）+ `exports["./client"]` ✓；
+  `inject` 里有 `@deepseek-ai/dsh-client-ui-settings`（面板可写的关键）✓。
+- ② **信封红线**：`client.js` **零静态 import**、`require` 实参集合只有 `{react}` ✓、
+  `window.__ModuleLoader__.load({ id: "dsh-context-pilot" })` ✓ ⇒ **不构成拒启**。
+- ③ `slots.register` 的 key = 包名 `dsh-context-pilot` ✓（profile 两个 junction 的 `name` 都是它）。
+- ⑤ `/plugins/<包名>/status`：**本插件不适用**——我们没有 status 路由，面板数据走 host 的
+  `getHud` remote 面（文档那条是给"用 webServer 路由供数"的插件写的）。
+
+**本轮补上（文档 §1④，我们确实缺）**：
+- **`NS_EXACT`**：原先只有模糊匹配 `NS_PATTERN = /context-pilot/i`。文档明确警告：模糊可能绑到
+  **别的**命名空间 ⇒ 控件全灰/永远只读，甚至绑错后写入失败。
+  现改为**精确优先**（`entry.ns === NS_EXACT`，`NS_EXACT = "dsh-context-pilot"` = patch 的 `- id:`）
+  **+ 模糊兜底**（改名/多实例仍能工作）。
+- static 新增 5 条（照抄文档 §5 的最小骨架自检 + 文档建议的"常量副本一致性"）：
+  信封红线、信封 id、`NS_EXACT` 存在、`NS_EXACT === cordis.patch.yml 的 - id:`、精确优先顺序。
+
+**结论（对"面板仍不显示"）**：文档 §4 的第 1/2/3 条都已被证据排除（清单齐全、信封合规、
+组件真渲染 24/24 通过、occupant active:true）。**剩下的最可能就是它的第 9 条：client bundle 有缓存
+⇒ 页面没重载**（用户只重启了 DSH，浏览器可能仍跑旧 JS）。⇒ 第一动作：**硬刷新（Ctrl+Shift+R）**，
+并按文档 §0 的"排查第一动作永远是打开浏览器控制台搜插件名"——v0.1.47 起我们的卡片失败会**自报错误**，
+所以刷新后要么出现表单、要么出现带错误消息的诊断块。

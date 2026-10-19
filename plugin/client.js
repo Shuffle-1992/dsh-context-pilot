@@ -48,6 +48,11 @@ window.__ModuleLoader__.load({
 		/** 卡片 key = bundle 包名（plugins.bundle.config slot 契约）。 */
 		const BUNDLE_KEY = "dsh-context-pilot";
 		/** 设置命名空间匹配（host 的 settingsNs = Loader entry id，本插件）。 */
+		/** ⚠️ R56e（2026-10-19，照 `dsh-connect-zcode/PANEL-HOWTO.md` §1④）：面板"可写"的硬前提是
+		 *  `configForms` 里那个命名空间**精确**等于 `cordis.patch.yml` 的 `- id:`。原实现只有模糊匹配
+		 *  （/context-pilot/i）——文档明确警告：模糊可能绑到**别的**命名空间 ⇒ 控件全灰/永远只读，
+		 *  甚至绑错后写入失败。⇒ 先精确、再模糊兜底（保留兜底是为了改名/多实例时仍能工作）。 */
+		const NS_EXACT = "dsh-context-pilot";
 		const NS_PATTERN = /context-pilot/i;
 		const LOG = "[dsh-context-pilot/client]";
 		/** HUD 轮询面（client→host remote；host 侧 wire.host.mjs ctx.provide 注册）。 */
@@ -1029,7 +1034,8 @@ window.__ModuleLoader__.load({
 				const rebind = () => {
 					let served;
 					try {
-						served = (forms?.describe().getSnapshot().view?.namespaces ?? []).find((entry) => NS_PATTERN.test(entry.ns));
+						const all = forms?.describe().getSnapshot().view?.namespaces ?? [];
+						served = all.find((entry) => entry.ns === NS_EXACT) ?? all.find((entry) => NS_PATTERN.test(entry.ns));
 					} catch { /* 形状未就绪 */ }
 					const next = served === void 0 || forms === void 0 ? void 0 : forms.get(served.ns);
 					if (next !== current) {

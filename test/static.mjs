@@ -97,6 +97,27 @@ ok('dsh.client：platform=web + immediately=true + inject 非空',
 ok('dsh.client.inject 无重复项',
   new Set(dshClient.inject ?? []).size === (dshClient.inject ?? []).length,
   '存在重复项 ⇒ 抄写时出错了');
+/* ═══ R56e（2026-10-19，照 `dsh-connect-zcode/PANEL-HOWTO.md` §5「最小骨架自检」）═══
+ * 文档红线：client 半必须是**零静态 import 的信封**、require 只能是 "react"；
+ * 违反的后果是**拒启**（client 半整体不加载 ⇒ 页面看起来就是"面板没出来"）。
+ * 另：NS_EXACT 必须 = cordis.patch.yml 的 `- id:`（client 与 host 各写一份 ⇒ 必须钉死一致性）。 */
+const envelopeSrc = readFileSync(join(PLUGIN, 'client.js'), 'utf8');
+ok('信封红线：client.js 零静态 import、require 只有 react（文档 §1②）',
+  !/\bimport\s/.test(envelopeSrc) && !/require\("(?!react")/.test(envelopeSrc),
+  '有静态 import / 非 react 的 require ⇒ client 半**拒启** ⇒ 面板永不出现');
+ok('信封形状：window.__ModuleLoader__.load({ id: "<包名>" })（ModuleLoader 表的 key）',
+  envelopeSrc.includes('window.__ModuleLoader__.load({') && envelopeSrc.includes('id: "dsh-context-pilot"'),
+  '信封 id 必须 = 包名');
+ok('文档 §1④：client 侧声明了 NS_EXACT（不是只有模糊匹配）',
+  /const NS_EXACT = "dsh-context-pilot";/.test(envelopeSrc),
+  '只有模糊匹配 ⇒ 可能绑到别的命名空间 ⇒ 控件全灰/永远只读（文档明确警告）');
+const patchId = (readFileSync(join(PLUGIN, 'cordis.patch.yml'), 'utf8').match(/^\s*-\s*id:\s*(\S+)/m) ?? [])[1];
+ok('常量副本一致性：NS_EXACT === cordis.patch.yml 的 `- id:`',
+  patchId === 'dsh-context-pilot' && /const NS_EXACT = "dsh-context-pilot";/.test(envelopeSrc),
+  `patch id=${patchId} ⇒ 不一致则 scope 恒 undefined ⇒ 面板永远只读`);
+ok('rebind 先精确匹配 NS_EXACT、再模糊兜底（文档 §1④）',
+  /all\.find\(\(entry\) => entry\.ns === NS_EXACT\) \?\? all\.find/.test(envelopeSrc),
+  '只模糊匹配 ⇒ 可能绑错命名空间');
 
 /* ═══════════ ③ entry.mjs 薄壳约束 ═══════════ */
 console.log('\n== 3. entry.mjs 薄壳约束（改它就要重启，须保持最小）==');
