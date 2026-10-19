@@ -582,23 +582,31 @@ window.__ModuleLoader__.load({
 			 * 注入原文展示块（只读 + 一键复制）。刻意保持**只读**：面板里能改的只有配置项本身，
 			 * 注入文本不可直接编辑——否则会出现"改了显示、却影响不了注入"的错觉（要改文本就改
 			 * 上面的模板字段，改完下一轮生效）。 */
-			const injBlock = (title, text) => (text ? el("div", { className: "dcp-inj-b", key: title },
-				el("div", { className: "dcp-inj-t" },
-					el("span", null, title),
-					/* ═══ R60/R61：六段注入原文**默认收起**（全展开时上千行），由板块标题行的
-					 * 「展开全部原文」统一开合；每行只留「复制」（复制不需要先展开）。═══ */
-					el("button", {
-						className: "dcp-mini", title: "复制这段原文",
-						onClick: () => {
-							try {
-								navigator.clipboard?.writeText(String(text));
-								setMessage({ kind: "ok", text: `已复制「${title}」` });
-							} catch { /* 吞：剪贴板不可用不影响面板 */ }
-						},
-					}, "复制"),
-				),
-				injAll ? el("pre", { className: "dcp-inj-p" }, String(text)) : null,
-			) : null);
+			/* R64（2026-10-19 用户实测「只剩 2 个？」）：一次性说明 / 思考强度教学 / 换档提示 / 回执
+			 * 都是**按时机**注入的，普通一轮里本来就是空的。原先「空 ⇒ 整行不渲染」⇒ 用户只看到 2 行，
+			 * 会以为功能坏了或丢了。现改为**六行恒显**：空的那行写「本轮未注入（原因）」。 */
+			const injBlock = (title, text, when = "") => {
+				if (inj === null) return null; // 没有本轮注入记录 ⇒ 外面已有统一提示
+				const has = typeof text === "string" && text.length > 0;
+				return el("div", { className: "dcp-inj-b", key: title },
+					el("div", { className: "dcp-inj-t" },
+						el("span", null, title),
+						/* R60/R61：默认收起，由板块标题行「展开全部原文」统一开合；每行只留「复制」。 */
+						has
+							? el("button", {
+								className: "dcp-mini", title: "复制这段原文",
+								onClick: () => {
+									try {
+										navigator.clipboard?.writeText(String(text));
+										setMessage({ kind: "ok", text: `已复制「${title}」` });
+									} catch { /* 吞：剪贴板不可用不影响面板 */ }
+								},
+							}, "复制")
+							: el("span", { className: "dcp-hint" }, when ? `本轮未注入（${when}）` : "本轮未注入"),
+					),
+					has && injAll ? el("pre", { className: "dcp-inj-p" }, String(text)) : null,
+				);
+			};
 			const injSec = el("div", { className: "dcp-inj" },
 				/* ═══ R59（2026-10-19 用户要求：「下面的那些内容移到**板块**里面显示」）═══
 				 * 把「本轮活值」「生效配置」并进**板块标题行**——原先它们落在板块最底部：要读完六段
@@ -635,12 +643,12 @@ window.__ModuleLoader__.load({
 				el("div", { className: "dcp-inj-n" }, "插件实际写进上下文的内容，逐字可核；要改文本请用上面的模板字段。"),
 				inj
 					? [
-						injBlock("用量行", inj.usageText ? `${inj.usageText}${inj.effSuffix ? ` ｜ ${inj.effSuffix}` : ""}` : null),
-						injBlock("决策卡", inj.cardText),
-						injBlock("一次性说明", inj.briefText),
-						injBlock("思考强度教学", inj.effBriefText),
-						injBlock("换档提示", inj.nudgeText),
-						injBlock("压缩自检回执", inj.receiptText),
+						injBlock("用量行", inj.usageText ? `${inj.usageText}${inj.effSuffix ? ` ｜ ${inj.effSuffix}` : ""}` : null, "每轮都注入"),
+						injBlock("决策卡", inj.cardText, "占用达智能压缩线时注入"),
+						injBlock("一次性说明", inj.briefText, "只在会话首轮注入一次"),
+						injBlock("思考强度教学", inj.effBriefText, "只在会话首轮注入一次（开启智能思考时）"),
+						injBlock("换档提示", inj.nudgeText, "只在建议换档时注入"),
+						injBlock("压缩自检回执", inj.receiptText, "只在压缩实际执行后注入"),
 					]
 					: el("div", { className: "dcp-inj-n" }, "（点「刷新」，或等下一轮注入）"),
 			);
