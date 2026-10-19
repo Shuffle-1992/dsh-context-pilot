@@ -448,11 +448,38 @@ window.__ModuleLoader__.load({
 			 * 纪律：渲染期异常一律被错误边界吞掉 ⇒ 表现为"什么都没显示" ⇒ 排查成本极高。
 			 * 改这个文件时，凡在 JSX/分支里用的标识符，都要确认它在**使用点的作用域内**。 */
 			const pct1 = (x) => `${Math.round(Number(x) * 1000) / 10}%`;
+			/* ═══ R66（2026-10-19 用户实测「强制压缩线 0.75 与 阈值余量 0.05 有点冲突，看下哪个生效」）═══
+			 * 两者不是同一层概念，但旧提示把余量**写死成「5 个百分点」**（用户改了余量也不更新），
+			 * 而且**不显示最终生效值** ⇒ 看不出谁赢。现按活值把三层关系算清楚：
+			 *   引擎阈值 = 上限 + 余量（host 的 criticalCapOf = engineThreshold − margin，可反推）
+			 *   上限     = 引擎阈值 − 余量 = engineCap（面板拉到的 criticalCap）
+			 *   生效强制线 = min(强制压缩线, 上限)   ← 与 host 的 effCrit 同一公式
+			 */
+			const marginNow = (() => {
+				const m = Number(cfg?.engineCapMargin);
+				return Number.isFinite(m) && m >= 0 && m < 0.5 ? m : 0.05;
+			})();
+			const effectiveCrit = () => {
+				const f = FIELDS.find((x) => x.key === "criticalRatio");
+				if (!f) return null;
+				const v = Number(valueOf(f));
+				if (!Number.isFinite(v)) return null;
+				return engineCap === null ? null : Math.min(v, engineCap);
+			};
 			const hintFor = (field) => {
-				if (field.key !== "criticalRatio") return field.hint ?? "";
-				return engineCap === null
-					? `${field.hint}；上限 = DSH 内置阈值 − 5 个百分点（待探测，见弹窗阈值行）`
-					: `${field.hint}；上限 = DSH 内置阈值 − 5 个百分点（当前 ${pct1(engineCap)}），超出自动钳到该值`;
+				const pp = Math.round(marginNow * 1000) / 10;
+				const eff = effectiveCrit();
+				const effTxt = eff === null ? "（待探测）" : pct1(eff);
+				if (field.key === "criticalRatio") {
+					return engineCap === null
+						? `${field.hint}；上限 = 引擎阈值 − 余量 ${pp} 个百分点（待探测，见弹窗阈值行）`
+						: `${field.hint}；上限 = 引擎阈值 − 余量 ${pp} 个百分点（当前上限 ${pct1(engineCap)}）；**生效强制线 = min(你的值, 上限) = ${effTxt}**，超出上限会自动钳到上限`;
+				}
+				if (field.key === "engineCapMargin") {
+					const engineGuess = engineCap === null ? null : engineCap + marginNow;
+					return `${field.hint}；当前引擎阈值 ${engineGuess === null ? "（待探测）" : pct1(engineGuess)} − 余量 ${pp}pp = 上限 ${engineCap === null ? "?" : pct1(engineCap)}；**生效强制线 = ${effTxt}**（与你设的强制压缩线取较小者）`;
+				}
+				return field.hint ?? "";
 			};
 			const dirty = draft !== null && FIELDS.some((f) => {
 				const cur = parseInput(f, valueOf(f));

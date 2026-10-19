@@ -1494,9 +1494,9 @@ ok('engineCapProbe 同时记原始阈值与生效上限（否则报告里看不�
   /cap: \+Math\.max\(0, raw - m\)\.toFixed\(4\)/.test(threshold) && /margin: m,/.test(threshold)
   && /const m = marginOf\(\);/.test(threshold) && /prev\.margin !== m/.test(threshold),
   '取证只记原始值 / 余量变化不刷新探针');
-ok('client 提示语说明「DSH 内置阈值 − 5 个百分点」（未探测到时也说规则）',
-  /DSH 内置阈值 − 5 个百分点/.test(client),
-  '提示未说明余量规则 ⇒ 用户以为上限还是 80%');
+ok('R66：client 提示语按**活值**算清两条线（引擎阈值−余量=上限；生效=min(你的值,上限)）',
+  /引擎阈值 − 余量/.test(client) && /Math\.min\(v, engineCap\)/.test(client) && /生效强制线/.test(client),
+  '提示未算出最终生效值 ⇒ 用户看不出「强制压缩线」与「阈值余量」到底哪个生效（用户实测）');
 ok('client 用一位小数显示上限（0.745 不能被四舍五入掉小数）',
   /Math\.round\(Number\(x\) \* 1000\) \/ 10/.test(client) && /Math\.round\(engineCap \* 1000\) \/ 10/.test(client),
   '用 Math.round(x*100) ⇒ 余量的实际落点不可见');
