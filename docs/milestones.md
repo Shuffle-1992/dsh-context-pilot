@@ -3729,3 +3729,26 @@ A/C 下必须渲染只读占位且**不得抛**。
 
 **已知缺口（已收窄）**：本套件覆盖**配置卡渲染路径**；输入框档位 chip 与弹窗 HUD 仍未做真渲染冒烟。
 
+
+### R56c 用户转来派发台会话的排查清单：逐条核对结果（2026-10-19）
+
+用户转来一段（来自派发台插件会话的）排查清单：面板不显示"几乎一定是"客户端半边没注册进槽位；
+keyed 槽位 key 写错静默不渲染；`dsh.client` 要 `{platform:'web', immediately:true, inject:[…]}`
+（inject 写错 ⇒ 整个客户端半边 pending ⇒ 面板永不出现）；改完刷新，用 `cordis_inspect_query`
+看 occupants 有没有 `active:true`；若没有，按 ① boot 日志 pending ② 槽位 `available:false`
+③ key 与宿主派发键不一致 的顺序查。
+
+**逐条核对（全部有证据）**：
+- **槽位与 key**：`listSubTree({root:'plugins.bundle.config'})` ⇒ `available: true`，
+  我们的 occupant `registrant: dsh-context-pilot-client` / `key: dsh-context-pilot`（= 包名，
+  owner 按 `pkg.name` 派发）/ **`active: true`** ⇒ 注册路径**完全健康**，①②③ 三条都不成立。
+- **inject 清单**：我们的 7 项与 **dsh-connect-zcode（卡片正常渲染）逐字相同**。
+  ⚠️ 我一度用 `asar list --filter` 判定 `dsh-client-ui-slots` / `dsh-client-ui-primitives`
+  "不存在"⇒ **假警报**：它们是**客户端模块 id**（由客户端运行时提供），不是 asar 里的目录；
+  判据是"我们的 occupant 用同一份清单仍 active:true"⇒ **清单无罪**。（自我更正已记录。）
+- **`immediately: true`**：**已补上**（与 dsh-dispatch 对齐）并加静态守卫；
+  但 **dsh-connect-zcode 没有它也能渲染** ⇒ 它**不是**本次的原因。
+- **真因**（清单三条之外）：注册成功、但**渲染期抛异常被 CardBoundary 吞掉**——
+  `getSnapshot` 自递归（R56b，v0.1.45 已修）。⇒ 面板"不显示"的第四种形态：
+  **槽位里有你那条 active:true，但组件渲染时抛错 ⇒ 页面空白**。这类只能靠**真渲染**发现
+  （`test/client-render.mjs`），Slots/Config inspect 与源断言都看不出来。

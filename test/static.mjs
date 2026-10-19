@@ -84,6 +84,19 @@ ok('client.js 走 ModuleLoader 信封', clientSrc.includes('__ModuleLoader__.loa
   '缺少 ModuleLoader 信封（client 半将无法加载）');
 ok('client.js 导出 apply/inject/name', /exports\.apply\s*=/.test(clientSrc) && /exports\.inject\s*=/.test(clientSrc) && /exports\.name\s*=/.test(clientSrc),
   '缺少 apply/inject/name 导出（宿主无法挂载）');
+/* ═══ R56c（2026-10-19，用户转来派发台会话的排查清单）：dsh.client 形状 ═══
+ * 清单原文：「package.json 的 dsh.client 要有 {platform:'web', immediately:true, inject:[…]}
+ * （inject 里只能写真的装了的包，写错会让整个客户端半边 pending、面板永不出现）」。
+ * 注：本仓库的 dsh-connect-zcode 无 immediately 也能渲染 ⇒ 它不是**必需**，但对齐已知可用实现
+ * （dsh-dispatch 有）零成本，且能把客户端半边的加载时机提前到 boot。 */
+const pkgJson = JSON.parse(readFileSync(join(PLUGIN, 'package.json'), 'utf8'));
+const dshClient = pkgJson?.dsh?.client ?? {};
+ok('dsh.client：platform=web + immediately=true + inject 非空',
+  dshClient.platform === 'web' && dshClient.immediately === true && Array.isArray(dshClient.inject) && dshClient.inject.length > 0,
+  `实际 ${JSON.stringify(dshClient)} ⇒ 形状不对可能让客户端半边 pending（面板永不出现）`);
+ok('dsh.client.inject 无重复项',
+  new Set(dshClient.inject ?? []).size === (dshClient.inject ?? []).length,
+  '存在重复项 ⇒ 抄写时出错了');
 
 /* ═══════════ ③ entry.mjs 薄壳约束 ═══════════ */
 console.log('\n== 3. entry.mjs 薄壳约束（改它就要重启，须保持最小）==');
