@@ -1640,6 +1640,18 @@ ok('R56：`pct1` 只有一处声明且不在嵌套作用域（防"缩进回去"�
 ok('R56：CardBoundary 出错时**留痕**（只 return null 会让"看不到"无从排查）',
   /componentDidCatch\(error\) \{/.test(client) && /卡片渲染失败（已隔离/.test(client),
   '无痕 ⇒ 用户看到"什么都没有"且没有任何线索（本次排查耗时正因如此）');
+/* ═══ 6.17c R56b（2026-10-19）：配置卡**整卡静默消失**的真根因——getSnapshot 自递归 ═══
+ * 用户复测「还是没看到」⇒ R56 修的 pct1 只是**潜伏的第二个 bug**（自递归挡在它前面，走不到 pct1）。
+ * 真因：scope.getSnapshot 的兜底写的是 settingsScope.getSnapshot()，而 settingsScope = scope
+ * 又把它指回自己 ⇒ 命名空间未就绪时**自我递归** ⇒ 渲染期 RangeError: Maximum call stack size exceeded
+ * ⇒ 被 CardBoundary 吞掉 ⇒ **配置卡从来就没渲染过**（两种 view 都崩，与历次截图一致）。
+ * 行为级护栏在 test/client-render.mjs（真渲染冒烟，变异 CAUGHT 5 条）；这里是结构级双保险。 */
+ok('R56b：getSnapshot 兜底必须是**独立常量** UNAVAILABLE_SCOPE（不得写 settingsScope）',
+  /: UNAVAILABLE_SCOPE\.getSnapshot\(\)/.test(client) && !/current\.getSnapshot\(\) : settingsScope\.getSnapshot\(\)/.test(client),
+  '兜底指回 settingsScope ⇒ 命名空间未就绪时自我递归 ⇒ RangeError ⇒ 整卡静默消失（用户实测事故）');
+ok('R56b：UNAVAILABLE_SCOPE 是独立常量且 settingsScope 初始指向它',
+  /const UNAVAILABLE_SCOPE = \{ getSnapshot:/.test(client) && /let settingsScope = UNAVAILABLE_SCOPE;/.test(client),
+  '兜底对象必须与 settingsScope 分离，否则 settingsScope = scope 一执行就自环');
 
 /* ═══════════ 6.8 R1 智能思考字段三端对账 ═══════════ */
 console.log('\n== 6.8 智能思考字段（FIELDS ↔ schema ↔ M3_DEFAULTS）==');

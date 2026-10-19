@@ -3689,3 +3689,43 @@ F1/F2/F4 全在 `host.impl.mjs` 几十行之内，我读过很多次却没看见
 真正的解法是用 AST（acorn/eslint-scope）做未定义标识符扫描，或在测试里用 React 真渲染一次卡片
 （DSH 的 asar 里应有 react/react-dom，可抽出做 render 冒烟）。**本轮未做**，列为后续项。
 
+
+### R56b 配置卡「整卡静默消失」的**真根因**：`getSnapshot` 自递归（2026-10-19，真复现抓到）
+
+**背景**：R56 修掉 `pct1` 后用户复测「**还是没看到**」⇒ 说明 `pct1` 只是**潜伏的第二个 bug**
+（自递归挡在它前面，代码根本走不到 `pct1`）。教训：**修完一个渲染期异常不等于卡片能渲染**。
+
+**真根因**（`plugin/client.js` 的 `apply()`）：
+```js
+const scope = {
+  getSnapshot: () => (current !== void 0 ? current.getSnapshot() : settingsScope.getSnapshot()),
+  //                                                     ^^^^^^^^^^^^^^ 此刻它就是 scope 自己
+};
+settingsScope = scope;   // ← 把兜底指回自己 ⇒ 自环
+```
+命名空间未就绪时（`current === undefined`）⇒ `scope.getSnapshot()` → `settingsScope.getSnapshot()`
+→ `scope.getSnapshot()` → … ⇒ 渲染期 `RangeError: Maximum call stack size exceeded`
+⇒ 被 `CardBoundary` 捕获 ⇒ `return null` ⇒ **配置卡从来就没渲染过**（page / summary 两种 view 都崩，
+与用户历次截图里那块空白完全一致）。
+
+**修法**：兜底改为**独立常量** `UNAVAILABLE_SCOPE`（`settingsScope` 初始指向它，之后指向 `scope`，
+两者不再互相引用）。
+
+**怎么抓到的（可复用方法）**：把 `plugin/client.js` 装进 `vm` 沙箱（React 桩 + 宽松 DOM 桩），
+真跑 `apply(ctx)` 拿到 `plugins.bundle.config` 的注册，再**真调用**组件的 render 体。
+一次就打出 `RangeError … at Object.getSnapshot (client.js:1007:26)`。
+⚠️ 中途**我自己的探针也踩了同类坑**（树遍历把 `props` 当子节点 ⇒ 无限递归，报错帧全在探针里）
+⇒ 教训：遍历只走 `$$v` vnode，并显式处理数组子节点（`FIELDS.map` 产生嵌套数组）。
+
+**新套件（第 5 个）`test/client-render.mjs`——13 断言**：三种运行时 × 两种 view——
+A `configForms` 不可用 / B 就绪（≈真机）/ C 命名空间未列出。
+B 下**必须**渲染出 `dcp-grid`（配置表单本体）与 `dcp-inj`（R55 的「本轮注入（只读）」区）；
+A/C 下必须渲染只读占位且**不得抛**。
+**变异**：把兜底改回 `settingsScope` ⇒ **5 条断言同时红** ✓ CAUGHT。
+结构级双保险（contract §6.17c）：兜底必须用 `UNAVAILABLE_SCOPE`、且它是独立常量。
+
+**至此 R56 系列两处渲染期异常（`pct1` 作用域外引用、`getSnapshot` 自递归）都有行为级护栏**，
+`run.mjs` 从 4 套件变 5 套件（**843 断言**）。
+
+**已知缺口（已收窄）**：本套件覆盖**配置卡渲染路径**；输入框档位 chip 与弹窗 HUD 仍未做真渲染冒烟。
+

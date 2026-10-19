@@ -993,7 +993,13 @@ window.__ModuleLoader__.load({
 		 * `cannot get property "typert" without inject`（2026-10-06 实证）⇒ HUD 轮询面挂不上。
 		 */
 		const inject = ["slots", "locale", "remote", "typert"];
-		let settingsScope = { getSnapshot: () => ({ status: "unavailable", value: void 0, writable: false }), subscribe: void 0, set: () => Promise.resolve(false) };
+		/** ⚠️ R56b（2026-10-19，真复现抓到）：兜底 scope 必须是**独立常量**，不能写 `settingsScope`。
+		 *  事故现场：`scope.getSnapshot` 的兜底分支写的是 `settingsScope.getSnapshot()`，而
+		 *  下方 `settingsScope = scope` 把它指回自己 ⇒ 命名空间未就绪时 `getSnapshot` **自我递归**
+		 *  ⇒ `RangeError: Maximum call stack size exceeded`（渲染期）⇒ 被 CardBoundary 吞掉
+		 *  ⇒ **配置卡从来就没渲染过**（用户历次截图里那块空白）。 */
+		const UNAVAILABLE_SCOPE = { getSnapshot: () => ({ status: "unavailable", value: void 0, writable: false }), subscribe: void 0, set: () => Promise.resolve(false) };
+		let settingsScope = UNAVAILABLE_SCOPE;
 		let hudRemoteSvc = null; // getHud 轮询面句柄（ctx.inject 捕获）
 		function apply(ctx) {
 			try {
@@ -1004,7 +1010,7 @@ window.__ModuleLoader__.load({
 				const listeners = new Set();
 				const notify = () => { for (const listener of [...listeners]) listener(); };
 				const scope = {
-					getSnapshot: () => (current !== void 0 ? current.getSnapshot() : settingsScope.getSnapshot()),
+					getSnapshot: () => (current !== void 0 ? current.getSnapshot() : UNAVAILABLE_SCOPE.getSnapshot()),
 					subscribe: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
 					set: (field, value) => (current !== void 0 ? current.set(field, value) : Promise.resolve(false)),
 				};
