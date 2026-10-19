@@ -123,10 +123,16 @@ function renderCard(ctxGet) {
   vm.runInContext(SRC, sandbox, { filename: 'plugin/client.js' });
 
   const mod = captured.factory((name) => (name === 'react' ? mkReact() : anyProxy));
+  /* R56f：卡片可能为**多个 key** 各注册一格（规范名 + profile 旧别名），这里收全部，
+   * 只保留最后一次给渲染用例用（组件相同）。 */
+  const bundleRegs = [];
   const ctx = {
     get: ctxGet, on: () => {}, effect: () => {}, logger: sandboxConsole,
     slots: {
-      inject: (name, factory) => { if (name === 'plugins.bundle.config') registration = factory(); return { dispose() {} }; },
+      inject: (name, factory) => {
+        if (name === 'plugins.bundle.config') { const reg = factory(); bundleRegs.push(reg); registration = reg; }
+        return { dispose() {} };
+      },
       register: (cfg, comp) => ({ cfg, comp }),
       entries: () => [], subscribe: () => () => {},
     },
@@ -134,7 +140,12 @@ function renderCard(ctxGet) {
   const api = mod.exports ?? mod;
   try { api.apply(ctx); } catch { /* apply 自身 try/catch，这里只保证测试继续 */ }
 
-  const out = { registered: registration !== null, cfg: registration?.cfg ?? null, warnings };
+  const out = {
+    registered: registration !== null,
+    cfg: registration?.cfg ?? null,
+    bundleKeys: bundleRegs.map((reg) => reg?.cfg?.key).filter((k) => typeof k === 'string'),
+    warnings,
+  };
   const firstOrder = {};
   for (const view of ['page', 'summary']) {
     const r = { threw: null, failed: false, classes: [], root: null, hookOrderChanged: false, effectThrew: null };
@@ -182,9 +193,9 @@ console.log('\n== R56b/d 客户端配置卡真渲染冒烟（plugins.bundle.conf
 ok('三种运行时都能拿到 plugins.bundle.config 注册',
   A.registered && B.registered && C.registered,
   '注册没拿到 ⇒ 卡片不可能出现在插件详情页');
-ok('注册 key = 包名 dsh-context-pilot（slot 契约：owner 按 pkg.name 派发；profile 两个 junction 的 name 都是它）',
-  B.cfg?.key === 'dsh-context-pilot',
-  `实际 key=${B.cfg?.key} ⇒ 键写错则永不命中（页面空白）`);
+ok('注册 key 覆盖 profile 可能用到的两个名字（规范名 + @local 旧别名；slot 契约：owner 按 pkg.name 派发）',
+  ['dsh-context-pilot', '@local/dsh-context-pilot'].every((k) => (B.bundleKeys ?? []).includes(k)),
+  `实际 keys=[${(B.bundleKeys ?? []).join(', ')}] ⇒ 缺哪个，profile 用那个名字时卡片就静默空白（R56f 真机事故）`);
 
 /* ── 三场景 × 两视图的**硬门槛**：不抛、不 failed、effect 不抛、Hook 顺序稳定、零告警 ── */
 for (const [label, R] of [['A 未就绪', A], ['B 就绪', B], ['C 命名空间未列出', C]]) {

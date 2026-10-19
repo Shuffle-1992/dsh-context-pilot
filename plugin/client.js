@@ -45,8 +45,12 @@ window.__ModuleLoader__.load({
 			return NS.sid ? "fetch" : "none";
 		};
 
-		/** 卡片 key = bundle 包名（plugins.bundle.config slot 契约）。 */
+		/** 卡片 key = bundle 包名（plugins.bundle.config slot 契约）。
+		 *  ⚠️ R56f：宿主派发用的是 **profile 的 bundle 名**（可能仍是旧别名 `@local/dsh-context-pilot`），
+		 *  所以两个 key 都要注册 —— 见 apply() 里的 R56f 注释与 PANEL-HOWTO §3.1。 */
 		const BUNDLE_KEY = "dsh-context-pilot";
+		/** profile 里的旧别名形式（2026-10-10 统一包名前挂载遗留；迁移完成后此键空置无害）。 */
+		const CARD_KEY_ALIAS = `@local/${BUNDLE_KEY}`;
 		/** 设置命名空间匹配（host 的 settingsNs = Loader entry id，本插件）。 */
 		/** ⚠️ R56e（2026-10-19，照 `dsh-connect-zcode/PANEL-HOWTO.md` §1④）：面板"可写"的硬前提是
 		 *  `configForms` 里那个命名空间**精确**等于 `cordis.patch.yml` 的 `- id:`。原实现只有模糊匹配
@@ -1051,11 +1055,23 @@ window.__ModuleLoader__.load({
 				rebind();
 				forms?.describe().subscribe?.(rebind);
 				settingsScope = scope;
-				ctx.slots.inject("plugins.bundle.config", () => ctx.slots.register(
-					{ name: "plugins.bundle.config", key: BUNDLE_KEY, priority: 30, inject: () => ({}) },
-					CardBoundary,
-				));
-				console.info(`${LOG} 配置卡片已注册（plugins.bundle.config）`);
+				/* ═══ R56f（2026-10-19 真机定位）：卡片 key 必须覆盖 **profile 的 bundle 名** ═══
+				 * `plugins.bundle.config` 是 **keyed** 槽位；宿主插件页按
+				 *   renderSlot("plugins.bundle.config", { view: "page" }, { entryKey: pkg.name })
+				 * 派发，而 `pkg.name` 是 **profile 的 bundle 名**（`dsh.profile.bundles` 里那个字符串，
+				 * 可用 `plugin_manager list_bundles` 看到），**不是**本包 package.json 的 name。
+				 * 本插件在运行中的 profile 里以旧别名 `@local/dsh-context-pilot` 挂载
+				 * （2026-10-10 统一包名前的遗留）⇒ 只注册规范名时两边不相等 ⇒ 卡片区域
+				 * **静默空白**（无 error / 无 warn，槽位探针却显示 occupant active:true）。
+				 * 故两个 key 都注册：keyed 槽位允许不同 key 各占一格，无论 profile 用哪个名字都能命中。
+				 * 清单迁移到规范名后，别名那格自然空着、无害。 */
+				for (const cardKey of [CARD_KEY_ALIAS, BUNDLE_KEY]) {
+					ctx.slots.inject("plugins.bundle.config", () => ctx.slots.register(
+						{ name: "plugins.bundle.config", key: cardKey, priority: 30, inject: () => ({}) },
+						CardBoundary,
+					));
+					console.info(`${LOG} 配置卡片已注册（plugins.bundle.config key=${cardKey}）`);
+				}
 				/* ═══ R1（2026-10-07）：输入框「智能思考档位」chip ═══
 				 * 位置（源码实证）：`conversation.input.right` 是 session 作用域 list slot，
 				 * 渲染点 dsh-client-ui-conversation/lib/client.js L17532 —— **紧邻**

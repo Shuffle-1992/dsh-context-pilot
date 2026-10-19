@@ -56,6 +56,7 @@ profile `package.json` 两处要改（以本机 `desktop` profile 为例）：
 
 | 版本 | 更新 | 为什么值得知道 |
 | --- | --- | --- |
+| **v0.1.49** | **卡片 key 覆盖 profile 旧别名（R56f）** | `plugins.bundle.config` 是 **keyed** 槽位，宿主按 `renderSlot(..., { entryKey: pkg.name })` 派发，而 `pkg.name` 是**profile 的 bundle 名**（本机仍是旧别名 `@local/dsh-context-pilot`）——只注册规范名时两边不等 ⇒ 卡片区域**静默空白**（无 error/warn，槽位探针却显示 occupant active）。改为**两个 key 都注册**（规范名 + `@local/` 别名），并把 client-render 的断言从"key 等于包名"改为"覆盖两个名字"。 |
 | **v0.1.48** | **照 PANEL-HOWTO.md 自查 + 补 NS_EXACT（R56e）** | 逐条对照 zcode 的实测文档：① 清单 ✓ ② 信封红线（零静态 import、require 只有 react）✓ ③ key=包名 ✓ ⑤ status 路由不适用 ✓；**补上 §1④ 的 NS_EXACT**（原先只有模糊匹配，文档警告会绑错 ns ⇒ 永远只读）⇒ 精确优先 + 模糊兜底。static 加 5 条（含 NS_EXACT === cordis.patch.yml 的 - id: 常量副本一致性）。**863 断言** |
 | **v0.1.47** | **配置卡失败必须可见（R56d）** | CardBoundary 原先失败 eturn null ⇒ 页面**一片空白零线索**（只有控制台 warn）⇒ 三轮排查都卡在这里。现渲染自解释诊断（含**错误消息**）。探针补盲：真跑 useEffect + 校验 Hook 顺序 + 捕获 console 告警，client-render 13 → **24 断言**；三场景 × 两视图全绿 ⇒ 组件本身健康。另用证据排除 key 问题（两个 junction 的 
 ame 都是 dsh-context-pilot，occupant ctive:true）。**859 断言** |
