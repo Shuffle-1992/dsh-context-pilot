@@ -268,11 +268,12 @@ ok('R57：内置文案来自 host 下发的 inj.builtinBrief/builtinCard（不�
 ok('R60：模板输入框有**三个**（新增「思考强度教学模板」——用户要求补的）',
   tplAreas.length >= 3,
   `实际 ${tplAreas.length} 个 textarea ⇒ 思考强度教学仍缺输入框（用户实测反馈）`);
-ok('R60：六段注入原文**默认收起**，点「查看」才展开（不再整块铺开撑爆面板）',
-  /const \[injOpen, setInjOpen\] = react\.useState\(null\)/.test(SRC)
-  && /injOpen === title \? el\("pre"/.test(SRC)
-  && /injOpen === title \? "收起" : "查看"/.test(SRC),
-  '原文仍无条件渲染 ⇒ 一屏上千行（用户截图圈红要求改）');
+ok('R61：六段注入原文**默认收起**，且**整段一个**开关（用户反馈「查看按钮重复了」）',
+  /const \[injAll, setInjAll\] = react\.useState\(false\)/.test(SRC)
+  && /injAll \? el\("pre"/.test(SRC)
+  && /"收起全部原文" : "展开全部原文"/.test(SRC)
+  && !/setInjOpen/.test(SRC),
+  '仍每行一个「查看」⇒ 6 个重复按钮（用户实测反馈）；或未默认收起 ⇒ 一屏上千行');
 
 ok('R58：内置文案缺席时给出**可操作**提示（明确提示 toggle 加载新版 host，而不是只说"暂无"）',
   /toggle 插件/.test(SRC) && /内置原文由 \*\*host 半\*\*/.test(SRC),

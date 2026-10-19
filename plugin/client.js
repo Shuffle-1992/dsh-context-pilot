@@ -358,8 +358,9 @@ window.__ModuleLoader__.load({
 			const [cfg, setCfg] = react.useState(null);
 			/* R57：哪一行模板正在展开「内置文案」（null = 全部收起）。必须与其他 hook 同层无条件调用。 */
 			const [tplOpen, setTplOpen] = react.useState(null);
-			/* R60：六段注入原文里哪一段正展开（null = 全部收起）。同上，无条件同层调用。 */
-			const [injOpen, setInjOpen] = react.useState(null);
+			/* R61（2026-10-19 用户反馈「查看按钮重复了」）：整段**一个**开关——六段原文一起展开/收起，
+			 * 不再每行一个「查看」（6 个一模一样的按钮属重复）。同上，无条件同层调用。 */
+			const [injAll, setInjAll] = react.useState(false);
 			const pullInj = react.useCallback(async () => {
 				try {
 					if (!hudRemoteSvc || typeof hudRemoteSvc.getHud !== "function") return;
@@ -572,13 +573,8 @@ window.__ModuleLoader__.load({
 			const injBlock = (title, text) => (text ? el("div", { className: "dcp-inj-b", key: title },
 				el("div", { className: "dcp-inj-t" },
 					el("span", null, title),
-					/* ═══ R60（2026-10-19 用户要求「圈红的应该…按钮点击显示」）═══
-					 * 六段注入原文**默认收起**：全展开时这一屏上千行，把面板撑得没法用。
-					 * 点「查看」逐段展开、再点「收起」；「复制」始终可用（不需要先展开）。 */
-					el("button", {
-						className: "dcp-mini", type: "button", title: "展开/收起这段原文",
-						onClick: () => setInjOpen((v) => (v === title ? null : title)),
-					}, injOpen === title ? "收起" : "查看"),
+					/* ═══ R60/R61：六段注入原文**默认收起**（全展开时上千行），由板块标题行的
+					 * 「展开全部原文」统一开合；每行只留「复制」（复制不需要先展开）。═══ */
 					el("button", {
 						className: "dcp-mini", title: "复制这段原文",
 						onClick: () => {
@@ -589,7 +585,7 @@ window.__ModuleLoader__.load({
 						},
 					}, "复制"),
 				),
-				injOpen === title ? el("pre", { className: "dcp-inj-p" }, String(text)) : null,
+				injAll ? el("pre", { className: "dcp-inj-p" }, String(text)) : null,
 			) : null);
 			const injSec = el("div", { className: "dcp-inj" },
 				/* ═══ R59（2026-10-19 用户要求：「下面的那些内容移到**板块**里面显示」）═══
@@ -600,7 +596,14 @@ window.__ModuleLoader__.load({
 					el("span", { className: "dcp-inj-n" }, inj
 						? `最近一轮 ${String(inj.at || "").slice(11, 19)}${inj.receiptOnly ? "（量测失败，仅回执）" : ""}`
 						: "尚未取到"),
-					el("button", { className: "dcp-mini", onClick: () => { pullInj(); } }, "刷新"),
+					/* R61：刷新按钮**说清刷什么**（用户反馈「上面的没有刷新按钮」——它原本就在标题行里，
+					 * 只是标签只有「刷新」、不够显眼）；并新增整段一个的展开开关。 */
+					el("button", {
+						className: "dcp-mini", type: "button", title: "重新拉取本轮注入原文与生效配置（内置文案也走这条）",
+						onClick: () => { pullInj(); },
+					}, "刷新注入数据"),
+					el("button", { className: "dcp-mini", type: "button", onClick: () => setInjAll((v) => !v) },
+						injAll ? "收起全部原文" : "展开全部原文"),
 					inj ? el("span", { className: "dcp-inj-n" },
 						`本轮活值：占用 ${inj.values?.ratio != null ? `${Math.round(inj.values.ratio * 100)}%` : "?"}`
 						+ ` · 生效强制线 ${inj.values?.effCrit != null ? `${Math.round(inj.values.effCrit * 100)}%` : "?"}`
