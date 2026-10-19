@@ -641,7 +641,7 @@ window.__ModuleLoader__.load({
 									tplOpen === field.key
 										? el("pre", { className: "dcp-builtin" },
 											(field.key === "tplBrief" ? inj?.builtinBrief : inj?.builtinCard)
-												|| "（暂无可显示的内置文案：内置原文由 host 随本轮注入下发，点上面的「刷新」或等下一轮注入）")
+												|| "（暂无可显示的内置文案：内置原文由 **host 半**随本轮注入下发。若一直为空，说明 host 还跑着旧版——请先 **toggle 插件**（关→开）加载新版 host，再点上面的「刷新」或等下一轮注入）")
 										: null,
 								)
 								: el("input", {

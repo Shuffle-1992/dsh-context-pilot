@@ -264,6 +264,10 @@ ok('R57：内置文案来自 host 下发的 inj.builtinBrief/builtinCard（不�
   /inj\?\.builtinBrief/.test(SRC) && /inj\?\.builtinCard/.test(SRC),
   'client 自持一份内置文案 ⇒ 与 host 漂移（改一处忘另一处）');
 
+ok('R58：内置文案缺席时给出**可操作**提示（明确提示 toggle 加载新版 host，而不是只说"暂无"）',
+  /toggle 插件/.test(SRC) && /内置原文由 \*\*host 半\*\*/.test(SRC),
+  '只说"暂无" ⇒ 用户不知道 host 改动需要 toggle（PANEL-HOWTO §0：host 半改动要 toggle 或重启）');
+
 /* ── R56d：失败必须可见（结构 + 行为）── */
 const src = SRC;
 ok('R56d：CardBoundary 失败时**不再 return null**（渲染可见诊断块）',

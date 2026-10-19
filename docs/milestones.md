@@ -3853,3 +3853,14 @@ if (!Number.isFinite(n)) return base;   // 0 是有限数 ⇒ 直接返回 0 ⇒
 
 **守卫**：client-render 1 条（空模板的 `value` 必须是 `""`，不是 `0`）+ contract 2 条
 （`toUi` 文本直通、`parseInput` 把 tpl 当字符串）。**变异**：撤掉 `toUi` 的文本直通 ⇒ 套件红 ✓ CAUGHT。
+
+### R58 内置文案按钮显示"暂无"的判据（2026-10-19，用户实测）
+
+用户看到「查看内置文案」展开后是**空的**。判据与结论：
+- **不是** client 的问题：同一屏里输入框已变大、按钮已出现、空模板已显示空白 ⇒ client 半（v0.1.49/50）
+  已生效；`injected`（用量行 / 本轮活值）也有数据 ⇒ HUD 面通着。
+- **是 host 半没重载**：内置原文由 `compact-tool.mjs` + `m2.inject.mjs`（**host 模块**）落档并随
+  `injected` 下发；`PANEL-HOWTO.md` §0 的生效链路表写明「`index.js`（host 半）⇒ **toggle 插件**或重启 DSH」，
+  而用户只刷新了页面 ⇒ host 仍是旧版 ⇒ `builtinBrief`/`builtinCard` 为 null。
+⇒ 处置：把"暂无"提示改成**可操作**的（明确写出"请先 toggle 插件（关→开）加载新版 host"），
+并加断言钉住这条提示（R58，client-render）。这也是文档 §0 那条纪律的客户端体现。
