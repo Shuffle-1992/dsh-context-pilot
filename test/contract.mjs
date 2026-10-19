@@ -4629,6 +4629,19 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
 
 /* ═══════════ 汇总 ═══════════ */
 console.log(`\n${'='.repeat(52)}`);
+/* ═══ R57（2026-10-19 用户要求「内置文案改成一个按钮，点击查看」）：host 必须落档内置原文 ═══
+ * client 半拿不到渲染器 ⇒ 内置原文只能由 host 落档、随 HUD 的 injected 一起下发；
+ * 若在 client 复制一份必然漂移。落档点是 compact-tool 的两个渲染包装器（模板在此应用之前拿到内置原文）。 */
+const ctSrc57 = readFileSync(join(PLUGIN, 'compact-tool.mjs'), 'utf8');
+const m2Src57 = readFileSync(join(PLUGIN, 'm2.inject.mjs'), 'utf8');
+ok('R57：compact-tool 落档内置原文（state.m3.lastBuiltin.brief/card）',
+  /const keepBuiltin = \(which, b\)/.test(ctSrc57) && /keepBuiltin\('brief', b\)/.test(ctSrc57) && /keepBuiltin\('card', b\)/.test(ctSrc57),
+  '未落档 ⇒ 面板「查看内置文案」按钮无内容可显示');
+ok('R57：m2 把内置原文随 injected 下发（builtinBrief/builtinCard，**两处** lastInjection 都要带）',
+  (m2Src57.match(/builtinBrief: state\.m3\?\.lastBuiltin\?\.brief \?\? null/g) ?? []).length === 2,
+  '只带一处 ⇒ 回执轮（仅量测失败那条路径）面板没有内置文案可看');
+
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));
 process.exit(failures ? 1 : 0);
+

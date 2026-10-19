@@ -207,6 +207,14 @@ window.__ModuleLoader__.load({
 			".dcp-label{width:170px;color:var(--dsw-alias-label-secondary,currentColor);flex:none}",
 			".dcp-input{border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.45));border-radius:6px;background:transparent;color:var(--dsw-alias-label-primary,currentColor);padding:3px 8px;font-size:12px;min-width:110px}",
 			".dcp-hint{color:var(--dsw-alias-label-secondary,currentColor);opacity:.75;font-size:11px}",
+			/* ═══ R57（2026-10-19 用户要求）：模板输入框放大 + 内置文案改成旁边的按钮 ═══
+			 * 原先模板框与只读 <pre> 共用 .dcp-inj-p（rows:3）⇒ 用户实测「输入框尺寸太小」。
+			 * 现独立 .dcp-tpl（min-height 150px、等宽字体、可纵向拉伸），旁边一枚「查看内置文案」按钮。 */
+			".dcp-tplcol{display:flex;flex-direction:column;gap:6px;flex:1 1 auto;min-width:0}",
+			".dcp-tplwrap{display:flex;gap:8px;align-items:flex-start;width:100%}",
+			".dcp-tpl{flex:1 1 auto;width:100%;min-height:150px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.45));border-radius:6px;background:transparent;color:var(--dsw-alias-label-primary,currentColor);padding:6px 8px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;line-height:1.55;resize:vertical;box-sizing:border-box}",
+			".dcp-tpl:disabled{opacity:.6}",
+			".dcp-builtin{margin:0;padding:8px 10px;border:1px dashed var(--dsw-alias-border-l2,rgba(128,128,128,.45));border-radius:6px;background:var(--dsw-alias-bg-layer-1,transparent);white-space:pre-wrap;word-break:break-word;font-size:11.5px;line-height:1.5;max-height:340px;overflow:auto}",
 			".dcp-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}",
 			".dcp-btn{padding:4px 14px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.45));border-radius:6px;background:var(--dsw-alias-bg-layer-1,transparent);color:var(--dsw-alias-label-primary,currentColor);cursor:pointer;font-size:12px}",
 			".dcp-btn:hover:not(:disabled){background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.12))}",
@@ -333,6 +341,8 @@ window.__ModuleLoader__.load({
 			 * 注入原文本身是低频变化（每轮一次），手动刷新足够。 */
 			const [inj, setInj] = react.useState(null);
 			const [cfg, setCfg] = react.useState(null);
+			/* R57：哪一行模板正在展开「内置文案」（null = 全部收起）。必须与其他 hook 同层无条件调用。 */
+			const [tplOpen, setTplOpen] = react.useState(null);
 			const pullInj = react.useCallback(async () => {
 				try {
 					if (!hudRemoteSvc || typeof hudRemoteSvc.getHud !== "function") return;
@@ -602,13 +612,29 @@ window.__ModuleLoader__.load({
 								el("span", { className: "dcp-slider" }),
 							)
 							: field.type === "tpl"
-								? el("textarea", {
-									className: "dcp-inj-p", rows: 3,
-									disabled: !writable || saving,
-									placeholder: "留空 = 用内置文案（必须含 {tool} 占位符）",
-									value: String(valueOf(field)),
-									onChange: (e) => setField(field, e.target.value),
-								})
+								? el("div", { className: "dcp-tplcol" },
+									el("div", { className: "dcp-tplwrap" },
+										el("textarea", {
+											className: "dcp-tpl", rows: 8,
+											disabled: !writable || saving,
+											placeholder: "留空 = 用内置文案（必须含 {tool} 占位符）",
+											value: String(valueOf(field)),
+											onChange: (e) => setField(field, e.target.value),
+										}),
+										/* R57：内置文案查看按钮（放在输入框**旁边**）。显示的是 host 落档的
+										 * **内置原文**——即模板留空时插件实际会用的那段文字，可逐字复制后再改。 */
+										el("button", {
+											className: "dcp-mini", type: "button",
+											title: "查看内置文案（模板留空时插件实际使用的原文）",
+											onClick: () => setTplOpen((v) => (v === field.key ? null : field.key)),
+										}, tplOpen === field.key ? "收起内置文案" : "查看内置文案"),
+									),
+									tplOpen === field.key
+										? el("pre", { className: "dcp-builtin" },
+											(field.key === "tplBrief" ? inj?.builtinBrief : inj?.builtinCard)
+												|| "（暂无可显示的内置文案：内置原文由 host 随本轮注入下发，点上面的「刷新」或等下一轮注入）")
+										: null,
+								)
 								: el("input", {
 									className: "dcp-input", type: field.type === "text" ? "text" : "number",
 								step: field.type === "num" ? 0.05 : field.type === "int" ? 100 : void 0,

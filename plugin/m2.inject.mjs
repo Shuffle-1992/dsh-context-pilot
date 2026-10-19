@@ -477,6 +477,8 @@ export function createM2Injection(deps) {
             at: state.m2.lastAt, sid: String(pick(agent.session.id, agent.sessionId, 'unknown')), fullText: receiptOnly,
             usageText: null, effSuffix: null, nudgeText: null, cardText: null,
             briefText: null, effBriefText: null, receiptText: receiptOnly,
+            /* R57：内置原文（模板留空时就是最终文案）⇒ 面板「查看内置文案」按钮用 */
+            builtinBrief: state.m3?.lastBuiltin?.brief ?? null, builtinCard: state.m3?.lastBuiltin?.card ?? null,
             values: { ratio: null, window: null, effCrit: null, minRatio: M3.markerMinRatio, retainRatio: M3.retainRatioStandard, engineCapMargin: M3.engineCapMargin },
             tpl: { brief: !!(M3.tplBrief || '').trim(), card: !!(M3.tplCard || '').trim() },
             tier: null, receiptOnly: true,
@@ -554,6 +556,8 @@ export function createM2Injection(deps) {
         at: state.m2.lastAt, sid, fullText,
         usageText: r.text, effSuffix, nudgeText: effNudge, cardText: card,
         briefText: brief, effBriefText: effBrief, receiptText,
+        /* R57：内置原文（模板留空时就是最终文案）⇒ 面板「查看内置文案」按钮用 */
+        builtinBrief: state.m3?.lastBuiltin?.brief ?? null, builtinCard: state.m3?.lastBuiltin?.card ?? null,
         values: {
           ratio: r.ratio, window: r.window ?? null, effCrit,
           minRatio: M3.markerMinRatio, retainRatio: M3.retainRatioStandard, engineCapMargin: M3.engineCapMargin,

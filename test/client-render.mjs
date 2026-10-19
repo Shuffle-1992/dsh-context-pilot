@@ -76,6 +76,20 @@ const classesOf = (root) => {
   return out;
 };
 
+/** 收集 vnode 节点本身（判 textarea 的 rows / button 的文案要用）。 */
+const nodesOf = (root) => {
+  const out = [];
+  const walk = (node) => {
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (!node || typeof node !== "object" || !node.$$v) return;
+    out.push(node);
+    const kids = node.props?.children;
+    if (Array.isArray(kids)) kids.forEach(walk);
+  };
+  walk(root);
+  return out;
+};
+
 /** 装沙箱 → 跑 apply → 拿注册 → 真渲两遍 + 真跑 effect。 */
 function renderCard(ctxGet) {
   let captured = null;
@@ -164,6 +178,7 @@ function renderCard(ctxGet) {
           const inner = vnode.type({ ...(vnode.props ?? {}), view });
           r.root = inner?.type ?? typeof inner;
           r.classes = classesOf(inner);
+          r.nodes = nodesOf(inner);
         }
       } catch (e) { r.threw = `${e.constructor.name}: ${e.message}`; }
       const order = hookLog.join(',');
@@ -233,6 +248,18 @@ ok('B / page：带出保存/恢复按钮',
 ok('B / summary：渲染出汇总行（dcp-summary），不抛',
   B.summary.threw === null && B.summary.classes.includes('dcp-summary'),
   `抛了 ${B.summary.threw ?? '无 dcp-summary'}`);
+
+/* ── R57：模板输入框放大 + 「查看内置文案」按钮（用户 2026-10-19 要求）── */
+const tplAreas = B.page.nodes.filter((n) => n.type === "textarea");
+ok('R57：模板输入框放大（rows ≥ 8 + 独立 class dcp-tpl，不再与只读 pre 共用小样式）',
+  tplAreas.length >= 2 && tplAreas.every((n) => n.props.rows >= 8 && n.props.className === "dcp-tpl"),
+  `实际 ${tplAreas.length} 个 textarea：${tplAreas.map((n) => `${n.props.className}/rows=${n.props.rows}`).join(', ')}`);
+ok('R57：每个模板框**旁边**有「查看内置文案」按钮',
+  B.page.nodes.filter((n) => n.type === "button" && String(n.props.children ?? "").includes("查看内置文案")).length >= 2,
+  '按钮缺失 ⇒ 用户无法查看内置原文（需求原话：改成一个按钮，点击查看，放在输入框旁边）');
+ok('R57：内置文案来自 host 下发的 inj.builtinBrief/builtinCard（不在 client 复制一份）',
+  /inj\?\.builtinBrief/.test(SRC) && /inj\?\.builtinCard/.test(SRC),
+  'client 自持一份内置文案 ⇒ 与 host 漂移（改一处忘另一处）');
 
 /* ── R56d：失败必须可见（结构 + 行为）── */
 const src = SRC;

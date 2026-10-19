@@ -342,14 +342,21 @@ export function createCompactTool(deps) {
     return out;
   };
   /** R55③：渲染前同步档位比例（配置活读 ⇒ 卡片/说明/工具描述三处同时跟上，不存在写死百分比漂移）。 */
+  /** R57（2026-10-19 用户要求「内置文案改成一个按钮，点击查看」）：把**内置原文**留档。
+   *  面板的「查看内置文案」按钮要显示"模板留空时插件实际会用的原文"，而 client 半拿不到渲染器
+   *  ⇒ 只能由 host 落档、随 HUD 的 injected 一起下发（避免在 client 复制一份而漂移）。
+   *  取**最近一次**渲染的原文即可：值都来自同一轮活值（occupancy/阈值/档位）。 */
+  const keepBuiltin = (which, b) => { try { if (state?.m3) state.m3.lastBuiltin = { ...(state.m3.lastBuiltin ?? {}), [which]: b ?? null }; } catch { /* 留档失败不影响渲染 */ } };
   const renderBrief = (args = {}) => {
     syncTiers();
     const b = renderBriefBuiltin(args);
+    keepBuiltin('brief', b);
     return b == null ? b : (applyTpl(M3?.tplBrief, tplVars(args, b), 'brief') ?? b);
   };
   const renderCard = (args = {}) => {
     syncTiers();
     const b = renderCardBuiltin(args);
+    keepBuiltin('card', b);
     return b == null ? b : (applyTpl(M3?.tplCard, tplVars(args, b), 'card') ?? b);
   };
   /* ═══ R21：语义锚点（A: recentUser 1..3 / B: text 片段）═══
