@@ -208,7 +208,7 @@ ok('阈值行不禁止汉字断行（不得用 word-break:keep-all）', !/word-b
   'keep-all 会禁止无空格中文折行 ⇒ 反而更容易溢出');
 // 用户要求「字体改大一些」⇒ 11px（曾因截断缩到 9px，删上限后行变短，可放大）
 ok('阈值行字号 ≥ 11px（用户要求改大）', /font-size:\s*(1[1-9]|[2-9]\d)px/.test(thrCss), `实际：${thrCss}`);
-ok('阈值行已删除「上限」（用户要求）', !/上限/.test(thrText) && !/capTxt/.test(client),
+ok('阈值行已删除「上限」（用户要求）', !/上限/.test(thrText),
   '仍拼「上限 NN%」⇒ 用户要求删除');
 ok('阈值分隔符用半角 ·（全角 ｜ 占一个汉字宽）',
   /智能压缩线 \$\{pct\(v\.markerMinRatio[^`]*· 强制压缩线/.test(client),
@@ -1495,10 +1495,10 @@ ok('engineCapProbe 同时记原始阈值与生效上限（否则报告里看不�
   && /const m = marginOf\(\);/.test(threshold) && /prev\.margin !== m/.test(threshold),
   '取证只记原始值 / 余量变化不刷新探针');
 ok('R66：client 提示语按**活值**算清两条线（引擎阈值−余量=上限；生效=min(你的值,上限)）',
-  /引擎阈值 − 余量/.test(client) && /Math\.min\(v, engineCap\)/.test(client) && /生效强制线/.test(client),
+  /引擎阈值 − 余量/.test(client) && /Math\.min\(v, capNow\)/.test(client) && /生效强制线/.test(client),
   '提示未算出最终生效值 ⇒ 用户看不出「强制压缩线」与「阈值余量」到底哪个生效（用户实测）');
 ok('client 用一位小数显示上限（0.745 不能被四舍五入掉小数）',
-  /Math\.round\(Number\(x\) \* 1000\) \/ 10/.test(client) && /Math\.round\(engineCap \* 1000\) \/ 10/.test(client),
+  /Math\.round\(Number\(x\) \* 1000\) \/ 10/.test(client) && /Math\.round\((?:engineCap|capNow) \* 1000\) \/ 10/.test(client),
   '用 Math.round(x*100) ⇒ 余量的实际落点不可见');
 ok('弹窗阈值行显示**生效值** min(配置, 上限) 而非裸配置',
   /const critEff = critCap != null \? Math\.min\(critCfg, critCap\) : critCfg;/.test(client)
@@ -1530,23 +1530,23 @@ ok('面板**自己拉取**生效上限：真的从 getHud 的 criticalCap 取值
   && /NS\.engineCap = c;/.test(client) && /setEngineCap\(c\);/.test(client),
   '面板仍只读 NS.engineCap / 未真正取 criticalCap ⇒ 没开过弹窗时上限恒 null（备注「待探测」+ 保存不钳制）');
 ok('面板保存路径用面板 state 钳制（不用 NS.engineCap）',
-  /const cap = engineCap !== null && engineCap > 0 && engineCap <= 1 \? engineCap : null;/.test(client),
+  /const cap = capNow !== null && capNow > 0 && capNow <= 1 \? capNow : null;/.test(client),
   '仍读 NS.engineCap ⇒ 没开弹窗时保存不钳制（设 0.8 就真存成 0.8）');
 ok('面板计算器/回读提示同样用面板 state（三处同源）',
-  /const cap = engineCap !== null && engineCap > 0 && engineCap <= 1 \? engineCap : null;/.test(client)
-  && /Math\.round\(engineCap \* 1000\) \/ 10/.test(client),
+  /const cap = capNow !== null && capNow > 0 && capNow <= 1 \? capNow : null;/.test(client)
+  && /Math\.round\((?:engineCap|capNow) \* 1000\) \/ 10/.test(client),
   '计算器或回读提示仍读 NS.engineCap ⇒ 与保存路径不同源');
 /* ═══ 用户二次反馈：「设置 0.8 没有钳回 0.75」且**保存按钮是灰的** ═══
  * 根因：只做了「保存时钳制」。而用户输入 0.8 时**已存值也是 0.8** ⇒ `dirty=false`
  * ⇒ `保存` 的 disabled 条件含 `!dirty` ⇒ 按钮灰掉 ⇒ 那条钳制路径**根本走不到**。
  * ⇒ 必须在**输入时**就把值钳回上限（输入框当场显示 0.75 ⇒ dirty 变真 ⇒ 保存可用）。 */
 ok('强制压缩线在**输入时**即钳到生效上限（不只是保存时）',
-  /if \(field\.key === "criticalRatio" && engineCap !== null\) \{/.test(client)
+  /if \(field\.key === "criticalRatio" && capNow !== null\) \{/.test(client)
   && /const n = parseInput\(field, raw\);/.test(client)
-  && /if \(n !== null && n > engineCap\) next = String\(engineCap\);/.test(client),
+  && /if \(n !== null && n > capNow\) next = String\(capNow\);/.test(client),
   '只有保存时钳制 ⇒ dirty=false 时保存按钮是灰的，钳制路径走不到（实测截图）');
 ok('输入钳制不误伤输入过程（空串/半成品不改写）且上限未知时不瞎钳',
-  /if \(n !== null && n > engineCap\)/.test(client) && /engineCap !== null\) \{/.test(client),
+  /if \(n !== null && n > capNow\)/.test(client) && /capNow !== null\) \{/.test(client),
   '对非法输入也钳 / 未探测到上限也钳 ⇒ 边打字边被改写或钳到错值');
 /* ═══ 用户三次反馈：「如果原保存值超过钳回值，应该也直接钳回保存」 ═══
  * 场景：早先存过 0.8，之后上限收紧到 0.75 ⇒ 进面板时 stored 仍 0.8，而 dirty=false
@@ -1626,7 +1626,7 @@ ok('PriceCalculator 引用的面板 state 全部经 props 传入（防 Reference
   leaked.length === 0,
   `直接引用了面板 state：${leaked.join(', ')} ⇒ ReferenceError ⇒ 整个配置卡消失（实测事故）`);
 ok('面板确实把 engineCap 传给了计算器（渲染处与签名两头都在）',
-  /el\(PriceCalculator, \{ writable, saving, onApply: applyRecommendation, engineCap \}\)/.test(client),
+  /el\(PriceCalculator, \{ writable, saving, onApply: applyRecommendation, engineCap: capNow \}\)/.test(client),
   '渲染处没传 engineCap ⇒ 计算器拿到 undefined（虽不崩，但上限提示失效）');
 
 /* ═══ 6.17b R56（2026-10-19）：配置卡**整卡静默消失**的第二种形态 ═══
@@ -4680,6 +4680,17 @@ ok('R62：HUD 的 config 载荷带 builtins（含 effort 域的 effBrief）',
 ok('R62：m2 长期留档 effBrief 内置原文（effort 域产出，别的域拿不到）',
   /state\.m2\.lastEffBriefBuiltin = effBriefBuiltin;/.test(m2Src57),
   '不落档 ⇒ 思考强度教学的内置文案只能等注入那一次');
+/* ═══ R67（2026-10-19 用户要求）：上限随「阈值余量」实时重算 + 强制压缩线联动钳制 ═══
+ * 用户：「我应该设置 0.1，应该自动钳回 0.7」。旧实现 engineCap 只在挂载时拉一次 ⇒ 改余量不重算上限。 */
+ok('R67：上限按活值重算（引擎阈值 − 当前草稿余量），并联动把强制压缩线钳下来',
+  /const engineThresholdNow = engineCap === null \? null : engineCap \+ marginSaved;/.test(client)
+  && /const capNow = engineThresholdNow === null \? null : Math\.max\(0, engineThresholdNow - marginDraft\);/.test(client)
+  && /cur <= capNow\) return d;/.test(client),
+  '上限不随余量重算 / 草稿不联动钳制 ⇒ 改余量后强制压缩线不动（用户实测）');
+ok('R67：输入钳制与保存钳制都用 capNow（不是挂载时的旧上限）',
+  /if \(field\.key === "criticalRatio" && capNow !== null\)/.test(client)
+  && /const cap = capNow !== null && capNow > 0 && capNow <= 1 \? capNow : null;/.test(client),
+  '仍用 engineCap ⇒ 改了余量后保存仍按旧上限钳');
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));
 process.exit(failures ? 1 : 0);

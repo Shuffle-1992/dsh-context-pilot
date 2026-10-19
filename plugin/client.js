@@ -418,7 +418,7 @@ window.__ModuleLoader__.load({
 						setRev((v) => v + 1);
 						setMessage({
 							kind: "ok",
-							text: `已把「强制压缩线」由 ${cur} 自动钳到生效上限 ${engineCap} 并保存（上限 = DSH 内置阈值 − 5 个百分点）。`,
+							text: `已把「强制压缩线」由 ${cur} 自动钳到生效上限 ${engineCap} 并保存（上限 = 引擎阈值 − 余量 ${Math.round(marginSaved * 1000) / 10} 个百分点）。`,
 						});
 					} catch (error) {
 						autoClamped.current = false; // 失败允许下次重试
@@ -433,6 +433,28 @@ window.__ModuleLoader__.load({
 				if (draft !== null && Object.prototype.hasOwnProperty.call(draft, field.key)) return draft[field.key];
 				return toUi(field, stored[field.key]);
 			};
+			/* ═══ R67（2026-10-19 用户要求）：**上限随「阈值余量」实时重算** ═══
+			 * 用户：「设置应该是 DSH 内置的强制压缩线 − 余量 = 生效强制压缩线；现在设置余量，强制压缩线没有
+			 * 动态变化。比如现在是 0.05，设置 0.8 会被钳回 0.75；如果我设置 0.1，应该自动钳回 0.7」。
+			 * 旧实现 `engineCap` 只在挂载时由 HUD 拉一次（= 引擎阈值 − 当时的余量）⇒ 改余量不重算上限，
+			 * 强制压缩线自然不动。现在按活值重算：
+			 *   引擎阈值   = 拉到的 engineCap + 拉取时的余量（host: criticalCapOf = engineThreshold − margin）
+			 *   上限 capNow = 引擎阈值 − **当前草稿里的余量**  ⇒ 余量一改，上限立刻变
+			 * 再配合「草稿联动钳制 / 输入即时钳制 / 保存钳制」三处同时改用 capNow。 */
+			const marginSaved = (() => {
+				const m = Number(cfg?.engineCapMargin);
+				return Number.isFinite(m) && m >= 0 && m < 0.5 ? m : 0.05;
+			})();
+			const fieldOf = (key) => FIELDS.find((x) => x.key === key);
+			const engineThresholdNow = engineCap === null ? null : engineCap + marginSaved;
+			const marginDraft = (() => {
+				const f = fieldOf("engineCapMargin");
+				const raw = f && draft !== null && Object.prototype.hasOwnProperty.call(draft, "engineCapMargin")
+					? draft.engineCapMargin : (f ? toUi(f, stored.engineCapMargin) : marginSaved);
+				const m = Number(raw);
+				return Number.isFinite(m) && m >= 0 && m < 0.5 ? m : marginSaved;
+			})();
+			const capNow = engineThresholdNow === null ? null : Math.max(0, engineThresholdNow - marginDraft);
 			/** 字段备注：criticalRatio 动态追加**生效上限**（C-own）。
 			 *  ⚠️ 上限必须用**面板自己拉的 state**（`engineCap`），不能用 `NS.engineCap`——
 			 *     后者只有开过悬浮弹窗才有值（真 bug：用户没开弹窗 ⇒ 备注「待探测」+ 保存不钳制）。
@@ -455,29 +477,39 @@ window.__ModuleLoader__.load({
 			 *   上限     = 引擎阈值 − 余量 = engineCap（面板拉到的 criticalCap）
 			 *   生效强制线 = min(强制压缩线, 上限)   ← 与 host 的 effCrit 同一公式
 			 */
-			const marginNow = (() => {
-				const m = Number(cfg?.engineCapMargin);
-				return Number.isFinite(m) && m >= 0 && m < 0.5 ? m : 0.05;
-			})();
+			const marginNow = marginDraft; // R67：余量取**当前草稿**（改完立即重算上限，不用等保存）
 			const effectiveCrit = () => {
-				const f = FIELDS.find((x) => x.key === "criticalRatio");
+				const f = fieldOf("criticalRatio");
 				if (!f) return null;
 				const v = Number(valueOf(f));
 				if (!Number.isFinite(v)) return null;
-				return engineCap === null ? null : Math.min(v, engineCap);
+				return capNow === null ? null : Math.min(v, capNow);
 			};
+			/* R67：余量一改 ⇒ 上限降了 ⇒ 把「强制压缩线」当场钳到新上限（草稿级；保存即落盘）。
+			 * 刻意**不自动写盘**：草稿里改了余量还没点保存就去写线上配置，会让用户"没保存却已改"。 */
+			react.useEffect(() => {
+				if (!ready || capNow === null) return;
+				const f = fieldOf("criticalRatio");
+				if (!f) return;
+				setDraft((d) => {
+					const has = d !== null && Object.prototype.hasOwnProperty.call(d, "criticalRatio");
+					const cur = Number(has ? d.criticalRatio : toUi(f, stored.criticalRatio));
+					if (!Number.isFinite(cur) || cur <= capNow) return d;
+					return { ...(d ?? {}), criticalRatio: String(capNow) };
+				});
+			}, [ready, capNow, stored.criticalRatio]);
 			const hintFor = (field) => {
 				const pp = Math.round(marginNow * 1000) / 10;
 				const eff = effectiveCrit();
 				const effTxt = eff === null ? "（待探测）" : pct1(eff);
+				const capTxt = capNow === null ? "?" : pct1(capNow);
 				if (field.key === "criticalRatio") {
-					return engineCap === null
+					return capNow === null
 						? `${field.hint}；上限 = 引擎阈值 − 余量 ${pp} 个百分点（待探测，见弹窗阈值行）`
-						: `${field.hint}；上限 = 引擎阈值 − 余量 ${pp} 个百分点（当前上限 ${pct1(engineCap)}）；**生效强制线 = min(你的值, 上限) = ${effTxt}**，超出上限会自动钳到上限`;
+						: `${field.hint}；上限 = 引擎阈值 − 余量 ${pp} 个百分点（当前上限 ${capTxt}）；**生效强制线 = min(你的值, 上限) = ${effTxt}**，超出上限会自动钳到上限`;
 				}
 				if (field.key === "engineCapMargin") {
-					const engineGuess = engineCap === null ? null : engineCap + marginNow;
-					return `${field.hint}；当前引擎阈值 ${engineGuess === null ? "（待探测）" : pct1(engineGuess)} − 余量 ${pp}pp = 上限 ${engineCap === null ? "?" : pct1(engineCap)}；**生效强制线 = ${effTxt}**（与你设的强制压缩线取较小者）`;
+					return `${field.hint}；当前引擎阈值 ${engineThresholdNow === null ? "（待探测）" : pct1(engineThresholdNow)} − 余量 ${pp}pp = 上限 ${capTxt}；**生效强制线 = ${effTxt}**（改余量后强制压缩线会自动跟着降）`;
 				}
 				return field.hint ?? "";
 			};
@@ -494,9 +526,10 @@ window.__ModuleLoader__.load({
 				 * 只钳「已构成完整数字且超过生效上限」的情形——输入过程（"" / "0."）不改写，
 				 * 否则会边打字边被改。上限未探测到（engineCap=null）时不钳，保存路径仍有同一道兜底。 */
 				let next = raw;
-				if (field.key === "criticalRatio" && engineCap !== null) {
+				/* R67：钳制基准改为 **capNow**（引擎阈值 − 当前余量）⇒ 改完余量再输入也会按新上限钳。 */
+				if (field.key === "criticalRatio" && capNow !== null) {
 					const n = parseInput(field, raw);
-					if (n !== null && n > engineCap) next = String(engineCap);
+					if (n !== null && n > capNow) next = String(capNow);
 				}
 				setDraft((d) => ({ ...(d ?? {}), [field.key]: next }));
 				setMessage(void 0);
@@ -515,7 +548,7 @@ window.__ModuleLoader__.load({
 				 *    后者只有开过悬浮弹窗才有值。真 bug：用户没开弹窗 ⇒ 保存**不钳制**，
 				 *    设 0.8 就真存成 0.8（2026-10-08 用户截图实测）。
 				 * 仍拿不到时不钳制——host 侧 pre-step/sweep 还有同一道 min() 兜底。 */
-				const cap = engineCap !== null && engineCap > 0 && engineCap <= 1 ? engineCap : null;
+				const cap = capNow !== null && capNow > 0 && capNow <= 1 ? capNow : null;
 				for (const field of FIELDS) {
 					if (!Object.prototype.hasOwnProperty.call(values, field.key)) continue;
 					let parsed = parseInput(field, values[field.key]);
@@ -558,9 +591,9 @@ window.__ModuleLoader__.load({
 					const { written } = await persist(values);
 					setDraft(null); // 以写入值清理草稿，避免残留脏值
 					/* C-own：persist 可能已把 criticalRatio 钳到**生效上限**（引擎阈值 − 5pp）——回读真实生效值展示 */
-					const appliedCrit = Math.min(rec.criticalRatio, engineCap !== null ? engineCap : rec.criticalRatio);
+					const appliedCrit = Math.min(rec.criticalRatio, capNow !== null ? capNow : rec.criticalRatio);
 					const capNote = appliedCrit < rec.criticalRatio
-						? `（已按生效上限 ${Math.round(engineCap * 1000) / 10}% 收敛）` : "";
+						? `（已按生效上限 ${Math.round(capNow * 1000) / 10}% 收敛）` : "";
 					const text = written === 0
 						? "推荐值与当前配置一致，无需写入。"
 						: `已应用并回读校验通过（${written} 项：智能压缩线 ${rec.markerMinRatio} / 强制压缩线 ${appliedCrit}${capNote}）`;
@@ -674,7 +707,7 @@ window.__ModuleLoader__.load({
 				el("div", { className: "dcp-hint" },
 					"保存写入插件配置并触发重载。压缩标记通道：模型回复尾行写标记 → 本轮结束自动压缩（详见政策卡）。"
 					+ "智能思考：开启后向 Agent 暴露当前思考档位（可选档由模型动态决定）并允许其调用 set_reasoning_effort 工具自主换档，本次任务内立即生效、不中断；关闭则提示词不注入、工具也不注册。"),
-				el(PriceCalculator, { writable, saving, onApply: applyRecommendation, engineCap }),
+				el(PriceCalculator, { writable, saving, onApply: applyRecommendation, engineCap: capNow }),
 			);
 		}
 		/**
