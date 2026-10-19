@@ -251,6 +251,9 @@ ok('B / summary：渲染出汇总行（dcp-summary），不抛',
 
 /* ── R57：模板输入框放大 + 「查看内置文案」按钮（用户 2026-10-19 要求）── */
 const tplAreas = B.page.nodes.filter((n) => n.type === "textarea");
+ok('R57b：空模板必须显示**空白**（不是 0）—— Number("") === 0 的老坑',
+  tplAreas.length >= 2 && tplAreas.every((n) => n.props.value === ""),
+  `实际 value=${JSON.stringify(tplAreas.map((n) => n.props.value))} ⇒ 显示 0 会让用户以为模板该填数字（用户实测反馈）`);
 ok('R57：模板输入框放大（rows ≥ 8 + 独立 class dcp-tpl，不再与只读 pre 共用小样式）',
   tplAreas.length >= 2 && tplAreas.every((n) => n.props.rows >= 8 && n.props.className === "dcp-tpl"),
   `实际 ${tplAreas.length} 个 textarea：${tplAreas.map((n) => `${n.props.className}/rows=${n.props.rows}`).join(', ')}`);

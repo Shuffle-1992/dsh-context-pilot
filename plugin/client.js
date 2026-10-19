@@ -141,7 +141,10 @@ window.__ModuleLoader__.load({
 		/** 解析输入框字符串 → 字段类型值（**存储口径**：scale 字段在此把「秒」换回「毫秒」）；非法返回 null。 */
 		function parseInput(field, raw) {
 			if (field.type === "bool") return raw === true;
-			if (field.type === "text") return typeof raw === "string" ? raw : null;
+			/* R57b（2026-10-19 用户实测）：tpl（文案模板）与 text 一样是**字符串字段**。
+			 * 原先 tpl 落到数值分支 ⇒ 清空后 raw.trim()==="" 判 null ⇒ 保存被拒「输入不合法」
+			 * ⇒ 「留空 = 用内置文案」这条路根本走不通（用户无法把模板清回留空）。 */
+			if (field.type === "text" || field.type === "tpl") return typeof raw === "string" ? raw : null;
 			/* C5（审查）：清空输入拦为 null——原 `Number('')=0` 会把比率类字段存成 0（0 即该通道失效）。
 			 * null 走表单既有的「输入不合法」错误提示路径。 */
 			if (typeof raw === "string" && raw.trim() === "") return null;
@@ -155,6 +158,12 @@ window.__ModuleLoader__.load({
 		function toUi(field, storedValue) {
 			const base = storedValue === void 0 || storedValue === null ? field.def : storedValue;
 			if (field.type === "bool") return base === true; // 布尔直通：Number(true)=1 会让 checked===true 判定假阴（实测回归）
+			/* ⚠️ R57b（2026-10-19 用户实测「模板框里默认写个 0，应该为空白才对」）：
+			 * 文本类字段（text/tpl）必须**原样返回**——原先一律走 `Number(base)`，而 `Number("") === 0`
+			 * ⇒ 空模板被显示成 `0`。文本字段不是数字，绝不做数值归一。 */
+			if (field.type === "text" || field.type === "tpl") {
+				return base === void 0 || base === null ? "" : String(base);
+			}
 			const n = Number(base);
 			if (!Number.isFinite(n)) return base;
 			return field.scale ? n / field.scale : n;

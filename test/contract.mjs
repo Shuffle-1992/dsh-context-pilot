@@ -4641,6 +4641,16 @@ ok('R57：m2 把内置原文随 injected 下发（builtinBrief/builtinCard，**�
   (m2Src57.match(/builtinBrief: state\.m3\?\.lastBuiltin\?\.brief \?\? null/g) ?? []).length === 2,
   '只带一处 ⇒ 回执轮（仅量测失败那条路径）面板没有内置文案可看');
 
+/* ═══ R57b（2026-10-19 用户实测「模板框里默认写个 0，应该为空白才对」）═══
+ * 根因：toUi 一律 `Number(base)`，而 `Number("") === 0` ⇒ 空模板显示成 0；
+ * 同源第二个 bug：parseInput 对 tpl 落到数值分支 ⇒ 清空即 null ⇒ 保存被拒「输入不合法」
+ * ⇒ 「留空 = 用内置文案」这条路走不通。两处都要把文本类字段当字符串。 */
+ok('R57b：toUi 对文本类字段（text/tpl）原样返回，不做数值归一（Number("")===0 老坑）',
+  /if \(field\.type === "text" \|\| field\.type === "tpl"\) \{[\s\S]{0,140}?String\(base\)/.test(client),
+  '文本字段走 Number(base) ⇒ 空模板显示成 0（用户实测：模板框里默认写个 0）');
+ok('R57b：parseInput 把 tpl 当字符串（否则清空模板被拒，无法恢复「留空 = 内置文案」）',
+  /if \(field\.type === "text" \|\| field\.type === "tpl"\) return typeof raw === "string" \? raw : null;/.test(client),
+  'tpl 落到数值分支 ⇒ 清空即 null ⇒ 保存被拒 ⇒ 模板无法清回留空');
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));
 process.exit(failures ? 1 : 0);

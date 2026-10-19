@@ -3830,3 +3830,26 @@ Hook 顺序 ⇒ 漏掉两类同样会被边界吞掉的异常。现补：真执�
 
 **守卫**：client-render 3 条（rows ≥ 8 且 class=dcp-tpl、按钮存在、内置文案来自 `inj.*`）、
 contract 2 条（compact-tool 落档、m2 两处下发）。
+
+### R57b 空模板被显示成 `0`（2026-10-19，用户实测；含同源第二个 bug）
+
+用户反馈：「不是8，是0，里面默认是写个0，应该为空白才对」——**真 bug**，且连带一个更严重的后果。
+
+**根因**（`plugin/client.js#toUi`）：
+```js
+const base = storedValue === void 0 || storedValue === null ? field.def : storedValue;  // 空模板 ⇒ ""
+const n = Number(base);            // ← Number("") === 0
+if (!Number.isFinite(n)) return base;   // 0 是有限数 ⇒ 直接返回 0 ⇒ 输入框里显示 "0"
+```
+⇒ 面板把「留空」渲染成了 `0`，用户会以为模板该填数字。
+
+**同源第二个 bug**（`parseInput`）：`tpl` 字段落到**数值分支** ⇒ `raw.trim() === ""` 判 `null`
+⇒ 保存时走「输入不合法」错误路径 ⇒ **用户无法把模板清回留空**，即「留空 = 用内置文案」这条
+产品承诺根本走不通（清空保存必被拒）。
+
+**修法**：`toUi` 与 `parseInput` 都把**文本类字段**（`text` / `tpl`）当字符串处理——
+`toUi` 原样返回（`undefined/null → ""`），`parseInput` 直通字符串。`canon` 本就对非数值字段
+返回字符串（`""` 是字符串）⇒ 无需改动。
+
+**守卫**：client-render 1 条（空模板的 `value` 必须是 `""`，不是 `0`）+ contract 2 条
+（`toUi` 文本直通、`parseInput` 把 tpl 当字符串）。**变异**：撤掉 `toUi` 的文本直通 ⇒ 套件红 ✓ CAUGHT。
