@@ -1622,6 +1622,25 @@ ok('面板确实把 engineCap 传给了计算器（渲染处与签名两头都�
   /el\(PriceCalculator, \{ writable, saving, onApply: applyRecommendation, engineCap \}\)/.test(client),
   '渲染处没传 engineCap ⇒ 计算器拿到 undefined（虽不崩，但上限提示失效）');
 
+/* ═══ 6.17b R56（2026-10-19）：配置卡**整卡静默消失**的第二种形态 ═══
+ * 用户实测「这个界面没有看到」（截图里配置卡位置一片空白）。真因：
+ *   `const pct1` 定义在 `hintFor` **函数体内部**，而 **summary 分支**（详情页那一行
+ *   `智能压缩线 x% ｜ 强制压缩线 y%`）在 `hintFor` **外面**调用它 ⇒ 渲染期
+ *   `ReferenceError: pct1 is not defined` ⇒ 被 `CardBoundary` 捕获 ⇒ `return null`
+ *   ⇒ 页面上什么都没有，**只在控制台留一条 warn**（§6.17 的 PriceCalculator 事故同型）。
+ * ⚠️ 这是本项目第三次同型事故：R54 的 F1（`lastUserText`）、F3（`alive`）、§6.17（`engineCap`）。
+ * `node --check` 只查语法 ⇒ 对未定义标识符完全无效 ⇒ 这里用**缩进锚定**做结构守卫：
+ * 组件级声明是 3 个 tab，函数体内的嵌套声明是 4 个 tab。 */
+ok('R56：`pct1` 声明在**组件作用域**（summary 分支要用它，否则整卡消失）',
+  /^\t{3}const pct1 = \(x\) =>/m.test(client),
+  'pct1 不在组件作用域 ⇒ summary 分支调用即 ReferenceError ⇒ CardBoundary 吞掉 ⇒ 配置卡整张消失');
+ok('R56：`pct1` 只有一处声明且不在嵌套作用域（防"缩进回去"复发）',
+  !/^\t{4,}const pct1 = /m.test(client) && (client.match(/const pct1 = /g) ?? []).length === 1,
+  '仍有嵌套声明 ⇒ 同名共存，使用点解析到哪个取决于作用域 ⇒ 极易复发');
+ok('R56：CardBoundary 出错时**留痕**（只 return null 会让"看不到"无从排查）',
+  /componentDidCatch\(error\) \{/.test(client) && /卡片渲染失败（已隔离/.test(client),
+  '无痕 ⇒ 用户看到"什么都没有"且没有任何线索（本次排查耗时正因如此）');
+
 /* ═══════════ 6.8 R1 智能思考字段三端对账 ═══════════ */
 console.log('\n== 6.8 智能思考字段（FIELDS ↔ schema ↔ M3_DEFAULTS）==');
 ok('FIELDS 含 effortEnabled', fieldsKeys.includes('effortEnabled'), '面板缺该字段');

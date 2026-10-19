@@ -52,10 +52,11 @@ profile `package.json` 两处要改（以本机 `desktop` profile 为例）：
 
 **当前版本 `v0.1.8`** · 逐版本历史与实证记录见 [`docs/milestones.md`](docs/milestones.md)。
 
-### 最近更新（v0.1.6 → v0.1.43）
+### 最近更新（v0.1.6 → v0.1.44）
 
 | 版本 | 更新 | 为什么值得知道 |
 | --- | --- | --- |
+| **v0.1.44** | **配置卡整卡消失的根因修复（R56）** | pct1 定义在 hintFor **内部**、却在 summary 分支外面被调用 ⇒ 渲染期 ReferenceError ⇒ 被 CardBoundary 吞掉 ⇒ **整张配置卡静默消失**（用户实测「这个界面没有看到」）。已提到组件作用域；contract 加 3 条守卫（缩进锚定 + 单一声明 + 边界留痕），变异 CAUGHT。**这是本项目第三次同型事故**（R54 F1/F3、§6.17）⇒ 记录已知缺口：需要 AST 级未定义标识符扫描或 React 真渲染冒烟。**830 断言** |
 | **v0.1.43** | **注入内容可视化 + 参数可配 + 文案模板（R55）** | 面板新增「本轮注入（只读）」区：用量行 / 决策卡 / 一次性说明 / 压缩回执**逐段原文** + 本轮活值 + 生效配置快照，可复制、可刷新；配置区新增 **阈值余量**、**三档保留比例**（活读，改完下一轮即生效，无需重启）、**两个文案模板**（`tplBrief`/`tplCard`，留空用内置，**缺 `{tool}` 自动回退内置并留痕**）。**827 断言**，变异 6/6 CAUGHT |
 | **v0.1.42** | **千问独立审计跑通：4 条真缺陷修复 + 测试盲区** | ①`lastUserText` 未解构 ⇒ 每次调用 ReferenceError（被空 catch 吞 = 静默降级）；②清理块引用未导出的 `pending` ⇒ 卸载第一行就抛、disposer 全不跑（泄漏）；③client `alive` 作用域外引用 ⇒ autoClamp 路径未捕获 rejection；④回执只写全局镜像、读取端只读 per-sid ⇒「未执行」读不回。另修 `boot.mjs` 桩：卸载器返回后被丢弃 ⇒ 卸载路径从未被执行。**782 断言**，变异 4/4 CAUGHT |
 | **v0.1.41** | **自审：落盘原子性 + 在飞标记按会话** | ①5 处 `.data` 直写 ⇒ 半截 JSON 被并发读者（含插件自己下次启动）读到 ⇒ 报告整份丢失（R13 同形；`test/report.mjs` 曾真实报 `Unterminated string in JSON`，当时只加重试绕开）⇒ 全部改 `writeJsonAtomic`（tmp+rename）；②`ownCompact` 全局单槽 ⇒ 多会话压缩漏记/重复记录 ⇒ 改按 sid 分槽。附 `docs/reviews/r51-audit-self.md` 九条假设逐条结论。**780 断言**，变异 2/2 CAUGHT |
@@ -343,7 +344,7 @@ Agent 自改档不应改掉新会话的默认档。
 **已完成**：M1–M5（用量读取 / 每轮注入 / 会话自说明 / HUD 弹窗 / 历史持久化）、R1–R21
 （智能思考 + 换档工具、压缩改工具触发、保留范围自算、全面审查加固、**压缩档位三选一**、
 工具后自检回执、回执按会话隔离、**用户手动改档的轮首知情**、**单档模型零注入 + 工具静默**）。**9 个域模块 + core**，`host.impl.mjs` **1836 → 518 行**。
-**测试**：contract 674 + static 77 + report 54 + boot 22 = **827 断言**全绿；关键回归均有变异验证。
+**测试**：contract 677 + static 77 + report 54 + boot 22 = **830 断言**全绿；关键回归均有变异验证。
 逐里程碑台账（含踩坑与实测数值）：[`docs/milestones.md`](docs/milestones.md)；
 早期进度历史存档：[`docs/status-archive.md`](docs/status-archive.md)。
 
@@ -365,7 +366,7 @@ npm run test:report   # 只跑报告形状
 | `report.mjs` | 54 | 产出侧字段契约；`republishFromReport`（原 `bfOnce`）回填链依赖；C3② 关键事件必须走 full 档（含**满环优先淘汰 slim**，防 FULL 取证被高频事件挤出）；**getHud 作用域与 criticalCap 实参契约**；**调查结论留档**（探针退役后结论不得丢）；真实报告结构自洽（**无嵌套条件断言** ⇒ 断言数不得随数据漂移）；`hud-acts.json` 去重；dump 工具可跑 | 报告形状无声破坏（踩过 2 次：顶层读 m3/m5、脚本读已删字段）；**证据静默丢失**（120 条全 slim、FULL 被挤光而断言全绿） |
 | `boot.mjs` | 21 | **宿主启动冒烟**：真跑 `apply(ctx, {}, {pluginDir, reportPath})`（桩 ctx）→ HUD 面注册 → **真调 `getHud(null)` 必须 `ok:true`** → `criticalCap`/occupancy/`effortEnabled` 三线 → 四个监听器 → **真调 pre-step handler**（abort 与 step=1 两次）→ **M2 注入路径留下记账**（`m2.skips` 有键或 injections>0）→ 有历史时 `m5.lastPublish==='ok'` → 报告落盘。副作用边界：报告写临时目录、`hud-acts.json` 只读不写 | **接线不可达**（R11 真事故：接线块被嵌进 `schedule()` 函数体、语法合法、423 条源断言全绿，**压缩与弹窗全链路静默失效**）——`node --check` 与源断言都看不见「代码在不在正确的函数里」 |
 
-合计 **827 条断言**（四套：contract / static / report / **boot**）。
+合计 **830 条断言**（四套：contract / static / report / **boot**）。
 
 **已验证有效**：注入 3 个人为 bug（`m3-act` 误入精简档 / client face 改名 / host 引用 client.js），
 三套件全部抓到且定位精准。**新增断言均实测验证过「对回归确实失败」**（两边都通过的测试等于没测）：

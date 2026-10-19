@@ -401,9 +401,18 @@ window.__ModuleLoader__.load({
 			 *     后者只有开过悬浮弹窗才有值（真 bug：用户没开弹窗 ⇒ 备注「待探测」+ 保存不钳制）。
 			 *  用户要求（2026-10-08）：上限 = DSH 内置阈值 **− 5 个百分点**（内置 80% ⇒ 75%），
 			 *  确保插件线确定性地先于引擎自动压缩触发。 */
+			/** ═══ R56（2026-10-19，用户实测「这个界面没有看到」）：`pct1` 必须提到**组件作用域** ═══
+			 * 事故现场：`const pct1` 原先定义在 `hintFor` **函数体内部**，而 **summary 分支**
+			 * （插件详情页那一行 `智能压缩线 x% ｜ 强制压缩线 y%`）在 `hintFor` **外面**调用它
+			 * ⇒ `ReferenceError: pct1 is not defined` ⇒ 被 `CardBoundary` 捕获 ⇒ `return null`
+			 * ⇒ **整张配置卡静默消失**（页面上"什么都没有"，控制台只有一条 console.warn）。
+			 * ⚠️ 这是本项目**第三次**栽在「作用域外的自由标识符」上：R54 的 F1（`lastUserText`）、
+			 * F3（`alive`），以及 §6.17 记录的 `PriceCalculator` 事故——**同一形状，同一个后果**。
+			 * 纪律：渲染期异常一律被错误边界吞掉 ⇒ 表现为"什么都没显示" ⇒ 排查成本极高。
+			 * 改这个文件时，凡在 JSX/分支里用的标识符，都要确认它在**使用点的作用域内**。 */
+			const pct1 = (x) => `${Math.round(Number(x) * 1000) / 10}%`;
 			const hintFor = (field) => {
 				if (field.key !== "criticalRatio") return field.hint ?? "";
-				const pct1 = (x) => `${Math.round(Number(x) * 1000) / 10}%`;
 				return engineCap === null
 					? `${field.hint}；上限 = DSH 内置阈值 − 5 个百分点（待探测，见弹窗阈值行）`
 					: `${field.hint}；上限 = DSH 内置阈值 − 5 个百分点（当前 ${pct1(engineCap)}），超出自动钳到该值`;

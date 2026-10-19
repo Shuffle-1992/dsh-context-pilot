@@ -3653,3 +3653,39 @@ F1/F2/F4 全在 `host.impl.mjs` 几十行之内，我读过很多次却没看见
 是"位置参数 bug"（说明会教 80% 而非生效 75%）——**错的**。m2 有**自己的局部包装**
 `renderBrief(effCrit, win)`（第 272 行），内部正确传了对象。我只看了调用点、没看定义就下结论。
 教训与 R54 同源：**先读定义，再断言**。
+
+### R56 配置卡「整卡静默消失」根因修复（2026-10-19，用户实测驱动）
+
+**用户实测**：「不是啊，这个本地插件，在这个界面也是可以渲染内容的」+「没有看到。」——并附上
+`dsh-connect-zcode`（同为本地 link 插件）**正常渲染完整配置卡**的截图 ⇒ 证明这一屏**就是**配置页，
+问题在**我们自己的客户端组件**上。（我此前"入口不对/那是详情页"的判断**是错的**，已撤回。）
+
+**真因**（`plugin/client.js`）：`const pct1` 定义在 **`hintFor` 函数体内部**（第 406 行），而
+**summary 分支**（详情页那一行 `智能压缩线 x% ｜ 强制压缩线 y%`）在 `hintFor` **外面**调用它
+⇒ 渲染期 `ReferenceError: pct1 is not defined` ⇒ 被 `CardBoundary` 捕获 ⇒ `return null`
+⇒ **整张配置卡静默消失**，页面上什么都没有，**只在控制台留一条 `console.warn`**。
+用户看到的"空白"正是这一行本该在的位置。
+
+**定位过程（可复用）**：
+1. `cordis_inspect_query`（host Config）⇒ `status: "schema"` + **完整投影 12 个字段** ⇒ host 侧无罪；
+2. `cordis_inspect_query`（client Slots）⇒ 我们的注册 `active: true` 在 `plugins.bundle.config`
+   ⇒ 插槽与注册无罪（该插槽定义：渲染在 bundle 页描述与行之间，`view:'page'`）；
+3. 读 `CardBoundary` ⇒ **出错即 `return null`** ⇒ "什么都没有"的形态有了归属；
+4. 对比 `dsh-connect-zcode/lib/client.js`（同插槽、正常渲染）⇒ 排除插槽契约差异；
+5. 核 `PilotPanelCard` 的 hook 顺序（都在 301–361，早于 504 的 summary 分支）⇒ 排除 hooks 违规；
+6. 逐个核页面分支引用的标识符的最小声明缩进 ⇒ 锁定 `pct1`。
+
+**修法**：`pct1` 提到**组件作用域**（第 413 行，3 tab）。守卫（contract 3 条）：
+`pct1` 必须声明在组件作用域 ✓；只有一处声明且不在嵌套作用域 ✓；`CardBoundary` 必须留痕 ✓。
+**变异**：把 `pct1` 缩回 `hintFor` 内部 ⇒ **2 条断言同时红** ✓ CAUGHT。
+
+**⚠️ 这是本项目第三次同型事故**：R54 的 F1（`lastUserText` 未解构）、F3（`alive` 作用域外引用），
+以及 §6.17 记录的 `PriceCalculator`（`engineCap` 未经 props 传入）——**同一形状、同一后果**：
+渲染期 `ReferenceError` 被错误边界吞掉 ⇒ 表现为"什么都没显示" ⇒ 排查成本极高（本次耗时约 1 小时）。
+**纪律**：改 `client.js` 时，凡在 JSX/分支里使用的标识符，都要确认它在**使用点的作用域内**；
+`node --check` 只查语法，**对未定义标识符完全无效**。
+
+**已知缺口（如实记录）**：现有守卫是**结构级**（缩进锚定 + 名字对账），不是**作用域分析**。
+真正的解法是用 AST（acorn/eslint-scope）做未定义标识符扫描，或在测试里用 React 真渲染一次卡片
+（DSH 的 asar 里应有 react/react-dom，可抽出做 render 冒烟）。**本轮未做**，列为后续项。
+
