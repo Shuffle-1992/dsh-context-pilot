@@ -264,6 +264,16 @@ ok('R57：内置文案来自 host 下发的 inj.builtinBrief/builtinCard（不�
   /inj\?\.builtinBrief/.test(SRC) && /inj\?\.builtinCard/.test(SRC),
   'client 自持一份内置文案 ⇒ 与 host 漂移（改一处忘另一处）');
 
+/* ── R60（2026-10-19 用户实测）：① 缺「思考强度教学」输入框 ② 六段原文要点按钮才展开 ── */
+ok('R60：模板输入框有**三个**（新增「思考强度教学模板」——用户要求补的）',
+  tplAreas.length >= 3,
+  `实际 ${tplAreas.length} 个 textarea ⇒ 思考强度教学仍缺输入框（用户实测反馈）`);
+ok('R60：六段注入原文**默认收起**，点「查看」才展开（不再整块铺开撑爆面板）',
+  /const \[injOpen, setInjOpen\] = react\.useState\(null\)/.test(SRC)
+  && /injOpen === title \? el\("pre"/.test(SRC)
+  && /injOpen === title \? "收起" : "查看"/.test(SRC),
+  '原文仍无条件渲染 ⇒ 一屏上千行（用户截图圈红要求改）');
+
 ok('R58：内置文案缺席时给出**可操作**提示（明确提示 toggle 加载新版 host，而不是只说"暂无"）',
   /toggle 插件/.test(SRC) && /内置原文由 \*\*host 半\*\*/.test(SRC),
   '只说"暂无" ⇒ 用户不知道 host 改动需要 toggle（PANEL-HOWTO §0：host 半改动要 toggle 或重启）');

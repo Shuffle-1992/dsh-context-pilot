@@ -97,6 +97,9 @@ const M3_DEFAULTS = {
    *    （绝不注入半截模板：模板里若没有工具名，模型就不知道该调什么，比不注入更糟）。 */
   tplBrief: '',
   tplCard: '',
+  /* R60（2026-10-19 用户要求「还缺一个思考强度教学的输入框」）：思考强度教学的模板。
+   * 原文由 effort.mjs 产出，模板由 compact-tool 的 renderTemplated 施加（同样必须含 {tool}）。 */
+  tplEffBrief: '',
 };
 // 注：关键词「先压缩」通道已按用户决定裁撤（2026-10-06）——"要写先压缩不如直接手动执行压缩指令"。
 
@@ -400,7 +403,7 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
       const raw = {};
       /* R7：`marker` / `armedTtlMs` 已随 marker 通道退役移出读取集——
        * 读取集必须与 M3_DEFAULTS 保持同一集合，否则「面板改了不生效」会重演。 */
-      for (const k of ['enabled', 'effortEnabled', 'criticalRatio', 'markerMinRatio', 'sweepMinIntervalMs', 'effortCooldownMs', 'retainRatioLight', 'retainRatioStandard', 'retainRatioHeavy', 'engineCapMargin', 'tplBrief', 'tplCard']) {
+      for (const k of ['enabled', 'effortEnabled', 'criticalRatio', 'markerMinRatio', 'sweepMinIntervalMs', 'effortCooldownMs', 'retainRatioLight', 'retainRatioStandard', 'retainRatioHeavy', 'engineCapMargin', 'tplBrief', 'tplCard', 'tplEffBrief']) {
         raw[k] = live(config[k]);
       }
       if (typeof raw.enabled === 'boolean') M3.enabled = raw.enabled;
@@ -426,9 +429,9 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
         && raw.engineCapMargin >= 0 && raw.engineCapMargin < 0.5) {
         M3.engineCapMargin = raw.engineCapMargin;
       }
-      /* R55③：文案模板 —— 只收字符串，**上限 8000 字符**（模板每轮注入，无界会把上下文吃光；
+      /* R55③ / R60：文案模板 —— 只收字符串，**上限 8000 字符**（模板每轮注入，无界会把上下文吃光；
        * 超限视为非法 ⇒ 保持现值）。占位符校验在消费端（compact-tool）：缺 `{tool}` ⇒ 回退内置。 */
-      for (const k of ['tplBrief', 'tplCard']) {
+      for (const k of ['tplBrief', 'tplCard', 'tplEffBrief']) {
         if (typeof raw[k] === 'string' && raw[k].length <= 8000) M3[k] = raw[k];
       }
     } catch (e) {

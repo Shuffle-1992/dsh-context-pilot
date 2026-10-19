@@ -3880,3 +3880,32 @@ if (!Number.isFinite(n)) return base;   // 0 是有限数 ⇒ 直接返回 0 ⇒
 渲染层断不到，因为 `inj` 由 `hudRemoteSvc.getHud()` 填充、沙箱不桩这条远端链路 ⇒ `inj` 恒 null）；
 ② 底部不再残留 `key:"vals"`；③ 标题行确实渲染且含刷新按钮；④ 标题行是 `flex-wrap`。
 **变异**：把活值行挪回底部 ⇒ R59 红 ✓ CAUGHT。
+
+### R60 补「思考强度教学」输入框 + 六段注入原文改为按钮展开（2026-10-19，用户实测）
+
+用户两条：「圈红的应该移到板块里面显示，**或者按钮点击显示**」+「还确实（缺）一个**思考强度教学**的输入框」。
+
+**① 六段注入原文默认收起**：原先「本轮注入（只读）」把六段原文（用量行/决策卡/一次性说明/思考强度教学/
+换档提示/压缩自检回执）**无条件整块铺开**——一屏上千行，把面板撑得没法用。现每段一行
+`[标题] [查看] [复制]`，`<pre>` 只在 `injOpen === title` 时渲染（新增 `injOpen` state，与 `tplOpen` 同层）。
+
+**② 新增「思考强度教学模板」（`tplEffBrief`）**——这是本轮唯一的新配置字段，贯通 **7 处**：
+| 处 | 改动 |
+|---|---|
+| `plugin-config.schema.mjs` | `.volatile()` 字符串字段（面板可写；DSH 只放行 volatile ✓） |
+| `core.mjs#M3_DEFAULTS` | `tplEffBrief: ''` |
+| `core.mjs#mergeConfig` 读取集 | += `'tplEffBrief'`（与 M3_DEFAULTS 同集合，契约有断言） |
+| `core.mjs` 模板校验 | `['tplBrief','tplCard','tplEffBrief']`（≤8000 字符） |
+| `compact-tool.mjs` | 新增并导出 **`renderTemplated(which, text, extraVars)`** —— 给**别的域产出**的文案套壳 |
+| `m2.inject.mjs` | `effBriefBuiltin` = effort 域原文；`effBrief` = 套模板（`{tool}` 覆盖为 `set_reasoning_effort`）；两处 `lastInjection` 带 `builtinEffBrief` |
+| `client.js` | FIELDS 第 3 个 `tpl` 行；内置文案映射扩成三支 |
+
+**为什么需要 `renderTemplated`**：「思考强度教学」原文由 **effort.mjs** 产出（`effortApi.renderBrief`），
+compact-tool **拿不到**原文 ⇒ 不能像 brief/card 那样自己渲染。故 compact-tool 只提供**通用套壳**，
+规则与另两个模板完全一致：必须含 `{tool}`，缺则回退内置并留痕（`tplFallback`）。
+`{tool}` 在此语境被覆盖为 `set_reasoning_effort`（否则模板会指向压缩工具，模型会调错工具）。
+
+**守卫**：contract 4 条（导出 `renderTemplated` / m2 套模板且工具名正确 / 两处下发 `builtinEffBrief` /
+面板映射三支）+ client-render 2 条（模板框 ≥3 个 / 原文默认收起靠按钮展开）；另有**契约自动新增 3 条**
+（三端一致性守卫认出新字段：schema ↔ FIELDS ↔ mergeConfig 读取集）。
+**变异**：不套模板 ⇒ contract 红 ✓；原文改回无条件展开 ⇒ client-render 红 ✓ ⇒ 两条都 CAUGHT。

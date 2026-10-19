@@ -4651,6 +4651,21 @@ ok('R57b：toUi 对文本类字段（text/tpl）原样返回，不做数值归�
 ok('R57b：parseInput 把 tpl 当字符串（否则清空模板被拒，无法恢复「留空 = 内置文案」）',
   /if \(field\.type === "text" \|\| field\.type === "tpl"\) return typeof raw === "string" \? raw : null;/.test(client),
   'tpl 落到数值分支 ⇒ 清空即 null ⇒ 保存被拒 ⇒ 模板无法清回留空');
+/* ═══ R60（2026-10-19 用户要求「还缺一个思考强度教学的输入框」+「圈红的按钮点击显示」）═══
+ * 「思考强度教学」原文由 **effort 域**产出（m2 调 effortApi.renderBrief）⇒ compact-tool 拿不到原文，
+ * 只能提供**通用套壳** renderTemplated；规则与 brief/card 一致（必须含 {tool}，缺则回退并留痕）。 */
+ok('R60：compact-tool 导出 renderTemplated（给"别的域产出的文案"套模板）',
+  /renderCard, renderTemplated, diag/.test(ctSrc57) && /const renderTemplated = \(which, text, extraVars = \{\}\)/.test(ctSrc57),
+  '没有通用套壳 ⇒ 思考强度教学无法套模板（原文不在本域）');
+ok('R60：m2 对思考强度教学套模板，且 {tool} 覆盖为 set_reasoning_effort',
+  /renderTemplated\?\.\('tplEffBrief', effBriefBuiltin,/.test(m2Src57) && /tool: 'set_reasoning_effort'/.test(m2Src57),
+  '未套模板或工具名错 ⇒ 模板里的 {tool} 会指向压缩工具，模型调错工具');
+ok('R60：三个模板的内置原文都随 injected 下发（含 builtinEffBrief，两处 lastInjection）',
+  (m2Src57.match(/builtinEffBrief/g) ?? []).length >= 2,
+  '只带一处 ⇒ 回执轮面板「查看内置文案」为空');
+ok('R60：面板内置文案映射覆盖**三个**模板（不再是二元三目）',
+  /field\.key === "tplCard" \? inj\?\.builtinCard/.test(client) && /inj\?\.builtinEffBrief/.test(client),
+  '只映射两个 ⇒ 思考强度教学点开是空的');
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));
 process.exit(failures ? 1 : 0);

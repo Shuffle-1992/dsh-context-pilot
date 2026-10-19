@@ -113,6 +113,10 @@ window.__ModuleLoader__.load({
 			{ key: "retainRatioHeavy", label: "浅压比例", type: "num", def: 0.24, hint: "「浅压」档保留比例（接下来仍要频繁引用近端一大段时用）" },
 			{ key: "tplBrief", label: "一次性说明模板", type: "tpl", def: "", hint: "留空 = 用内置文案。占位符 {tool} {builtin} {critical} {tiers} {keepFromHint} {retainRatio} {retainTokens}；**必须含 {tool}**，缺则回退内置并在面板留痕" },
 			{ key: "tplCard", label: "决策卡模板", type: "tpl", def: "", hint: "留空 = 用内置文案。占位符 {tool} {builtin} {critical} {minRatio} {ratio} {retainRatio} {retainTokens} {used} {window} {tiers}；**必须含 {tool}**" },
+			/* R60（2026-10-19 用户要求「还缺一个思考强度教学的输入框」）：这段原文由 **effort 域**
+			 * 产出（m2 调 effortApi.renderBrief），模板经 compact-tool.renderTemplated 施加；
+			 * 规则与另两个模板一致：必须含 {tool}（此语境 = set_reasoning_effort），缺则回退内置并留痕。 */
+			{ key: "tplEffBrief", label: "思考强度教学模板", type: "tpl", def: "", hint: "留空 = 用内置文案。占位符 {tool}（= set_reasoning_effort）{builtin} {current} {tiers}；**必须含 {tool}**，缺则回退内置并在面板留痕" },
 			/* R7：`marker`（压缩标记）与 `armedTtlMs`（标记有效期）两个面板字段随 marker 通道退役删除——
 			 * 压缩已改由工具 `compact_context` 触发，回复尾行文本标记既无教学也无执行路径。
 			 * ⚠️「智能压缩线」(`markerMinRatio`) 保留：它是决策卡注入门槛，与标记无关。 */
@@ -354,6 +358,8 @@ window.__ModuleLoader__.load({
 			const [cfg, setCfg] = react.useState(null);
 			/* R57：哪一行模板正在展开「内置文案」（null = 全部收起）。必须与其他 hook 同层无条件调用。 */
 			const [tplOpen, setTplOpen] = react.useState(null);
+			/* R60：六段注入原文里哪一段正展开（null = 全部收起）。同上，无条件同层调用。 */
+			const [injOpen, setInjOpen] = react.useState(null);
 			const pullInj = react.useCallback(async () => {
 				try {
 					if (!hudRemoteSvc || typeof hudRemoteSvc.getHud !== "function") return;
@@ -566,6 +572,13 @@ window.__ModuleLoader__.load({
 			const injBlock = (title, text) => (text ? el("div", { className: "dcp-inj-b", key: title },
 				el("div", { className: "dcp-inj-t" },
 					el("span", null, title),
+					/* ═══ R60（2026-10-19 用户要求「圈红的应该…按钮点击显示」）═══
+					 * 六段注入原文**默认收起**：全展开时这一屏上千行，把面板撑得没法用。
+					 * 点「查看」逐段展开、再点「收起」；「复制」始终可用（不需要先展开）。 */
+					el("button", {
+						className: "dcp-mini", type: "button", title: "展开/收起这段原文",
+						onClick: () => setInjOpen((v) => (v === title ? null : title)),
+					}, injOpen === title ? "收起" : "查看"),
 					el("button", {
 						className: "dcp-mini", title: "复制这段原文",
 						onClick: () => {
@@ -576,7 +589,7 @@ window.__ModuleLoader__.load({
 						},
 					}, "复制"),
 				),
-				el("pre", { className: "dcp-inj-p" }, String(text)),
+				injOpen === title ? el("pre", { className: "dcp-inj-p" }, String(text)) : null,
 			) : null);
 			const injSec = el("div", { className: "dcp-inj" },
 				/* ═══ R59（2026-10-19 用户要求：「下面的那些内容移到**板块**里面显示」）═══
@@ -645,7 +658,9 @@ window.__ModuleLoader__.load({
 									),
 									tplOpen === field.key
 										? el("pre", { className: "dcp-builtin" },
-											(field.key === "tplBrief" ? inj?.builtinBrief : inj?.builtinCard)
+											(field.key === "tplBrief" ? inj?.builtinBrief
+												: field.key === "tplCard" ? inj?.builtinCard
+													: inj?.builtinEffBrief)
 												|| "（暂无可显示的内置文案：内置原文由 **host 半**随本轮注入下发。若一直为空，说明 host 还跑着旧版——请先 **toggle 插件**（关→开）加载新版 host，再点上面的「刷新」或等下一轮注入）")
 										: null,
 								)

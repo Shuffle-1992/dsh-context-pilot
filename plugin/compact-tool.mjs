@@ -341,6 +341,19 @@ export function createCompactTool(deps) {
     for (const k of Object.keys(vars)) out = out.split(k).join(String(vars[k]));
     return out;
   };
+  /**
+   * R60（2026-10-19 用户要求「还缺一个思考强度教学的输入框」）：给**由别的域渲染**的文案套模板。
+   * 「思考强度教学」原文由 effort.mjs 产出（m2 调 `effortApi.renderBrief(eff)`），compact-tool
+   * 只负责套壳。规则与 brief/card **完全一致**：必须含 `{tool}`，否则回退内置并留痕（tplFallback）——
+   * 否则模型会不知道调哪个工具。`{builtin}` 就是 effort 域的原文，模板可在其前后自由增补。
+   */
+  const renderTemplated = (which, text, extraVars = {}) => {
+    if (text == null) return text;
+    try {
+      const vars = { ...tplVars(extraVars, String(text)), ...extraVars };
+      return applyTpl(M3?.[which], vars, which) ?? text;
+    } catch { return text; }
+  };
   /** R55③：渲染前同步档位比例（配置活读 ⇒ 卡片/说明/工具描述三处同时跟上，不存在写死百分比漂移）。 */
   /** R57（2026-10-19 用户要求「内置文案改成一个按钮，点击查看」）：把**内置原文**留档。
    *  面板的「查看内置文案」按钮要显示"模板留空时插件实际会用的原文"，而 client 半拿不到渲染器
@@ -889,5 +902,5 @@ export function createCompactTool(deps) {
     };
   }
 
-  return { TOOL_NAME, ensure, peekIntent, takeIntent, pending, getTier, hasTier, setTier, tierState, renderBrief, renderCard, diag, tierText: (t) => textOf(t), getAnchor, normAnchor, TIER_DISPLAY_FALLBACK: TIER_FALLBACK };
+  return { TOOL_NAME, ensure, peekIntent, takeIntent, pending, getTier, hasTier, setTier, tierState, renderBrief, renderCard, renderTemplated, diag, tierText: (t) => textOf(t), getAnchor, normAnchor, TIER_DISPLAY_FALLBACK: TIER_FALLBACK };
 }

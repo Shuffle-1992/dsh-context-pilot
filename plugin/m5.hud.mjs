@@ -237,7 +237,7 @@ export function createM5Hud(deps) {
             sweepMinIntervalMs: M3.sweepMinIntervalMs, effortCooldownMs: M3.effortCooldownMs,
             engineCapMargin: M3.engineCapMargin,
             retainRatioLight: M3.retainRatioLight, retainRatioStandard: M3.retainRatioStandard, retainRatioHeavy: M3.retainRatioHeavy,
-            tplBrief: M3.tplBrief, tplCard: M3.tplCard,
+            tplBrief: M3.tplBrief, tplCard: M3.tplCard, tplEffBrief: M3.tplEffBrief,
             tplFallback: state.m3?.tplFallback ?? null, tplFallbacks: state.m3?.tplFallbacks ?? 0,
             engineCapProbe: state.m3?.engineCapProbe ?? null,
           };

@@ -479,8 +479,9 @@ export function createM2Injection(deps) {
             briefText: null, effBriefText: null, receiptText: receiptOnly,
             /* R57：内置原文（模板留空时就是最终文案）⇒ 面板「查看内置文案」按钮用 */
             builtinBrief: state.m3?.lastBuiltin?.brief ?? null, builtinCard: state.m3?.lastBuiltin?.card ?? null,
+            builtinEffBrief: null, // R60：本路径（仅回执）没有 effBrief，恒为 null
             values: { ratio: null, window: null, effCrit: null, minRatio: M3.markerMinRatio, retainRatio: M3.retainRatioStandard, engineCapMargin: M3.engineCapMargin },
-            tpl: { brief: !!(M3.tplBrief || '').trim(), card: !!(M3.tplCard || '').trim() },
+            tpl: { brief: !!(M3.tplBrief || '').trim(), card: !!(M3.tplCard || '').trim(), effBrief: !!(M3.tplEffBrief || '').trim() },
             tier: null, receiptOnly: true,
           };
           log('warn', `M2 量测失败，但仍有压缩自检回执 ⇒ 只注入回执：${receiptOnly}`);
@@ -529,7 +530,13 @@ export function createM2Injection(deps) {
       const brief = briefedBySid.has(sid) ? null : renderBrief(effCrit, r.window); // M2.5+A3：现拼活值（含生效强制线 + 保留范围）
       /* 思考强度教学与「插件说明」同一时机（会话首次）——合并进同一条消息，
        * 不额外增加消息结构开销（role 框架/JSON 包装各一次）。 */
-      const effBrief = eff && !effBriefedBySid.has(sid) ? (effortApi?.renderBrief(eff) ?? null) : null;
+      /* R60（2026-10-19 用户要求「还缺一个思考强度教学的输入框」）：原文由 effort 域产出，
+       * 这里再套用户模板（compact-tool.renderTemplated）。规则与 brief/card 完全一致：
+       * 必须含 `{tool}`，缺则回退内置并在面板留痕。`{tool}` 在此语境 = `set_reasoning_effort`。 */
+      const effBriefBuiltin = eff && !effBriefedBySid.has(sid) ? (effortApi?.renderBrief(eff) ?? null) : null;
+      const effBrief = effBriefBuiltin == null ? null
+        : (getCompactToolApi?.()?.renderTemplated?.('tplEffBrief', effBriefBuiltin,
+          { tool: 'set_reasoning_effort', current: eff?.current ?? '', tiers: eff?.tiers ?? '' }) ?? effBriefBuiltin);
       if (effBrief) {
         remember(effBriefedBySid, sid); // C 类审查：有界化（原先无上限）
         state.m2.effortBriefings = (state.m2.effortBriefings ?? 0) + 1;
@@ -558,11 +565,12 @@ export function createM2Injection(deps) {
         briefText: brief, effBriefText: effBrief, receiptText,
         /* R57：内置原文（模板留空时就是最终文案）⇒ 面板「查看内置文案」按钮用 */
         builtinBrief: state.m3?.lastBuiltin?.brief ?? null, builtinCard: state.m3?.lastBuiltin?.card ?? null,
+        builtinEffBrief: effBriefBuiltin, // R60：思考强度教学的内置原文（effort 域产出，未经模板）
         values: {
           ratio: r.ratio, window: r.window ?? null, effCrit,
           minRatio: M3.markerMinRatio, retainRatio: M3.retainRatioStandard, engineCapMargin: M3.engineCapMargin,
         },
-        tpl: { brief: !!(M3.tplBrief || '').trim(), card: !!(M3.tplCard || '').trim() },
+        tpl: { brief: !!(M3.tplBrief || '').trim(), card: !!(M3.tplCard || '').trim(), effBrief: !!(M3.tplEffBrief || '').trim() },
         tier: (() => { try { return getCompactToolApi?.()?.getTier?.(sid) ?? null; } catch { return null; } })(),
       };
       log('info', `M2 注入 turn=${turn} step=${step}${card ? ' ＋政策卡' : ''}${effNudge ? ' ＋换档提示' : ''}：${r.text}`);
