@@ -85,7 +85,7 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
   let thresholdCtl = null;
   const thresholdReady = import(`./threshold.mjs?ts=${IMPL_TS}`)
     .then((m) => {
-      thresholdCtl = m.createThreshold({ svc, tryOf, state, log });
+      thresholdCtl = m.createThreshold({ svc, tryOf, state, log, M3 }); // R55②：M3 传入 ⇒ 阈值余量可配且活读
       return thresholdCtl;
     })
     .catch((e) => {
@@ -131,7 +131,7 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
   const compactToolReady = import(`./compact-tool.mjs?ts=${IMPL_TS}`)
     .then((m) => {
       compactToolApi = m.createCompactTool({
-        svc, tryOf, pick, msg, log, state,
+        svc, tryOf, pick, msg, log, state, M3, // R55③：M3 传入 ⇒ 文案模板可配（tplBrief/tplCard）+ 档位比例同步
         schedule: (reason, delay) => schedule(reason, delay), // 同 effort：避免 const TDZ
         readCfg: () => ({ enabled: M3.enabled === true }),
         getDefineTool: () => defineToolFn,

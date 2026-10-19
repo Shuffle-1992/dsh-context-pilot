@@ -83,6 +83,20 @@ const M3_DEFAULTS = {
    * 标记既无教学（三处教学已改工具版）也无执行路径，留着只是永不命中的死通道 + 无界 Map。
    * ⚠️ `markerMinRatio` **必须保留**：它同时是决策卡注入门槛，与标记无关。 */
   sweepMinIntervalMs: 600_000, // 强制压缩冷却：两次兜底压缩的最小间隔
+  /* ═══ R55（2026-10-19 用户要求：「决策卡/提示词/用量行暴露到面板，方便设置」）═══
+   * ① 三档保留比例开放配置（原先写死在 compact-range.TIERS）——它决定三档的名字与
+   *    「保留窗口 × N%」，是用户最想调的参数。**只改比例，不改「三档只是保留预算不同」的语义**；
+   *    非法值（非数/≤0/≥1/不满足 light<standard<heavy）**整组回退默认**，不做部分接受
+   *    （避免「深压 8% / 标准 16% / 浅压 5%」这种名不副实的半套生效）。 */
+  retainRatioLight: 0.08,
+  retainRatioStandard: 0.16,
+  retainRatioHeavy: 0.24,
+  /* ② 生效强制线 = min(criticalRatio, 引擎阈值 − 本余量)。默认 5 个百分点。 */
+  engineCapMargin: 0.05,
+  /* ③ 文案模板（空串 = 用内置文案）。占位符见 README §7；**缺必需占位符 `{tool}` ⇒ 回退内置并留痕**
+   *    （绝不注入半截模板：模板里若没有工具名，模型就不知道该调什么，比不注入更糟）。 */
+  tplBrief: '',
+  tplCard: '',
 };
 // 注：关键词「先压缩」通道已按用户决定裁撤（2026-10-06）——"要写先压缩不如直接手动执行压缩指令"。
 
@@ -386,7 +400,7 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
       const raw = {};
       /* R7：`marker` / `armedTtlMs` 已随 marker 通道退役移出读取集——
        * 读取集必须与 M3_DEFAULTS 保持同一集合，否则「面板改了不生效」会重演。 */
-      for (const k of ['enabled', 'effortEnabled', 'criticalRatio', 'markerMinRatio', 'sweepMinIntervalMs', 'effortCooldownMs']) {
+      for (const k of ['enabled', 'effortEnabled', 'criticalRatio', 'markerMinRatio', 'sweepMinIntervalMs', 'effortCooldownMs', 'retainRatioLight', 'retainRatioStandard', 'retainRatioHeavy', 'engineCapMargin', 'tplBrief', 'tplCard']) {
         raw[k] = live(config[k]);
       }
       if (typeof raw.enabled === 'boolean') M3.enabled = raw.enabled;
@@ -399,6 +413,23 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
       }
       for (const k of ['sweepMinIntervalMs', 'effortCooldownMs']) {
         if (typeof raw[k] === 'number' && Number.isFinite(raw[k]) && raw[k] >= 0) M3[k] = raw[k];
+      }
+      /* R55①：三档比例 —— 全组校验，**任一项非法就整组不动**（保持上一次的有效值）。
+       * 顺序约束 light < standard < heavy 必须成立，否则「深压/标准/浅压」的语义就反了。 */
+      const trio = ['retainRatioLight', 'retainRatioStandard', 'retainRatioHeavy'];
+      if (trio.every((k) => typeof raw[k] === 'number' && Number.isFinite(raw[k]) && raw[k] > 0 && raw[k] < 1)
+        && raw.retainRatioLight < raw.retainRatioStandard && raw.retainRatioStandard < raw.retainRatioHeavy) {
+        for (const k of trio) M3[k] = raw[k];
+      }
+      /* R55②：引擎阈值余量 —— 0 ≤ v < 0.5（≥0.5 会把生效线压到一半以下，等于取消强制压缩）。 */
+      if (typeof raw.engineCapMargin === 'number' && Number.isFinite(raw.engineCapMargin)
+        && raw.engineCapMargin >= 0 && raw.engineCapMargin < 0.5) {
+        M3.engineCapMargin = raw.engineCapMargin;
+      }
+      /* R55③：文案模板 —— 只收字符串，**上限 8000 字符**（模板每轮注入，无界会把上下文吃光；
+       * 超限视为非法 ⇒ 保持现值）。占位符校验在消费端（compact-tool）：缺 `{tool}` ⇒ 回退内置。 */
+      for (const k of ['tplBrief', 'tplCard']) {
+        if (typeof raw[k] === 'string' && raw[k].length <= 8000) M3[k] = raw[k];
       }
     } catch (e) {
       /* C1①（审查）：config 读取异常保持现值——留一句痕（仅一次），防「面板改值不生效」无从排查 */

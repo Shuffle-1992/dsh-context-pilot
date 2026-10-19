@@ -471,6 +471,16 @@ export function createM2Injection(deps) {
           state.m2.injections += 1;
           state.m2.lastText = receiptOnly;
           state.m2.lastAt = new Date().toISOString();
+          /* R55：量测失败只注入回执这条路径也要留档，否则面板「本轮注入」会显示上一轮的旧内容
+           * （比"看不到"更坏：用户会以为本轮注入的是那份旧文本）。 */
+          state.m2.lastInjection = {
+            at: state.m2.lastAt, sid: String(pick(agent.session.id, agent.sessionId, 'unknown')), fullText: receiptOnly,
+            usageText: null, effSuffix: null, nudgeText: null, cardText: null,
+            briefText: null, effBriefText: null, receiptText: receiptOnly,
+            values: { ratio: null, window: null, effCrit: null, minRatio: M3.markerMinRatio, retainRatio: M3.retainRatioStandard, engineCapMargin: M3.engineCapMargin },
+            tpl: { brief: !!(M3.tplBrief || '').trim(), card: !!(M3.tplCard || '').trim() },
+            tier: null, receiptOnly: true,
+          };
           log('warn', `M2 量测失败，但仍有压缩自检回执 ⇒ 只注入回执：${receiptOnly}`);
           schedule('m2-inject', 500);
           return { message, text: receiptOnly, card: false, receiptOnly: true };
@@ -526,7 +536,8 @@ export function createM2Injection(deps) {
         remember(briefedBySid, sid); // C 类审查：有界化（原先无上限）
         state.m2.briefings = (state.m2.briefings ?? 0) + 1;
       }
-      const fullText = [baseText, effNudge, card, brief, effBrief, renderCompactReceipt(takeCompactReceipt(sidEarly), allowSwitchTalk)].filter(Boolean).join('\n\n');
+      const receiptText = renderCompactReceipt(takeCompactReceipt(sidEarly), allowSwitchTalk);
+      const fullText = [baseText, effNudge, card, brief, effBrief, receiptText].filter(Boolean).join('\n\n');
       const message = createUserMessage({
         content: [{ type: 'text', text: fullText }],
         source: { kind: SOURCE_KIND, form: 'snapshot', sections: [{ name: SOURCE_KIND, text: fullText }] },
@@ -535,6 +546,21 @@ export function createM2Injection(deps) {
       if (card) state.m3.policyCards += 1;
       state.m2.lastText = fullText;
       state.m2.lastAt = new Date().toISOString();
+      /* ═══ R55（2026-10-19 用户要求：「决策卡/提示词/用量行暴露到面板，方便设置」）═══
+       * 把本轮注入的**逐段原文**留档，供面板「本轮注入」区逐字核对（用户能亲眼看到插件到底往
+       * 上下文里塞了什么，而不是只能相信描述）。只留**最近一轮**（单个对象 ⇒ 无界增长风险为零），
+       * 且 `fullText` 与真正注入的那条消息**同源**（就是上面拼出来的那个字符串）。 */
+      state.m2.lastInjection = {
+        at: state.m2.lastAt, sid, fullText,
+        usageText: r.text, effSuffix, nudgeText: effNudge, cardText: card,
+        briefText: brief, effBriefText: effBrief, receiptText,
+        values: {
+          ratio: r.ratio, window: r.window ?? null, effCrit,
+          minRatio: M3.markerMinRatio, retainRatio: M3.retainRatioStandard, engineCapMargin: M3.engineCapMargin,
+        },
+        tpl: { brief: !!(M3.tplBrief || '').trim(), card: !!(M3.tplCard || '').trim() },
+        tier: (() => { try { return getCompactToolApi?.()?.getTier?.(sid) ?? null; } catch { return null; } })(),
+      };
       log('info', `M2 注入 turn=${turn} step=${step}${card ? ' ＋政策卡' : ''}${effNudge ? ' ＋换档提示' : ''}：${r.text}`);
       schedule('m2-inject', 500);
       return { message, text: fullText, card: !!card };

@@ -25,7 +25,7 @@
  * 实测该窗口只在激活后的头几个微任务内存在，远早于任何 listener 触发。
  */
 
-export function createThreshold({ svc, tryOf, state, log }) {
+export function createThreshold({ svc, tryOf, state, log, M3 }) {
   /** 拿不到引擎配置时的官方默认阈值（compaction-basic lib/index.js:15 `DEFAULT_THRESHOLD_RATIO = .8`）。 */
   const DEFAULT_ENGINE_THRESHOLD = 0.8;
 
@@ -37,6 +37,19 @@ export function createThreshold({ svc, tryOf, state, log }) {
    * ⚠️ 首版曾按 0.5pp 实现，用户随即更正为 5pp（余量必须够大才谈得上「确定性」）。
    */
   const ENGINE_CAP_MARGIN = 0.05;
+
+  /**
+   * R55②（2026-10-19 用户要求「参数暴露到面板方便设置」）：余量改为**活读配置**。
+   * `M3` 是 core 里那个**就地可变**的对象（`mergeConfig()` 只改字段不换引用）⇒ 面板保存后
+   * 下一次调用即生效，无需重启、无需重跑 apply（与 criticalRatio 等同一套活读机制）。
+   * 拿不到 M3 或值非法 ⇒ 回退默认 0.05（**5pp 的原始语义不变**）。
+   */
+  const marginOf = () => {
+    try {
+      const v = M3?.engineCapMargin;
+      return typeof v === 'number' && Number.isFinite(v) && v >= 0 && v < 0.5 ? v : ENGINE_CAP_MARGIN;
+    } catch { return ENGINE_CAP_MARGIN; }
+  };
 
   /**
    * 解析某 agent 作用域的 compaction 服务实例。
@@ -98,26 +111,29 @@ export function createThreshold({ svc, tryOf, state, log }) {
     /* 取证同时记**原始引擎阈值**与**减去余量后的生效上限**，否则报告里看不出 5pp 被扣在哪。 */
     const prev = state?.m3?.engineCapProbe;
     const ratio = ok ? v : null;
-    if (!prev || prev.ratio !== ratio || prev.fallback !== !ok || prev.via !== via) {
+    const m = marginOf();
+    /* ⚠️ R55②：`prev.margin !== m` 必须进条件——否则用户在面板改了余量后，探针仍是旧值，
+     * 面板上会显示「改了没生效」（实际生效了，只是取证没刷新）。 */
+    if (!prev || prev.ratio !== ratio || prev.fallback !== !ok || prev.via !== via || prev.margin !== m) {
       if (state?.m3) {
         state.m3.engineCapProbe = {
           at: new Date().toISOString(),
           via,
           ratio,
           fallback: !ok,
-          cap: +Math.max(0, raw - ENGINE_CAP_MARGIN).toFixed(4),
-          margin: ENGINE_CAP_MARGIN,
+          cap: +Math.max(0, raw - m).toFixed(4),
+          margin: m,
           /* R49：命中 modelPolicies 时把**路由**也留痕，一眼看出"按哪条策略钳的"。 */
           route: (pol && typeof pol.thresholdRatio === 'number') ? { provider: route.provider, model: route.model } : null,
         };
       }
-      if (log) log('info', `引擎阈值探取：ratio=${ratio ?? '(fallback)'} via=${via} cap=${Math.max(0, raw - ENGINE_CAP_MARGIN).toFixed(4)}`);
+      if (log) log('info', `引擎阈值探取：ratio=${ratio ?? '(fallback)'} via=${via} cap=${Math.max(0, raw - m).toFixed(4)}（余量 ${m}）`);
     }
     return raw;
   };
 
-  /** 生效强制线上限 = 引擎阈值 − 5pp（下限 0，防引擎阈值被配成极小值后出现负数）。 */
-  const criticalCapOf = (agent) => Math.max(0, engineThreshold(agent) - ENGINE_CAP_MARGIN);
+  /** 生效强制线上限 = 引擎阈值 − 余量（默认 5pp；下限 0，防引擎阈值被配成极小值后出现负数）。 */
+  const criticalCapOf = (agent) => Math.max(0, engineThreshold(agent) - marginOf());
 
-  return { DEFAULT_ENGINE_THRESHOLD, ENGINE_CAP_MARGIN, resolveCompactionFor, engineThreshold, criticalCapOf };
+  return { DEFAULT_ENGINE_THRESHOLD, ENGINE_CAP_MARGIN, marginOf, resolveCompactionFor, engineThreshold, criticalCapOf };
 }

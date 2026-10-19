@@ -1427,7 +1427,10 @@ ok('教学不再教「本轮先不执行任务 + 写标记」（旧机制已废�
 /* 一次性插件说明（M2.5）是最容易漏改的一处：它同样在教模型怎么用压缩。
  * 漏改的后果不是报错，而是模型**写标记后等一个永远不来的自动恢复**（静默失效）。 */
 ok('新会话一次性说明本体已搬进模块（host 只做出口）',
-  /function renderBrief\(\{ criticalRatio, retainRatio, retainTokens \} = \{\}\) \{/.test(ct)
+  /* R55③：本体函数改名为 `renderBriefBuiltin`（外层包了模板层），断言随之指向新名，
+   * 并**新增**一条「模板层必须包在内置之后」的检查（否则模板会绕过内置分支语义）。 */
+  /function renderBriefBuiltin\(\{ criticalRatio, retainRatio, retainTokens \} = \{\}\) \{/.test(ct)
+  && /const renderBrief = \(args = \{\}\) => \{/.test(ct)
   && /return api\.renderBrief\(\{ criticalRatio: crit, \.\.\.retentionTeach\(win\) \}\);/.test(m2src),
   '说明文本仍散在 host ⇒ 与工具名/文案两处漂移');
 ok('一次性说明不再承诺「自动拉起」（已无该机制）',
@@ -1446,7 +1449,9 @@ console.log('\n== 6.16 强制压缩线：恒低于 DSH 内置阈值 5pp ==');
  * ⇒ 下列断言改指向**模块**，并新增「host 不得再重复定义」的反向断言（防搬完又抄一份回来）。 */
 const threshold = read('threshold.mjs');
 ok('R8 阈值核心已抽为叶子模块，且 host 不再重复定义',
-  /export function createThreshold\(\{ svc, tryOf, state, log \}\) \{/.test(threshold)
+  /* R55②：deps 多了 M3（余量活读配置）⇒ 断言不再钉死整串依赖，改为「模块存在 + 收 M3」，
+   * 其余三项（动态加载 / host 不重复定义）保持原样——它们才是这条断言真正要防的东西。 */
+  /export function createThreshold\(\{[^}]*M3[^}]*\}\) \{/.test(threshold)
   && /import\(`\.\/threshold\.mjs\?ts=\$\{IMPL_TS\}`\)/.test(host)
   && !/const ENGINE_CAP_MARGIN = 0\.05;/.test(host)
   && !/const DEFAULT_ENGINE_THRESHOLD = 0\.8;/.test(host),
@@ -1465,8 +1470,12 @@ ok('阈值模块未就绪时不中断：降级为「不做上限钳制」并留�
 ok('阈值模块定义 5pp 余量常量', /const ENGINE_CAP_MARGIN = 0\.05;/.test(threshold),
   '缺余量常量 / 值不是 5pp（写死在多处还会改一处漏两处）');
 ok('生效上限抽成单一来源 criticalCapOf（= 引擎阈值 − 余量，下限 0）',
-  /const criticalCapOf = \(agent\) => Math\.max\(0, engineThreshold\(agent\) - ENGINE_CAP_MARGIN\);/.test(threshold),
-  '未抽单一上限函数 ⇒ 三处门控各写一遍必然漂移');
+  /* R55②：余量从写死常量改为 `marginOf()`（活读 M3.engineCapMargin，非法值回退默认 5pp）
+   * ⇒ 断言升级为「上限函数仍单一来源」+「余量确实走活读路径」，比原来更强。 */
+  /const criticalCapOf = \(agent\) => Math\.max\(0, engineThreshold\(agent\) - marginOf\(\)\);/.test(threshold)
+  && /const v = M3\?\.engineCapMargin;/.test(threshold)
+  && /return typeof v === 'number' && Number\.isFinite\(v\) && v >= 0 && v < 0\.5 \? v : ENGINE_CAP_MARGIN;/.test(threshold),
+  '未抽单一上限函数 / 余量没走活读配置 ⇒ 三处门控各写一遍必然漂移');
 /* R10：两条门控随编排层搬进 plugin/m3.compact.mjs ⇒ 断言改查模块；宿主只保留 getHud 下发点。 */
 for (const [label, re, src] of [
   /* R16.18：pre-step 门控改为「criticalCapOf + 动态余量」的 IIFE（仍是同一上限函数来源）。 */
@@ -1480,8 +1489,11 @@ ok('不再有任何一处用裸引擎阈值做门控 / 下发',
   !/Math\.min\(M3\.criticalRatio, engineThreshold\(agent\)\)/.test(host) && !/criticalCap: engineThreshold\(/.test(host),
   '仍有裸 engineThreshold ⇒ 5pp 余量被绕过');
 ok('engineCapProbe 同时记原始阈值与生效上限（否则报告里看不出余量扣在哪）',
-  /cap: \+Math\.max\(0, raw - ENGINE_CAP_MARGIN\)\.toFixed\(4\)/.test(threshold) && /margin: ENGINE_CAP_MARGIN,/.test(threshold),
-  '取证只记原始值');
+  /* R55②：余量活读 ⇒ 探针用局部 m，且**必须**把 margin 纳入"是否需要刷新"的条件
+   * （否则用户改了余量、面板仍显示旧值 ⇒ 看起来像"改了没生效"）。 */
+  /cap: \+Math\.max\(0, raw - m\)\.toFixed\(4\)/.test(threshold) && /margin: m,/.test(threshold)
+  && /const m = marginOf\(\);/.test(threshold) && /prev\.margin !== m/.test(threshold),
+  '取证只记原始值 / 余量变化不刷新探针');
 ok('client 提示语说明「DSH 内置阈值 − 5 个百分点」（未探测到时也说规则）',
   /DSH 内置阈值 − 5 个百分点/.test(client),
   '提示未说明余量规则 ⇒ 用户以为上限还是 80%');
@@ -1624,12 +1636,18 @@ ok('FIELDS 含 effortCooldownMs（冷却可配，S7）', fieldsKeys.includes('ef
 ok('schema 含 effortCooldownMs', schemaKeys.includes('effortCooldownMs'), 'schema 缺该字段 ⇒ 面板保存被拒');
 ok('M3_DEFAULTS 含 effortCooldownMs', hostDefaults.includes('effortCooldownMs'), 'host 缺该字段 ⇒ 读不到');
 /* R7：`armedTtlMs` 随 marker 通道退役移出读取集。断言改为**钉住完整集合**——
- * 只钉某一项存在的话，新增/删除字段都不会被发现（原版正是这个弱写法）。 */
+ * 只钉某一项存在的话，新增/删除字段都不会被发现（原版正是这个弱写法）。
+ * R55：读取集从 6 项扩到 12 项 ⇒ 不再把字面量抄进断言（抄一遍就是第二份真相，正是本断言要防的），
+ * 改为**解析读取集与 M3_DEFAULTS 做集合级对账**——比原来更强：新增字段忘读也会红。 */
+const readSet = (() => {
+  const m = /for \(const k of \[([^\]]*)\]\) \{/.exec(hostOrCore);
+  return m ? [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1]) : [];
+})();
 ok('mergeConfig 读取集与 M3_DEFAULTS 完全同源（防「面板改了不生效」与漂移）',
-  /for \(const k of \['enabled', 'effortEnabled', 'criticalRatio', 'markerMinRatio', 'sweepMinIntervalMs', 'effortCooldownMs'\]\) \{/.test(hostOrCore)
-  && /for \(const k of \['sweepMinIntervalMs', 'effortCooldownMs'\]\)/.test(hostOrCore)
+  readSet.length > 0 && readSet.length === hostDefaults.length && readSet.every((k) => hostDefaults.includes(k))
   && !/armedTtlMs/.test(hostNoComment),
-  '读取集缺项 ⇒ 面板改值不生效；多出已退役项 ⇒ 死配置；应改为集合级对账');
+  `读取集=${JSON.stringify(readSet)}\n       M3_DEFAULTS=${JSON.stringify(hostDefaults)}`
+  + ' —— 缺项⇒面板改值不生效；多项⇒死配置');
 ok('effort 模块从 config 现读冷却（面板改值即生效）',
   /readCfg: \(\) => \(\{ enabled: M3\.effortEnabled === true, cooldownMs: M3\.effortCooldownMs \}\)/.test(host) &&
   /const cooldownMs = \(\) => \{/.test(effort),
@@ -4460,6 +4478,115 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
   if (!/\[sid\]: rec \}/.test(host54)) problems54.push('F4: 宿主未写 per-sid 槽');
   ok('R54 独立审计四条修复的结构守卫（F1 解构 / F2 clearSchedules / F3 作用域 / F4 回执同源）',
     problems54.length === 0, `实际问题：${JSON.stringify(problems54)}`);
+}
+
+/* ═══ 6.48 R55（2026-10-19 用户要求）：注入内容可视化 + 参数可配 + 文案模板 ═══
+ * 用户原话：「能否将决策卡内容和提示词内容，还有相关注入的上下文线暴露到插件面板中，方便进行设置。」
+ * 三条都要：① 面板只读展示注入原文；② 参数补进配置区；③ 文案模板可编辑。
+ * 本块既有结构守卫，也有**行为级**断言（真跑模板层与比例切换）——结构断言单独存在时，
+ * 「看起来在查、其实抓不住」的风险很高（R54 的 F1 守卫就被自己的注释骗过一次）。 */
+{
+  console.log('\n== 6.48 R55 注入可视化 / 参数可配 / 文案模板 ==');
+  /* ① 注入原文留档 + 下发 + 渲染 */
+  ok('R55①：m2 把本轮注入的逐段原文留档（含「量测失败仅回执」路径）',
+    (m2src.match(/state\.m2\.lastInjection = \{/g) ?? []).length >= 2
+    && /usageText: r\.text/.test(m2src) && /receiptText,/.test(m2src),
+    '未留档 / 只留主路径 ⇒ 回执-only 那轮面板会显示上一轮的旧内容（比看不到更坏）');
+  ok('R55①：m5 把注入原文 + 生效配置快照下发到 HUD 面',
+    /injected: state\.m2\?\.lastInjection \?\? null,/.test(m5src) && /config: \(\(\) => \{/.test(m5src)
+    && /engineCapProbe: state\.m3\?\.engineCapProbe \?\? null,/.test(m5src),
+    'HUD 未下发 ⇒ 面板拿不到（用户无法逐字核对插件到底注入了什么）');
+  ok('R55①：client 渲染「本轮注入」只读区（复制 + 刷新，六段原文）',
+    /const injSec = el\("div", \{ className: "dcp-inj" \}/.test(client) && /injSec,/.test(client)
+    && /injBlock\("用量行"/.test(client) && /injBlock\("决策卡"/.test(client)
+    && /injBlock\("一次性说明"/.test(client) && /injBlock\("压缩自检回执"/.test(client),
+    '面板未渲染 ⇒ 「暴露到面板」这条没落地');
+  /* ② 参数可配：阈值余量（活读）+ 三档比例（整组校验 + 顺序约束） */
+  ok('R55②：阈值余量活读配置（写死常量已退为默认值）',
+    /const marginOf = \(\) => \{/.test(threshold) && /const v = M3\?\.engineCapMargin;/.test(threshold)
+    && /engineThreshold\(agent\) - marginOf\(\)/.test(threshold),
+    '仍写死常量 ⇒ 面板改值不生效（本项目已有「面板改了不生效」的教训）');
+  ok('R55②：档位比例可配，且整组校验含顺序约束（深压 < 标准 < 浅压）',
+    /export function setTierRatios\(next\) \{/.test(cr)
+    && /if \(!\(light < standard && standard < heavy\)\) return false;/.test(cr)
+    && /if \(!ok\(light\) \|\| !ok\(standard\) \|\| !ok\(heavy\)\) return false;/.test(cr),
+    '比例不可配 / 无顺序约束 ⇒ 可配出「深压 > 浅压」的名不副实档位');
+  ok('R55②：三档默认值仍是 8% / 16% / 24%（与既有行为逐字一致）',
+    /retainRatioLight: 0\.08,/.test(hostOrCore) && /retainRatioStandard: 0\.16,/.test(hostOrCore)
+    && /retainRatioHeavy: 0\.24,/.test(hostOrCore),
+    '默认值不是 8/16/24 ⇒ 升级即改变既有会话的压缩行为');
+  /* ③ 文案模板：护栏（缺 {tool} 回退 + 留痕）与「包在内置之后」 */
+  ok('R55③：模板护栏 —— 缺必需占位符 {tool} 时回退内置并留痕（绝不注入半截）',
+    /if \(!raw\.includes\('\{tool\}'\)\) \{/.test(ct) && /state\.m3\.tplFallback = \{/.test(ct)
+    && /which, why: 'missing-\{tool\}'/.test(ct),
+    '无护栏 ⇒ 用户写坏模板会把教学协议教坏（模型不知道调哪个工具）');
+  ok('R55③：模板层包在内置**之后**（两个出口都要，null 语义不被破坏）',
+    /* ⚠️ 必须逐个出口检查：只断言「文件里某处出现过 b == null ? b :」会被另一个出口蒙混过关
+     * （首版就是这么 MISSED 的——变异 M5 把 renderCard 那个出口改成 false ? b : 仍全绿）。 */
+    (() => {
+      const w = [...ct.matchAll(/const b = render(Brief|Card)Builtin\(args\);[\s\S]{0,60}?return (b == null \? b :|false \? b :)/g)];
+      return w.length === 2 && w.every((m) => m[2] === 'b == null ? b :');
+    })(),
+    '模板绕过内置 ⇒ renderCard 的「ratio < minRatio ⇒ null」会被破坏（凭空造出一张卡）');
+  /* ③ 行为级：真跑模板层（有效模板生效 / 缺 {tool} 回退 / 未配置零侵入） */
+  {
+    const mod = await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href);
+    const mkApi = (M3x, stx) => mod.createCompactTool({
+      svc: () => null,
+      tryOf: (f) => { try { return { value: f() }; } catch (e) { return { error: String(e?.message ?? e) }; } },
+      pick: (...v) => v.find((x) => x != null),
+      msg: (e) => String(e?.message ?? e),
+      log: () => {},
+      schedule: () => {},
+      state: stx,
+      M3: M3x,
+      readCfg: () => ({ enabled: true }),
+      getDefineTool: () => null,
+      getRangeApi: () => rangeMod19,
+      pluginDir: null,
+    });
+    const st1 = { m3: {} };
+    const M3a = { tplCard: '卡片：占用 {ratio}，工具 {tool}，档位 {tiers}', tplBrief: '这个模板故意不写必需占位符' };
+    const api = mkApi(M3a, st1);
+    const cardTxt = api.renderCard({ ratio: 0.62, minRatio: 0.2, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000 });
+    ok('R55③ 行为：有效模板被套用，{ratio}/{tool}/{tiers} 都被替换',
+      typeof cardTxt === 'string' && cardTxt.startsWith('卡片：占用 62%')
+      && cardTxt.includes('compact_context') && cardTxt.includes('深压'),
+      `实际=${String(cardTxt).slice(0, 90)}`);
+    const briefTxt = api.renderBrief({ criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000 });
+    ok('R55③ 行为：缺 {tool} 的模板回退内置 + 留痕计数（面板可见）',
+      typeof briefTxt === 'string' && briefTxt.includes('context-pilot 插件说明')
+      && st1.m3.tplFallback?.why === 'missing-{tool}' && st1.m3.tplFallbacks === 1,
+      `实际=${String(briefTxt).slice(0, 50)}… fallback=${JSON.stringify(st1.m3.tplFallback)}`);
+    const st2 = { m3: {} };
+    const api2 = mkApi({ tplCard: '', tplBrief: '' }, st2);
+    const builtinCard = api2.renderCard({ ratio: 0.62, minRatio: 0.2, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000 });
+    ok('R55③ 行为：未配置模板时输出与内置一致（模板层零侵入）',
+      typeof builtinCard === 'string' && builtinCard.includes('compact_context') && !builtinCard.startsWith('卡片：'),
+      `实际=${String(builtinCard).slice(0, 60)}`);
+    /* ⚠️ 这条是「模板不能凌驾于内置判定」的**行为级**守卫：占用未达门槛时内置返回 null，
+     * 模板层必须原样放行 null——否则会凭空造出一张卡（决策卡门槛失效）。 */
+    const noCard = api.renderCard({ ratio: 0.1, minRatio: 0.2, criticalRatio: 0.75 });
+    ok('R55③ 行为：占用未达门槛时模板也不能造卡（null 原样放行）',
+      noCard === null, `实际=${JSON.stringify(noCard).slice(0, 70)}`);
+  }
+  /* ② 行为级：比例可配 → 展示随之改变；非法值整组拒绝；测试自身还原（不留副作用） */
+  {
+    const applied = rangeMod19.setTierRatios({ light: 0.05, standard: 0.1, heavy: 0.2 });
+    ok('R55② 行为：setTierRatios 生效后展示同步改变（无写死百分比漂移）',
+      applied === true && rangeMod19.tierText('standard') === '标准10%' && rangeMod19.tierPct('heavy') === 20,
+      `applied=${applied} standard=${rangeMod19.tierText('standard')}`);
+    ok('R55② 行为：非法比例整组拒绝（顺序反了 / 越界都拒）',
+      rangeMod19.setTierRatios({ light: 0.3, standard: 0.16, heavy: 0.24 }) === false
+      && rangeMod19.setTierRatios({ light: 0.08, standard: 1.2, heavy: 0.24 }) === false
+      && rangeMod19.tierText('standard') === '标准10%',
+      `拒绝后仍应保持上次生效值，实际=${rangeMod19.tierText('standard')}`);
+    rangeMod19.setTierRatios({ light: 0.08, standard: 0.16, heavy: 0.24 });
+    ok('R55② 行为：还原默认后回到 8/16/24（测试不留全局副作用）',
+      rangeMod19.tierText('light') === '深压8%' && rangeMod19.tierText('standard') === '标准16%'
+      && rangeMod19.tierText('heavy') === '浅压24%',
+      `${rangeMod19.tierText('light')}/${rangeMod19.tierText('standard')}/${rangeMod19.tierText('heavy')}`);
+  }
 }
 
 /* ═══════════ 汇总 ═══════════ */

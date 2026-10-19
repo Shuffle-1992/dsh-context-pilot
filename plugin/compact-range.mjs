@@ -56,6 +56,30 @@ export const TIERS = {
 /** 档位名的规范集合（工具 schema enum 与防御性校验共用）。 */
 export const TIER_NAMES = Object.keys(TIERS);
 
+/**
+ * R55①（2026-10-19 用户要求「参数暴露到面板方便设置」）：三档比例**可由配置驱动**。
+ *
+ * 只改「保留预算比例」这个值，不改「三档 = 三档预算」的语义。所有展示（`tierText`/`tierPct`）
+ * 都是**现算**的 ⇒ 一次 set 就让决策卡 / 一次性说明 / 工具描述三处同时跟上，
+ * 不存在「改了配置但文案里还写着 8%/16%/24%」的漂移（本项目已有写死 16% 的教训）。
+ *
+ * 校验：三项都须 0<v<1，且 **light < standard < heavy**（顺序反了「深压/标准/浅压」就名不副实）。
+ * **任一非法 ⇒ 整组拒绝**（返回 false，保持现值），不做部分接受。
+ * @returns {boolean} 是否已应用
+ */
+export function setTierRatios(next) {
+  try {
+    const { light, standard, heavy } = next ?? {};
+    const ok = (v) => typeof v === 'number' && Number.isFinite(v) && v > 0 && v < 1;
+    if (!ok(light) || !ok(standard) || !ok(heavy)) return false;
+    if (!(light < standard && standard < heavy)) return false;
+    TIERS.light = light;
+    TIERS.standard = standard;
+    TIERS.heavy = heavy;
+    return true;
+  } catch { return false; }
+}
+
 /* ═══════════ 档位的中文说法（2026-10-15 用户要求） ═══════════
  * 用户原话：「改成『深压8%/标准16%/浅压24%』的说法。」
  *

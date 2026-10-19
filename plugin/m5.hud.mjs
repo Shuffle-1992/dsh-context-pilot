@@ -222,6 +222,27 @@ export function createM5Hud(deps) {
        * 且 getHud 是低频调用（挂载 + 投影变化各一次），绝对值不会因调用间隔而过时。 */
       effortEnabled: effOn,
       effort: effOn && effApi ? await effApi.hudPayload(targetAgent, sid) : null,
+      /* ═══ R55（2026-10-19 用户要求：「决策卡/提示词/用量行暴露到面板，方便设置」）═══
+       * `injected` = 本轮实际注入的**逐段原文**（M2 落档，只留最近一轮）⇒ 面板可逐字核对。
+       * `config` = **生效配置快照**（先 mergeConfig() 再取 M3，与决策点同源）⇒ 面板上
+       * 「我在设置里改的值到底生效没」一眼可查；`tplFallback` 让"模板写坏了被回退"可见
+       * （静默降级是大忌）；`engineCapProbe` 让"5pp 余量扣在哪、按哪条 modelPolicies 钳的"可见。 */
+      injected: state.m2?.lastInjection ?? null,
+      config: (() => {
+        try {
+          mergeConfig();
+          return {
+            enabled: M3.enabled, effortEnabled: M3.effortEnabled,
+            criticalRatio: M3.criticalRatio, markerMinRatio: M3.markerMinRatio,
+            sweepMinIntervalMs: M3.sweepMinIntervalMs, effortCooldownMs: M3.effortCooldownMs,
+            engineCapMargin: M3.engineCapMargin,
+            retainRatioLight: M3.retainRatioLight, retainRatioStandard: M3.retainRatioStandard, retainRatioHeavy: M3.retainRatioHeavy,
+            tplBrief: M3.tplBrief, tplCard: M3.tplCard,
+            tplFallback: state.m3?.tplFallback ?? null, tplFallbacks: state.m3?.tplFallbacks ?? 0,
+            engineCapProbe: state.m3?.engineCapProbe ?? null,
+          };
+        } catch { return null; }
+      })(),
       at: new Date().toISOString(),
     };
     /* getHud 取证（2026-10-07）：记录不显示时从报告直接看「client 传了什么 sid、host 回了什么」——

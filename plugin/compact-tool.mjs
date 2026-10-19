@@ -52,7 +52,7 @@ export const INTENT_TTL_MS = 120_000;
 export const TIER_SID_CAP = 64;
 
 export function createCompactTool(deps) {
-  const { svc, tryOf, pick, msg, log, schedule, state, readCfg, getDefineTool, getRangeApi, pluginDir } = deps;
+  const { svc, tryOf, pick, msg, log, schedule, state, M3, readCfg, getDefineTool, getRangeApi, pluginDir } = deps;
 
   /* ═══ R16.16：档位**落盘**（评审实测：toggle 热换=新实例 ⇒ Map 清空 ⇒ 已声明档位静默消失）═══
    * 另一会话实测：它明明用 tier:'heavy' 压过（回执确认），但热换后卡片显示
@@ -291,6 +291,67 @@ export function createCompactTool(deps) {
     return TIER_FALLBACK[t]?.pct ?? 16;
   };
   const textOf = (t) => { try { return rangeApi()?.tierText?.(t) ?? `${labelOf(t)}${pctOf(t)}%`; } catch { return `${labelOf(t)}${pctOf(t)}%`; } };
+
+  /* ═══ R55③（2026-10-19 用户要求「提示词/卡片文本暴露到面板，方便设置」）═══
+   * 设计取舍：**只开放「覆盖」，不开放「拼接」**——内置文案是教学协议的一部分（工具名、档位说法、
+   * 「先说再调用」、回执怎么看），全量替换有把协议教坏的风险，故设两道护栏：
+   *   ① 模板里**必须含 `{tool}`**（否则模型不知道调哪个工具）⇒ 缺了就**回退内置并留痕**（绝不注入半截）；
+   *   ② 模板只包在**内置文案产出之后**（`*Builtin` 返回什么就交给模板处理什么）⇒ 内置的所有分支
+   *      语义完全不变，尤其 `renderCard` 的 `ratio < minRatio ⇒ null` 不会被模板「凭空造出一张卡」。
+   * 可用占位符（**未提供的原样保留**，便于用户一眼看出自己写错了哪个名字，而不是被静默吃掉）：
+   *   {tool} {builtin} {critical} {minRatio} {ratio} {retainRatio} {retainTokens} {used} {window}
+   *   {tiers} {keepFromHint}
+   * 留痕走 state.m3（面板「本轮注入」区可见）——本项目纪律：**静默降级是大忌**。 */
+  const syncTiers = () => {
+    try {
+      getRangeApi?.()?.setTierRatios?.({ light: M3?.retainRatioLight, standard: M3?.retainRatioStandard, heavy: M3?.retainRatioHeavy });
+    } catch { /* 吞：range 域未就绪时保持现值（不因此影响注入） */ }
+  };
+  const tokFmt = (n) => (Number.isFinite(n) ? (Math.abs(n) >= 10000 ? `${(n / 1000).toFixed(1)}k` : String(n)) : '');
+  const tplVars = (args = {}, builtin = '') => {
+    const pct = (v) => (typeof v === 'number' && Number.isFinite(v) ? `${Math.round(v * 100)}%` : '');
+    const share = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? `${(v * 100).toFixed(0)}%` : '');
+    const n = (v) => (Number.isFinite(Number(v)) ? Number(v) : NaN);
+    return {
+      '{tool}': TOOL_NAME,
+      '{builtin}': builtin,
+      '{critical}': pct(n(args.criticalRatio)),
+      '{minRatio}': pct(n(args.minRatio)),
+      '{ratio}': share(n(args.ratio)),
+      '{retainRatio}': pct(n(args.retainRatio)),
+      '{retainTokens}': tokFmt(n(args.retainTokens)),
+      '{used}': tokFmt(n(args.usedTokens)),
+      '{window}': tokFmt(n(args.windowTokens ?? args.window)),
+      '{tiers}': ['light', 'standard', 'heavy'].map((t) => textOf(t)).join(' / '),
+      '{keepFromHint}': "`keepFrom:{recentUser:1}` / `keepFrom:{text:'开头十来字'}`",
+    };
+  };
+  const applyTpl = (tpl, vars, which) => {
+    const raw = typeof tpl === 'string' ? tpl.trim() : '';
+    if (!raw) return null; // 未配置 ⇒ 用内置文案
+    if (!raw.includes('{tool}')) {
+      try {
+        state.m3.tplFallback = { at: new Date().toISOString(), which, why: 'missing-{tool}', len: raw.length };
+        state.m3.tplFallbacks = (state.m3.tplFallbacks ?? 0) + 1;
+      } catch { /* 吞 */ }
+      log('warn', `文案模板（${which}）缺必需占位符 {tool} ⇒ 回退内置文案（否则模型不知道调哪个工具）`);
+      return null;
+    }
+    let out = raw;
+    for (const k of Object.keys(vars)) out = out.split(k).join(String(vars[k]));
+    return out;
+  };
+  /** R55③：渲染前同步档位比例（配置活读 ⇒ 卡片/说明/工具描述三处同时跟上，不存在写死百分比漂移）。 */
+  const renderBrief = (args = {}) => {
+    syncTiers();
+    const b = renderBriefBuiltin(args);
+    return b == null ? b : (applyTpl(M3?.tplBrief, tplVars(args, b), 'brief') ?? b);
+  };
+  const renderCard = (args = {}) => {
+    syncTiers();
+    const b = renderCardBuiltin(args);
+    return b == null ? b : (applyTpl(M3?.tplCard, tplVars(args, b), 'card') ?? b);
+  };
   /* ═══ R21：语义锚点（A: recentUser 1..3 / B: text 片段）═══
    * 语义边界只有模型知道、物理节点只有插件知道 ⇒ 工具只**登记声明**，**解析放到压缩那一刻**
    * （锚点会随新消息移动；只有到压缩时才拿得到最终 surface）。
@@ -458,7 +519,7 @@ export function createCompactTool(deps) {
    * 故这里额外强调「没有自动拉起动作」，专门掐断那个预期。
    * ⚠️ R5+（2026-10-08 用户要求）：加入「**先说，再调用**」与「自己算范围」两条教学。
    */
-  function renderBrief({ criticalRatio, retainRatio, retainTokens } = {}) {
+  function renderBriefBuiltin({ criticalRatio, retainRatio, retainTokens } = {}) {
     try {
       const crit = `${Math.round((Number(criticalRatio) || 0.8) * 100)}%`;
       /* R16.15（评审建议 1，分工去重）：brief 只留**固定事实**（保留多少 / 三档定义 / 回执 /
@@ -508,7 +569,7 @@ export function createCompactTool(deps) {
    * 压缩会在下一步开始前落地。教学若没写清这点，模型会退回「停下等压缩」的旧习惯。
    * ⚠️ 卡片每轮（占用达标时）都出现 ⇒ 比一次性说明更该承担「先说再调用」的提醒职责。
    */
-  function renderCard({ ratio, minRatio, criticalRatio, retainRatio, retainTokens, usedTokens, deltaTokens, turnsToLine, tierName, tierDeclared, tierState } = {}) {
+  function renderCardBuiltin({ ratio, minRatio, criticalRatio, retainRatio, retainTokens, usedTokens, deltaTokens, turnsToLine, tierName, tierDeclared, tierState } = {}) {
     try {
       if (ratio == null || ratio < minRatio) return null;
       const pct = `${(ratio * 100).toFixed(0)}%`;

@@ -91,6 +91,16 @@ function buildWith(z) {
       // 决策卡门槛 = markerMinRatio；highRatio/lightTaskChars 曾是「高风险+轻任务建议压缩」的审计参数，
       // 决策主体移交模型后已无触发作用，删除以免误导。
       sweepMinIntervalMs: z.number().default(600000).description('强制压缩冷却（毫秒）：两次强制压缩的最小间隔').volatile(),
+      /* ═══ R55（2026-10-19 用户要求：「决策卡/提示词/用量行暴露到面板，方便设置」）═══
+       * 新增六项：阈值余量 + 三档保留比例 + 两个文案模板。
+       * ⚠️ description 必须与 client.js FIELDS[].hint **逐条对账**（P29：两端漂移 = 用户看到的
+       * 说明与实际不符），且 default 必须与 core.mjs M3_DEFAULTS 一致——contract 有两条专门断言。 */
+      engineCapMargin: z.number().default(0.05).description('阈值余量：生效强制线 = min(强制压缩线, 引擎阈值 − 本余量)。默认 0.05（即 5 个百分点）').volatile(),
+      retainRatioLight: z.number().default(0.08).description('「深压」档保留窗口的比例；三项须满足 深压 < 标准 < 浅压，否则整组不生效').volatile(),
+      retainRatioStandard: z.number().default(0.16).description('「标准」档保留比例（默认档；未选档或非法档位都落这里）').volatile(),
+      retainRatioHeavy: z.number().default(0.24).description('「浅压」档保留比例（接下来仍要频繁引用近端一大段时用）').volatile(),
+      tplBrief: z.string().default('').description('一次性说明模板；留空 = 用内置文案。占位符 {tool} {builtin} {critical} {tiers} {keepFromHint} {retainRatio} {retainTokens}；必须含 {tool}，缺则回退内置并在面板留痕').volatile(),
+      tplCard: z.string().default('').description('决策卡模板；留空 = 用内置文案。占位符 {tool} {builtin} {critical} {minRatio} {ratio} {retainRatio} {retainTokens} {used} {window} {tiers}；必须含 {tool}').volatile(),
       hudLastAct: z.string().default('').description('M5 状态：最近一次压缩摘要（host 自动写入，无需手改）').volatile(),
       /* R7：`hudArmed`（武装灯）/ `hudPending`（待执行徽章）已删除——两个徽章退役后这两条链
        * 「host 写而无人读」。旧配置里的残留键会被**静默忽略**（schemastery 未知键不报错）。 */

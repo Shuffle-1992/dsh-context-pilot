@@ -52,10 +52,11 @@ profile `package.json` 两处要改（以本机 `desktop` profile 为例）：
 
 **当前版本 `v0.1.8`** · 逐版本历史与实证记录见 [`docs/milestones.md`](docs/milestones.md)。
 
-### 最近更新（v0.1.6 → v0.1.42）
+### 最近更新（v0.1.6 → v0.1.43）
 
 | 版本 | 更新 | 为什么值得知道 |
 | --- | --- | --- |
+| **v0.1.43** | **注入内容可视化 + 参数可配 + 文案模板（R55）** | 面板新增「本轮注入（只读）」区：用量行 / 决策卡 / 一次性说明 / 压缩回执**逐段原文** + 本轮活值 + 生效配置快照，可复制、可刷新；配置区新增 **阈值余量**、**三档保留比例**（活读，改完下一轮即生效，无需重启）、**两个文案模板**（`tplBrief`/`tplCard`，留空用内置，**缺 `{tool}` 自动回退内置并留痕**）。**827 断言**，变异 6/6 CAUGHT |
 | **v0.1.42** | **千问独立审计跑通：4 条真缺陷修复 + 测试盲区** | ①`lastUserText` 未解构 ⇒ 每次调用 ReferenceError（被空 catch 吞 = 静默降级）；②清理块引用未导出的 `pending` ⇒ 卸载第一行就抛、disposer 全不跑（泄漏）；③client `alive` 作用域外引用 ⇒ autoClamp 路径未捕获 rejection；④回执只写全局镜像、读取端只读 per-sid ⇒「未执行」读不回。另修 `boot.mjs` 桩：卸载器返回后被丢弃 ⇒ 卸载路径从未被执行。**782 断言**，变异 4/4 CAUGHT |
 | **v0.1.41** | **自审：落盘原子性 + 在飞标记按会话** | ①5 处 `.data` 直写 ⇒ 半截 JSON 被并发读者（含插件自己下次启动）读到 ⇒ 报告整份丢失（R13 同形；`test/report.mjs` 曾真实报 `Unterminated string in JSON`，当时只加重试绕开）⇒ 全部改 `writeJsonAtomic`（tmp+rename）；②`ownCompact` 全局单槽 ⇒ 多会话压缩漏记/重复记录 ⇒ 改按 sid 分槽。附 `docs/reviews/r51-audit-self.md` 九条假设逐条结论。**780 断言**，变异 2/2 CAUGHT |
 | **v0.1.40** | **独立审计发现 #1 修复：`official()` 闭包 TDZ（"压了却报未执行"）** | 审计方（qoder/Qwen3.8-Flash）发现 `compactWithOwnRange` 的 `official()` 兜底闭包引用了**在它之后声明**的 `retainSource`/`useAnchor`/`tierInfo`：当 `compact-range.mjs` 加载失败（`awaitRange→null`）时**立刻**调用 `official()` ⇒ 抛 TDZ；而 `compactIfNeeded` 在 await 里**已经真的压了** ⇒ 回执写 `not-executed`（**假阴性**）+ 记录双丢 = 静默降级。修法：把不依赖 api 的三项前置、`tierInfo` 先给安全默认 ⇒ 正常路径逐字不变。新增行为级 + 结构级守卫，**变异 2/2 CAUGHT** |
@@ -342,7 +343,7 @@ Agent 自改档不应改掉新会话的默认档。
 **已完成**：M1–M5（用量读取 / 每轮注入 / 会话自说明 / HUD 弹窗 / 历史持久化）、R1–R21
 （智能思考 + 换档工具、压缩改工具触发、保留范围自算、全面审查加固、**压缩档位三选一**、
 工具后自检回执、回执按会话隔离、**用户手动改档的轮首知情**、**单档模型零注入 + 工具静默**）。**9 个域模块 + core**，`host.impl.mjs` **1836 → 518 行**。
-**测试**：contract 629 + static 77 + report 54 + boot 22 = **782 断言**全绿；关键回归均有变异验证。
+**测试**：contract 674 + static 77 + report 54 + boot 22 = **827 断言**全绿；关键回归均有变异验证。
 逐里程碑台账（含踩坑与实测数值）：[`docs/milestones.md`](docs/milestones.md)；
 早期进度历史存档：[`docs/status-archive.md`](docs/status-archive.md)。
 
@@ -364,7 +365,7 @@ npm run test:report   # 只跑报告形状
 | `report.mjs` | 54 | 产出侧字段契约；`republishFromReport`（原 `bfOnce`）回填链依赖；C3② 关键事件必须走 full 档（含**满环优先淘汰 slim**，防 FULL 取证被高频事件挤出）；**getHud 作用域与 criticalCap 实参契约**；**调查结论留档**（探针退役后结论不得丢）；真实报告结构自洽（**无嵌套条件断言** ⇒ 断言数不得随数据漂移）；`hud-acts.json` 去重；dump 工具可跑 | 报告形状无声破坏（踩过 2 次：顶层读 m3/m5、脚本读已删字段）；**证据静默丢失**（120 条全 slim、FULL 被挤光而断言全绿） |
 | `boot.mjs` | 21 | **宿主启动冒烟**：真跑 `apply(ctx, {}, {pluginDir, reportPath})`（桩 ctx）→ HUD 面注册 → **真调 `getHud(null)` 必须 `ok:true`** → `criticalCap`/occupancy/`effortEnabled` 三线 → 四个监听器 → **真调 pre-step handler**（abort 与 step=1 两次）→ **M2 注入路径留下记账**（`m2.skips` 有键或 injections>0）→ 有历史时 `m5.lastPublish==='ok'` → 报告落盘。副作用边界：报告写临时目录、`hud-acts.json` 只读不写 | **接线不可达**（R11 真事故：接线块被嵌进 `schedule()` 函数体、语法合法、423 条源断言全绿，**压缩与弹窗全链路静默失效**）——`node --check` 与源断言都看不见「代码在不在正确的函数里」 |
 
-合计 **782 条断言**（四套：contract / static / report / **boot**）。
+合计 **827 条断言**（四套：contract / static / report / **boot**）。
 
 **已验证有效**：注入 3 个人为 bug（`m3-act` 误入精简档 / client face 改名 / host 引用 client.js），
 三套件全部抓到且定位精准。**新增断言均实测验证过「对回归确实失败」**（两边都通过的测试等于没测）：
@@ -421,6 +422,12 @@ node docs/reference/tools/session-records.cjs --find <会话 id 片段> --from 1
 | **智能压缩线** | `markerMinRatio` | 0.2 | 占用达此值时注入决策卡，模型可自行决定压缩（**决策卡门槛**，与已退役的文本标记无关） |
 | **强制压缩线** | `criticalRatio` | 0.85 | 占用达此值无条件**发起**压缩（先按**会话档位**自算保留范围，官方 overflow 兜底/收口）；**生效值 = min(配置, 引擎阈值 − 5pp)**（内置 80% ⇒ 75%） |
 | 强制压缩冷却(秒) | `sweepMinIntervalMs` | 600 | 两次强制压缩的最小间隔（存储为 ms） |
+| **阈值余量** | `engineCapMargin` | 0.05 | **R55**：生效强制线 = `min(强制压缩线, 引擎阈值 − 本余量)`。默认 5pp；**活读**，改完下一轮即生效 |
+| **深压比例** | `retainRatioLight` | 0.08 | **R55**：「深压」档保留窗口的比例。三项须满足 深压 < 标准 < 浅压，否则**整组不生效**（保持上次有效值） |
+| **标准比例** | `retainRatioStandard` | 0.16 | **R55**：「标准」档保留比例（默认档；未选档或非法档位都落这里） |
+| **浅压比例** | `retainRatioHeavy` | 0.24 | **R55**：「浅压」档保留比例（接下来仍要频繁引用近端一大段时用） |
+| **一次性说明模板** | `tplBrief` | `''` | **R55**：留空 = 内置文案；**必须含 `{tool}`**，缺则回退内置并在面板留痕 |
+| **决策卡模板** | `tplCard` | `''` | **R55**：留空 = 内置文案；**必须含 `{tool}`** |
 | （无面板字段） | — | — | **压缩档位**（R16）：`tier` = 深压8% / 标准16% / 浅压24%（会话级、含强制线，夹 `[40k, 窗口×50%]`）；**语义锚点**（R21）：`keepFrom` 指位置、锚点之后原样保留。两者都取代引擎的 `retainTokens = 0`（R5）。详见 [R5](docs/r5-retention-range-design.md) / [R21](docs/r21-semantic-anchor-design.md) 设计文档 |
 
 > **R7 删除的两个字段**：`marker`（压缩标记）与 `armedTtlMs`（标记有效期）——随 marker 通道整体退役。
@@ -434,6 +441,33 @@ node docs/reference/tools/session-records.cjs --find <会话 id 片段> --from 1
 > 历史版本曾有的 `policyCardMinRatio`（决策卡门槛）、`highRatio`（审计参考线）、
 > `lightTaskChars`（轻任务阈值）**已删除**——前者并入 `markerMinRatio`，后两者在决策主体
 > 移交模型后已无触发作用。旧配置残留键会被**静默忽略**（不报错、不迁移）。
+
+### 6.1 注入内容可视化 + 文案模板（R55，2026-10-19）
+
+面板底部新增**「本轮注入（只读）」**区：把插件**实际**写进上下文的内容按段列出
+（用量行 / 决策卡 / 一次性说明 / 思考强度教学 / 换档提示 / 压缩自检回执），逐字可核、一键复制，
+并给出本轮活值（占用、生效强制线、档位）与**生效配置快照**（含「模板回退 N 次」这类留痕）。
+**要改文本请改上面的模板字段**——注入原文本身是只读的，避免"改了显示却不影响注入"的错觉。
+
+模板字段留空 = 用内置文案。**模板里必须含 `{tool}`**（否则模型不知道该调哪个工具）：
+缺了会**回退内置**并在面板留痕，绝不注入半截模板。
+
+| 占位符 | 含义 | 可用于 |
+| --- | --- | --- |
+| `{tool}` | 压缩工具名（`compact_context`） | **两个模板都必需** |
+| `{builtin}` | 内置文案全文（想「在内置基础上加几句」就用它） | 两者 |
+| `{critical}` | 生效强制线（如 `75%`） | 两者 |
+| `{tiers}` | 三档一句话（如 `深压8% / 标准16% / 浅压24%`） | 两者 |
+| `{retainRatio}` / `{retainTokens}` | 默认档保留比例 / 预算（如 `16%` / `~168k`） | 两者 |
+| `{minRatio}` / `{ratio}` | 智能压缩线 / 本轮占用 | 决策卡 |
+| `{used}` / `{window}` | 已用 / 窗口 token | 决策卡 |
+| `{keepFromHint}` | 语义锚点写法示例 | 一次性说明 |
+
+> 未在模板里出现的占位符**原样保留**（便于一眼看出名字写错，而不是被静默吃掉）。
+> 三档比例改动后，**决策卡 / 一次性说明 / 工具描述里的百分比会同步变化**——展示全部由
+> `compact-range.mjs` 现算，不存在「改了配置、文案却还写着 8/16/24」的漂移。
+> 模板只包在**内置文案产出之后**：`renderCard` 的「占用未达门槛 ⇒ 不注入」语义不受模板影响
+> （模板**不能**凭空造出一张卡）。
 
 ---
 

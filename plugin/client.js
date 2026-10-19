@@ -94,6 +94,16 @@ window.__ModuleLoader__.load({
 			{ key: "effortCooldownMs", label: "换档冷却(秒)", type: "int", def: 30000, scale: 1000, hint: "两次换档的最小间隔（防反复打断前缀缓存）" },
 			{ key: "markerMinRatio", label: "智能压缩线", type: "num", def: 0.2, hint: "占用达此值时注入决策卡，模型可自行决定压缩" },
 			{ key: "criticalRatio", label: "强制压缩线", type: "num", def: 0.85, hint: "占用达此值插件无条件发起压缩（先自算保留范围，官方 overflow 兜底；先于 DSH 引擎自动压缩触发）" },
+			/* ═══ R55（2026-10-19 用户要求：把参数暴露到面板「方便设置」）═══
+			 * 新增三项：阈值余量 + 三档保留比例 + 两个文案模板。
+			 * ⚠️ 每条 hint 必须与 plugin-config.schema.mjs 的 description 对账（P29：两端漂移
+			 * = 用户看到的说明与实际不符），contract 有专门断言。 */
+			{ key: "engineCapMargin", label: "阈值余量", type: "num", def: 0.05, hint: "生效强制线 = min(强制压缩线, 引擎阈值 − 本余量)。默认 0.05（即 5 个百分点）" },
+			{ key: "retainRatioLight", label: "深压比例", type: "num", def: 0.08, hint: "「深压」档保留窗口的比例；三项须满足 深压 < 标准 < 浅压，否则整组不生效" },
+			{ key: "retainRatioStandard", label: "标准比例", type: "num", def: 0.16, hint: "「标准」档保留比例（默认档；未选档或非法档位都落这里）" },
+			{ key: "retainRatioHeavy", label: "浅压比例", type: "num", def: 0.24, hint: "「浅压」档保留比例（接下来仍要频繁引用近端一大段时用）" },
+			{ key: "tplBrief", label: "一次性说明模板", type: "tpl", def: "", hint: "留空 = 用内置文案。占位符 {tool} {builtin} {critical} {tiers} {keepFromHint} {retainRatio} {retainTokens}；**必须含 {tool}**，缺则回退内置并在面板留痕" },
+			{ key: "tplCard", label: "决策卡模板", type: "tpl", def: "", hint: "留空 = 用内置文案。占位符 {tool} {builtin} {critical} {minRatio} {ratio} {retainRatio} {retainTokens} {used} {window} {tiers}；**必须含 {tool}**" },
 			/* R7：`marker`（压缩标记）与 `armedTtlMs`（标记有效期）两个面板字段随 marker 通道退役删除——
 			 * 压缩已改由工具 `compact_context` 触发，回复尾行文本标记既无教学也无执行路径。
 			 * ⚠️「智能压缩线」(`markerMinRatio`) 保留：它是决策卡注入门槛，与标记无关。 */
@@ -161,6 +171,14 @@ window.__ModuleLoader__.load({
 			".dcp-summary{color:var(--dsw-alias-label-secondary,currentColor);opacity:.85}",
 			".dcp-grid{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l1,rgba(128,128,128,.35));border-radius:8px;background:var(--dsw-alias-bg-layer-1,transparent)}",
 			".dcp-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}",
+			/* R55：本轮注入区（只读展示注入原文 + 生效配置；等宽小字 + 可滚动，长文本不撑破弹窗）。 */
+			".dcp-inj{margin-top:10px;border-top:1px solid rgba(128,128,128,.28);padding-top:8px}",
+			".dcp-inj-h{font-size:12px;font-weight:600;margin-bottom:2px}",
+			".dcp-inj-n{font-size:11px;opacity:.75;margin-bottom:6px;line-height:1.45}",
+			".dcp-inj-b{margin:6px 0}",
+			".dcp-inj-t{display:flex;align-items:center;justify-content:space-between;font-size:11px;opacity:.85}",
+			".dcp-inj-p{margin:2px 0 0;padding:6px;font-size:11px;line-height:1.45;white-space:pre-wrap;word-break:break-word;max-height:180px;overflow:auto;background:rgba(128,128,128,.10);border-radius:6px;font-family:ui-monospace,Consolas,monospace}",
+			".dcp-mini{font-size:10px;padding:1px 6px;cursor:pointer}",
 			/* 开关滑块（bool 字段）：**复刻 DSH 原生 Switch**（dsh-client-ui-primitives Switch.module.css，
 			 * 已存 docs/reference 溯源；36×20 轨道 padding2 + 16px 旋钮 translateX16）。
 			 * 全部用主题 token ⇒ 深浅主题自动适配（暗色下 ON=白轨道黑旋钮，与原生插件开关一致）。 */
@@ -300,6 +318,22 @@ window.__ModuleLoader__.load({
 			const [engineCap, setEngineCap] = react.useState(
 				() => (typeof NS.engineCap === "number" && Number.isFinite(NS.engineCap) ? NS.engineCap : null),
 			);
+			/* R55：面板「本轮注入」区要显示 host 侧**本轮实际注入的原文**与**生效配置**。
+			 * 走同一路 getHud（只读，不参与保存流程）：挂载拉一次 + 用户点「刷新」再拉。
+			 * ⚠️ 刻意**不加定时器**——弹窗 chip 已有 5s 轮询，这里再加一个会把 RPC 量翻倍；
+			 * 注入原文本身是低频变化（每轮一次），手动刷新足够。 */
+			const [inj, setInj] = react.useState(null);
+			const [cfg, setCfg] = react.useState(null);
+			const pullInj = react.useCallback(async () => {
+				try {
+					if (!hudRemoteSvc || typeof hudRemoteSvc.getHud !== "function") return;
+					const raw = await hudRemoteSvc.getHud("");
+					const env = raw && typeof raw === "object" && "value" in raw ? (raw.ok ? raw.value : null) : raw;
+					setInj(env && env.injected ? env.injected : null);
+					setCfg(env && env.config ? env.config : null);
+				} catch { /* 吞：拿不到就显示"尚未取到"，绝不影响设置面板本身 */ }
+			}, [hudRemoteSvc]);
+			react.useEffect(() => { pullInj(); }, [pullInj]);
 			react.useEffect(() => {
 				let alive = true;
 				const pullCap = async () => {
@@ -486,6 +520,56 @@ window.__ModuleLoader__.load({
 							: "设置命名空间尚未就绪，当前只读；就绪后自动显示当前值。"),
 				);
 			}
+			/* ═══ R55（2026-10-19 用户要求：「决策卡/提示词/用量行暴露到面板，方便设置」）═══
+			 * 注入原文展示块（只读 + 一键复制）。刻意保持**只读**：面板里能改的只有配置项本身，
+			 * 注入文本不可直接编辑——否则会出现"改了显示、却影响不了注入"的错觉（要改文本就改
+			 * 上面的模板字段，改完下一轮生效）。 */
+			const injBlock = (title, text) => (text ? el("div", { className: "dcp-inj-b", key: title },
+				el("div", { className: "dcp-inj-t" },
+					el("span", null, title),
+					el("button", {
+						className: "dcp-mini", title: "复制这段原文",
+						onClick: () => {
+							try {
+								navigator.clipboard?.writeText(String(text));
+								setMessage({ kind: "ok", text: `已复制「${title}」` });
+							} catch { /* 吞：剪贴板不可用不影响面板 */ }
+						},
+					}, "复制"),
+				),
+				el("pre", { className: "dcp-inj-p" }, String(text)),
+			) : null);
+			const injSec = el("div", { className: "dcp-inj" },
+				el("div", { className: "dcp-inj-h" }, "本轮注入（只读）"),
+				el("div", { className: "dcp-inj-n" }, "插件实际写进上下文的内容，逐字可核；要改文本请用上面的模板字段。"),
+				el("div", { className: "dcp-inj-t" },
+					el("span", null, inj
+						? `最近一轮 ${String(inj.at || "").slice(11, 19)}${inj.receiptOnly ? "（量测失败，仅回执）" : ""}`
+						: "尚未取到"),
+					el("button", { className: "dcp-mini", onClick: () => { pullInj(); } }, "刷新"),
+				),
+				inj
+					? [
+						injBlock("用量行", inj.usageText ? `${inj.usageText}${inj.effSuffix ? ` ｜ ${inj.effSuffix}` : ""}` : null),
+						injBlock("决策卡", inj.cardText),
+						injBlock("一次性说明", inj.briefText),
+						injBlock("思考强度教学", inj.effBriefText),
+						injBlock("换档提示", inj.nudgeText),
+						injBlock("压缩自检回执", inj.receiptText),
+						el("div", { className: "dcp-inj-n", key: "vals" },
+							`本轮活值：占用 ${inj.values?.ratio != null ? `${Math.round(inj.values.ratio * 100)}%` : "?"}`
+							+ ` · 生效强制线 ${inj.values?.effCrit != null ? `${Math.round(inj.values.effCrit * 100)}%` : "?"}`
+							+ ` · 档位 ${inj.tier || "（本会话未登记）"}`
+							+ ` · 模板 ${inj.tpl?.brief || inj.tpl?.card ? "已启用" : "内置"}`),
+					]
+					: el("div", { className: "dcp-inj-n" }, "（点「刷新」，或等下一轮注入）"),
+				cfg ? el("div", { className: "dcp-inj-n" },
+					`生效配置：强制线 ${Math.round(cfg.criticalRatio * 100)}% · 智能线 ${Math.round(cfg.markerMinRatio * 100)}%`
+					+ ` · 阈值余量 ${Math.round(cfg.engineCapMargin * 100)}pp`
+					+ ` · 档位 ${Math.round(cfg.retainRatioLight * 100)}/${Math.round(cfg.retainRatioStandard * 100)}/${Math.round(cfg.retainRatioHeavy * 100)}%`
+					+ (cfg.tplBrief || cfg.tplCard ? " · 模板已启用" : "")
+					+ (cfg.tplFallbacks ? ` · ⚠️ 模板回退 ${cfg.tplFallbacks} 次（缺 {tool}）` : "")) : null,
+			);
 			return el("div", { className: "dcp-panel" },
 				el("div", { className: "dcp-grid" },
 					FIELDS.map((field) => el("div", { className: "dcp-row", key: field.key },
@@ -499,8 +583,16 @@ window.__ModuleLoader__.load({
 								}),
 								el("span", { className: "dcp-slider" }),
 							)
-							: el("input", {
-								className: "dcp-input", type: field.type === "text" ? "text" : "number",
+							: field.type === "tpl"
+								? el("textarea", {
+									className: "dcp-inj-p", rows: 3,
+									disabled: !writable || saving,
+									placeholder: "留空 = 用内置文案（必须含 {tool} 占位符）",
+									value: String(valueOf(field)),
+									onChange: (e) => setField(field, e.target.value),
+								})
+								: el("input", {
+									className: "dcp-input", type: field.type === "text" ? "text" : "number",
 								step: field.type === "num" ? 0.05 : field.type === "int" ? 100 : void 0,
 								disabled: !writable || saving,
 								value: String(valueOf(field)),
@@ -509,6 +601,7 @@ window.__ModuleLoader__.load({
 						el("span", { className: "dcp-hint" }, hintFor(field)),
 					)),
 				),
+				injSec,
 				el("div", { className: "dcp-actions" },
 					el("button", {
 						className: "dcp-btn", disabled: !writable || saving || draft === null,
