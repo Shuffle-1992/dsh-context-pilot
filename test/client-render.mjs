@@ -268,6 +268,30 @@ ok('R58：内置文案缺席时给出**可操作**提示（明确提示 toggle �
   /toggle 插件/.test(SRC) && /内置原文由 \*\*host 半\*\*/.test(SRC),
   '只说"暂无" ⇒ 用户不知道 host 改动需要 toggle（PANEL-HOWTO §0：host 半改动要 toggle 或重启）');
 
+/* ── R59：本轮活值 / 生效配置必须并进板块标题行（用户要求「移到板块里面」）──
+ * ⚠️ 渲染层断不到「活值」文本：它来自 `inj`，而 `inj` 由 `hudRemoteSvc.getHud()` 填充
+ * （句柄经 `ctx.inject` 注入）——沙箱不桩这条远端链路 ⇒ `inj` 恒 null。故本条用**源码形状**断言
+ * （精确限定在 `className: "dcp-inj-h"` 块内），渲染层只断言标题行本身存在且能折行。 */
+const injHdrBlock = (() => {
+  const i = SRC.indexOf('className: "dcp-inj-h"');
+  if (i < 0) return "";
+  const j = SRC.indexOf('className: "dcp-inj-n" }, "插件实际写进上下文', i);
+  return SRC.slice(i, j < 0 ? i + 3000 : j);
+})();
+ok('R59：本轮活值 + 生效配置已并入「本轮注入」板块**标题行**（不再散落在板块底部）',
+  /本轮活值/.test(injHdrBlock) && /生效配置/.test(injHdrBlock),
+  '标题行块（dcp-inj-h）里没有活值/生效配置 ⇒ 又跑回板块底部了');
+ok('R59：板块底部不再残留活值/生效配置（防"两处都渲染"的重复）',
+  !/className: "dcp-inj-n", key: "vals"/.test(SRC),
+  '底部仍保留 key:"vals" 那行 ⇒ 同一信息渲染两次');
+const injHdrRendered = B.page.nodes.find((n) => n.props?.className === "dcp-inj-h");
+ok('R59：标题行确实渲染出来（含板块名 + 刷新按钮）',
+  injHdrRendered !== undefined && /刷新/.test(JSON.stringify(injHdrRendered?.props?.children ?? null)),
+  '标题行没渲染或缺刷新按钮');
+ok('R59：标题行是可换行的 flex 行（并进来后一行放不下，必须能折行）',
+  /\.dcp-inj-h\{display:flex;flex-wrap:wrap/.test(SRC),
+  '标题行不是 flex-wrap ⇒ 内容溢出或挤成一团');
+
 /* ── R56d：失败必须可见（结构 + 行为）── */
 const src = SRC;
 ok('R56d：CardBoundary 失败时**不再 return null**（渲染可见诊断块）',

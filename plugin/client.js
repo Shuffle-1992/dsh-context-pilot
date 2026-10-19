@@ -191,7 +191,9 @@ window.__ModuleLoader__.load({
 			".dcp-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}",
 			/* R55：本轮注入区（只读展示注入原文 + 生效配置；等宽小字 + 可滚动，长文本不撑破弹窗）。 */
 			".dcp-inj{margin-top:10px;border-top:1px solid rgba(128,128,128,.28);padding-top:8px}",
-			".dcp-inj-h{font-size:12px;font-weight:600;margin-bottom:2px}",
+			/* R59：标题行改为**可换行的 flex 行**——「本轮活值 / 生效配置」并进来后一行放不下。 */
+			".dcp-inj-h{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;font-size:12px;font-weight:600;margin-bottom:2px}",
+			".dcp-inj-h .dcp-inj-n{margin-bottom:0;font-weight:400}",
 			".dcp-inj-n{font-size:11px;opacity:.75;margin-bottom:6px;line-height:1.45}",
 			".dcp-inj-b{margin:6px 0}",
 			".dcp-inj-t{display:flex;align-items:center;justify-content:space-between;font-size:11px;opacity:.85}",
@@ -577,14 +579,28 @@ window.__ModuleLoader__.load({
 				el("pre", { className: "dcp-inj-p" }, String(text)),
 			) : null);
 			const injSec = el("div", { className: "dcp-inj" },
-				el("div", { className: "dcp-inj-h" }, "本轮注入（只读）"),
-				el("div", { className: "dcp-inj-n" }, "插件实际写进上下文的内容，逐字可核；要改文本请用上面的模板字段。"),
-				el("div", { className: "dcp-inj-t" },
-					el("span", null, inj
+				/* ═══ R59（2026-10-19 用户要求：「下面的那些内容移到**板块**里面显示」）═══
+				 * 把「本轮活值」「生效配置」并进**板块标题行**——原先它们落在板块最底部：要读完六段
+				 * 注入原文才看到活值，与"先看结论"的阅读顺序相反。一行放不下由 .dcp-inj-h 换行。 */
+				el("div", { className: "dcp-inj-h" },
+					el("span", null, "本轮注入（只读）"),
+					el("span", { className: "dcp-inj-n" }, inj
 						? `最近一轮 ${String(inj.at || "").slice(11, 19)}${inj.receiptOnly ? "（量测失败，仅回执）" : ""}`
 						: "尚未取到"),
 					el("button", { className: "dcp-mini", onClick: () => { pullInj(); } }, "刷新"),
+					inj ? el("span", { className: "dcp-inj-n" },
+						`本轮活值：占用 ${inj.values?.ratio != null ? `${Math.round(inj.values.ratio * 100)}%` : "?"}`
+						+ ` · 生效强制线 ${inj.values?.effCrit != null ? `${Math.round(inj.values.effCrit * 100)}%` : "?"}`
+						+ ` · 档位 ${inj.tier || "（本会话未登记）"}`
+						+ ` · 模板 ${inj.tpl?.brief || inj.tpl?.card ? "已启用" : "内置"}`) : null,
+					cfg ? el("span", { className: "dcp-inj-n" },
+						`生效配置：强制线 ${Math.round(cfg.criticalRatio * 100)}% · 智能线 ${Math.round(cfg.markerMinRatio * 100)}%`
+						+ ` · 阈值余量 ${Math.round(cfg.engineCapMargin * 100)}pp`
+						+ ` · 档位 ${Math.round(cfg.retainRatioLight * 100)}/${Math.round(cfg.retainRatioStandard * 100)}/${Math.round(cfg.retainRatioHeavy * 100)}%`
+						+ (cfg.tplBrief || cfg.tplCard ? " · 模板已启用" : "")
+						+ (cfg.tplFallbacks ? ` · ⚠️ 模板回退 ${cfg.tplFallbacks} 次（缺 {tool}）` : "")) : null,
 				),
+				el("div", { className: "dcp-inj-n" }, "插件实际写进上下文的内容，逐字可核；要改文本请用上面的模板字段。"),
 				inj
 					? [
 						injBlock("用量行", inj.usageText ? `${inj.usageText}${inj.effSuffix ? ` ｜ ${inj.effSuffix}` : ""}` : null),
@@ -593,19 +609,8 @@ window.__ModuleLoader__.load({
 						injBlock("思考强度教学", inj.effBriefText),
 						injBlock("换档提示", inj.nudgeText),
 						injBlock("压缩自检回执", inj.receiptText),
-						el("div", { className: "dcp-inj-n", key: "vals" },
-							`本轮活值：占用 ${inj.values?.ratio != null ? `${Math.round(inj.values.ratio * 100)}%` : "?"}`
-							+ ` · 生效强制线 ${inj.values?.effCrit != null ? `${Math.round(inj.values.effCrit * 100)}%` : "?"}`
-							+ ` · 档位 ${inj.tier || "（本会话未登记）"}`
-							+ ` · 模板 ${inj.tpl?.brief || inj.tpl?.card ? "已启用" : "内置"}`),
 					]
 					: el("div", { className: "dcp-inj-n" }, "（点「刷新」，或等下一轮注入）"),
-				cfg ? el("div", { className: "dcp-inj-n" },
-					`生效配置：强制线 ${Math.round(cfg.criticalRatio * 100)}% · 智能线 ${Math.round(cfg.markerMinRatio * 100)}%`
-					+ ` · 阈值余量 ${Math.round(cfg.engineCapMargin * 100)}pp`
-					+ ` · 档位 ${Math.round(cfg.retainRatioLight * 100)}/${Math.round(cfg.retainRatioStandard * 100)}/${Math.round(cfg.retainRatioHeavy * 100)}%`
-					+ (cfg.tplBrief || cfg.tplCard ? " · 模板已启用" : "")
-					+ (cfg.tplFallbacks ? ` · ⚠️ 模板回退 ${cfg.tplFallbacks} 次（缺 {tool}）` : "")) : null,
 			);
 			return el("div", { className: "dcp-panel" },
 				el("div", { className: "dcp-grid" },
