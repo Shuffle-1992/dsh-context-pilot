@@ -454,7 +454,11 @@ window.__ModuleLoader__.load({
 				const m = Number(raw);
 				return Number.isFinite(m) && m >= 0 && m < 0.5 ? m : marginSaved;
 			})();
-			const capNow = engineThresholdNow === null ? null : Math.max(0, engineThresholdNow - marginDraft);
+			/* R68（2026-10-19 用户实测「小数位有问题」）：上限是**浮点减法**算出来的
+			 * （0.75 + 0.05 − 0.1 = 0.7000000000000001）⇒ 直接 String() 进输入框就是一长串。
+			 * 比例类参数 **4 位小数（0.0001 = 0.01%）**已远超实际需要 ⇒ 统一归一后再往下用。 */
+			const roundRatio = (x) => Math.round(Number(x) * 1e4) / 1e4;
+			const capNow = engineThresholdNow === null ? null : Math.max(0, roundRatio(engineThresholdNow - marginDraft));
 			/** 字段备注：criticalRatio 动态追加**生效上限**（C-own）。
 			 *  ⚠️ 上限必须用**面板自己拉的 state**（`engineCap`），不能用 `NS.engineCap`——
 			 *     后者只有开过悬浮弹窗才有值（真 bug：用户没开弹窗 ⇒ 备注「待探测」+ 保存不钳制）。

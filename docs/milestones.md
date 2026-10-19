@@ -4066,3 +4066,18 @@ compact-tool **拿不到**原文 ⇒ 不能像 brief/card 那样自己渲染。�
 
 **守卫**：contract 新增 2 条（重算公式 + 草稿联动 / 输入与保存都用 capNow），并把 7 条钉死旧 `engineCap`
 写法的断言升级为 `capNow` 语义。**变异**：把 `capNow` 退回 `engineCap` ⇒ contract 红 ✓ CAUGHT。
+
+### R68 强制压缩线显示成 `0.7000000000000001`（2026-10-19，用户实测「小数位有问题」）
+
+**根因**：上限是**浮点减法**算出来的——`engineCap + marginSaved − marginDraft` = `0.75 + 0.05 − 0.1`
+= **0.7000000000000001**（IEEE754 经典误差）。R67 的联动钳制直接 `String(capNow)` 写进草稿 ⇒ 输入框显示一长串。
+
+**修法**：加 `roundRatio = (x) => Math.round(Number(x) * 1e4) / 1e4`，`capNow` 一律先归一：
+`Math.max(0, roundRatio(engineThresholdNow - marginDraft))` ⇒ 显示 `0.7`。
+选 **4 位小数**的理由：比例类参数 0.0001 = 0.01%，已远超实际需要（上限本身是"引擎阈值 − 几个百分点"，
+精度要求到 0.1% 就够）；同时保留 R55 的 `0.745` 这类一位以上小数不被截断（那是 `pct1` 的显示路径，4 位不受影响）。
+
+顺带说明：**保存路径拿到的 cap 也是归一后的值**（`cap = capNow`），所以落盘也不会写进浮点长串。
+
+**守卫**：contract 1 条（必须有 `roundRatio` 且 `capNow` 用它归一）；R67 那条断言同步升级为含 `roundRatio` 的写法。
+**变异**：去掉归一 ⇒ **R67 + R68 两条同时红** ✓ CAUGHT。

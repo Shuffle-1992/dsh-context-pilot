@@ -4684,13 +4684,17 @@ ok('R62：m2 长期留档 effBrief 内置原文（effort 域产出，别的域�
  * 用户：「我应该设置 0.1，应该自动钳回 0.7」。旧实现 engineCap 只在挂载时拉一次 ⇒ 改余量不重算上限。 */
 ok('R67：上限按活值重算（引擎阈值 − 当前草稿余量），并联动把强制压缩线钳下来',
   /const engineThresholdNow = engineCap === null \? null : engineCap \+ marginSaved;/.test(client)
-  && /const capNow = engineThresholdNow === null \? null : Math\.max\(0, engineThresholdNow - marginDraft\);/.test(client)
+  && /const capNow = engineThresholdNow === null \? null : Math\.max\(0, roundRatio\(engineThresholdNow - marginDraft\)\);/.test(client)
   && /cur <= capNow\) return d;/.test(client),
   '上限不随余量重算 / 草稿不联动钳制 ⇒ 改余量后强制压缩线不动（用户实测）');
 ok('R67：输入钳制与保存钳制都用 capNow（不是挂载时的旧上限）',
   /if \(field\.key === "criticalRatio" && capNow !== null\)/.test(client)
   && /const cap = capNow !== null && capNow > 0 && capNow <= 1 \? capNow : null;/.test(client),
   '仍用 engineCap ⇒ 改了余量后保存仍按旧上限钳');
+ok('R68：上限做浮点归一（4 位小数），否则输入框会显示 0.7000000000000001（用户实测）',
+  /const roundRatio = \(x\) => Math\.round\(Number\(x\) \* 1e4\) \/ 1e4;/.test(client)
+  && /Math\.max\(0, roundRatio\(engineThresholdNow - marginDraft\)\)/.test(client),
+  '直接相减 ⇒ 0.75+0.05−0.1 的浮点误差被写进输入框（用户截图 0.7000000000000001）');
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));
 process.exit(failures ? 1 : 0);
