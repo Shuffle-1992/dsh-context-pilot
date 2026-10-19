@@ -537,6 +537,9 @@ export function createM2Injection(deps) {
       const effBrief = effBriefBuiltin == null ? null
         : (getCompactToolApi?.()?.renderTemplated?.('tplEffBrief', effBriefBuiltin,
           { tool: 'set_reasoning_effort', current: eff?.current ?? '', tiers: eff?.tiers ?? '' }) ?? effBriefBuiltin);
+      /* R62：思考强度教学的**内置原文**再长期留一份在 m2 —— HUD 的 config.builtins 要读它
+       * （面板「查看内置文案」在还没等到下一轮注入时也能显示，而不是空着）。 */
+      if (effBriefBuiltin != null) state.m2.lastEffBriefBuiltin = effBriefBuiltin;
       if (effBrief) {
         remember(effBriefedBySid, sid); // C 类审查：有界化（原先无上限）
         state.m2.effortBriefings = (state.m2.effortBriefings ?? 0) + 1;

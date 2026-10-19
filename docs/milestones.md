@@ -3926,3 +3926,32 @@ compact-tool **拿不到**原文 ⇒ 不能像 brief/card 那样自己渲染。�
 
 **守卫**：client-render R61 一条（`injAll` 状态 + 整段开关文案 + 确认 `setInjOpen` 已彻底移除）。
 （本轮先写错断言顺序：代码是 `injAll ? "收起" : "展开"`，断言写成 `"展开" : "收起"` ⇒ 套件红 ⇒ 已修 ✓。）
+
+### R62 三条实测反馈同源修复：板块位置 / 按钮无反应 / 内置文案为空（2026-10-19）
+
+用户三条：「本轮注入那些，移到强制压缩下面，再一个板块，现在没包含进去」+「2 个按钮点击没什么反应」
++「查看内置按钮点击显示空的」。
+
+**根因（后两条同源）**：`inj === null`——host 侧 `state.m2.lastInjection` 为空（本进程还没发生过注入）。
+于是 ①「展开全部原文」没有内容可展开 ② 点击「刷新注入数据」数据没变、无任何反馈 ③ 三个「查看内置文案」
+拿不到 `builtinBrief/builtinCard/builtinEffBrief` ⇒ 全是空。
+
+**① 板块放进卡片**：`injSec` 原先与 `.dcp-grid`（带边框那张卡）**平级** ⇒ 视觉上落在卡片外面。
+现改为 `.dcp-grid` 的**最后一个子节点** ⇒ 落在「强制压缩冷却」行之下、**同一张卡片内**，作为独立板块
+（`.dcp-inj` 自带顶部分隔线）。
+
+**② 按钮有反应**：`pullInj` 改为**返回**本轮注入对象；新增 `refreshInj()`——点「刷新注入数据」后回一句
+状态（有数据：「已刷新注入数据（最近一轮 HH:MM:SS）」；无数据：「已刷新：host 侧本轮还没有注入记录…」）。
+「展开全部原文」在 `inj === null` 时**置灰禁用**，title 说明「本轮还没有注入记录，没有原文可展开」。
+
+**③ 内置文案随时可读**：原先 `state.m3.lastBuiltin` 只在**模板渲染时**落档 ⇒ 首轮注入前面板永远空。
+现：
+- `compact-tool.ensure()`（工具注册期，宿主 pre-step 最前面调用）按**当前配置**预渲染一份 brief/card
+  内置文案（注入发生后被真实活值版本覆盖）；
+- `m2` 把 effort 域的**内置原文**长期留档在 `state.m2.lastEffBriefBuiltin`（思考强度教学原文别的域拿不到）；
+- `m5` 的 HUD `config` 载荷新增 `builtins: { ...state.m3.lastBuiltin, effBrief: state.m2.lastEffBriefBuiltin }`；
+- client 的「查看内置文案」由「只读 `inj.*`」改为 **`inj.* ?? cfg.builtins.*`**。
+
+**守卫**：contract 4 条（映射回落三支 / ensure 预渲染 / HUD builtins / m2 留档）+ client-render 2 条
+（板块在 .dcp-grid 内且在 actions 之前 / 刷新有反馈且无注入时禁用展开）。
+**变异**：撤掉 ensure 预渲染 ⇒ contract 红；去掉 `disabled: inj === null` ⇒ client-render 红 ⇒ 两条都 CAUGHT。

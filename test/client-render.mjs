@@ -275,9 +275,21 @@ ok('R61：六段注入原文**默认收起**，且**整段一个**开关（用�
   && !/setInjOpen/.test(SRC),
   '仍每行一个「查看」⇒ 6 个重复按钮（用户实测反馈）；或未默认收起 ⇒ 一屏上千行');
 
-ok('R58：内置文案缺席时给出**可操作**提示（明确提示 toggle 加载新版 host，而不是只说"暂无"）',
-  /toggle 插件/.test(SRC) && /内置原文由 \*\*host 半\*\*/.test(SRC),
-  '只说"暂无" ⇒ 用户不知道 host 改动需要 toggle（PANEL-HOWTO §0：host 半改动要 toggle 或重启）');
+ok('R58/R62：内置文案缺席时给出**可操作**提示（点「刷新注入数据」+ toggle 加载新版 host）',
+  /toggle 插件/.test(SRC) && /刷新注入数据/.test(SRC),
+  '只说"暂无" ⇒ 用户不知道该怎么办（PANEL-HOWTO §0：host 改动要 toggle 或重启）');
+
+/* ── R62（2026-10-19 用户实测三条）：板块放进卡片 / 按钮有反应 / 内置文案不空 ── */
+const iGrid = SRC.indexOf('className: "dcp-grid"');
+const iInjSec = SRC.indexOf("injSec,");
+const iActions = SRC.indexOf('className: "dcp-actions"', iGrid);
+ok('R62：本轮注入板块已**放进带边框的卡片**（.dcp-grid 内、强制压缩冷却之后）',
+  iGrid > 0 && iInjSec > iGrid && iActions > 0 && iInjSec < iActions,
+  'injSec 仍是 .dcp-grid 的兄弟节点 ⇒ 板块落在卡片外面（用户实测「现在没包含进去」）');
+ok('R62：刷新按钮有**可见反馈**，且无注入时展开按钮禁用（用户反馈「2 个按钮点击没什么反应」）',
+  /refreshInj/.test(SRC) && /已刷新注入数据/.test(SRC)
+  && /disabled: inj === null/.test(SRC) && /本轮还没有注入记录，没有原文可展开/.test(SRC),
+  '点了没任何反馈 / 无内容时展开按钮仍可点 ⇒ 用户以为按钮坏了');
 
 /* ── R59：本轮活值 / 生效配置必须并进板块标题行（用户要求「移到板块里面」）──
  * ⚠️ 渲染层断不到「活值」文本：它来自 `inj`，而 `inj` 由 `hudRemoteSvc.getHud()` 填充

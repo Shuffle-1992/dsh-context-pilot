@@ -238,6 +238,10 @@ export function createM5Hud(deps) {
             engineCapMargin: M3.engineCapMargin,
             retainRatioLight: M3.retainRatioLight, retainRatioStandard: M3.retainRatioStandard, retainRatioHeavy: M3.retainRatioHeavy,
             tplBrief: M3.tplBrief, tplCard: M3.tplCard, tplEffBrief: M3.tplEffBrief,
+            /* R62（用户实测「查看内置按钮点击显示空的」）：面板「查看内置文案」不该等首轮注入 ⇒
+             * 这里给一份**随时可读**的内置原文：brief/card 来自 compact-tool 落档（ensure 期已按
+             * 当前配置预渲染），effBrief 来自 m2 最近一次注入（effort 域产出，本域拿不到原文）。 */
+            builtins: { ...(state.m3?.lastBuiltin ?? {}), effBrief: state.m2?.lastEffBriefBuiltin ?? null },
             tplFallback: state.m3?.tplFallback ?? null, tplFallbacks: state.m3?.tplFallbacks ?? 0,
             engineCapProbe: state.m3?.engineCapProbe ?? null,
           };

@@ -4663,9 +4663,24 @@ ok('R60：m2 对思考强度教学套模板，且 {tool} 覆盖为 set_reasoning
 ok('R60：三个模板的内置原文都随 injected 下发（含 builtinEffBrief，两处 lastInjection）',
   (m2Src57.match(/builtinEffBrief/g) ?? []).length >= 2,
   '只带一处 ⇒ 回执轮面板「查看内置文案」为空');
-ok('R60：面板内置文案映射覆盖**三个**模板（不再是二元三目）',
-  /field\.key === "tplCard" \? inj\?\.builtinCard/.test(client) && /inj\?\.builtinEffBrief/.test(client),
-  '只映射两个 ⇒ 思考强度教学点开是空的');
+ok('R60/R62：面板内置文案覆盖**三个**模板，且缺注入时回落到 HUD 的 config.builtins',
+  /field\.key === "tplCard" \? \(inj\?\.builtinCard \?\? cfg\?\.builtins\?\.card\)/.test(client)
+  && /inj\?\.builtinEffBrief \?\? cfg\?\.builtins\?\.effBrief/.test(client),
+  '只映射两个 / 无 config.builtins 回落 ⇒ 未注入时三个「查看内置文案」全是空的（用户实测）');
+/* ═══ R62（2026-10-19 用户实测三条）：① 板块要放进卡片 ② 两个按钮点了没反应 ③ 内置文案点开是空的 ═══
+ * 根因同源：`inj` 为 null（host 侧本轮还没注入记录）⇒ 折叠无内容可展、内置文案也没数据。
+ * ⇒ 内置文案改为 host **随时可读**：compact-tool 在 ensure() 期按当前配置预渲染一份，m5 随 config 下发。 */
+const m5Src62 = readFileSync(join(PLUGIN, 'm5.hud.mjs'), 'utf8');
+ok('R62：compact-tool 在 ensure() 期**预渲染**内置文案（首轮注入前面板也能看）',
+  /keepBuiltin\('brief', renderBriefBuiltin\(\{ criticalRatio: M3\?\.criticalRatio/.test(ctSrc57)
+  && /keepBuiltin\('card', renderCardBuiltin\(\{ ratio: null, minRatio: M3\?\.markerMinRatio/.test(ctSrc57),
+  '只在渲染时落档 ⇒ 首个注入之前「查看内置文案」永远是空的（用户实测）');
+ok('R62：HUD 的 config 载荷带 builtins（含 effort 域的 effBrief）',
+  /builtins: \{ \.\.\.\(state\.m3\?\.lastBuiltin \?\? \{\}\), effBrief: state\.m2\?\.lastEffBriefBuiltin \?\? null \}/.test(m5Src62),
+  'config 不带 builtins ⇒ 面板只能等注入，点开就是空的');
+ok('R62：m2 长期留档 effBrief 内置原文（effort 域产出，别的域拿不到）',
+  /state\.m2\.lastEffBriefBuiltin = effBriefBuiltin;/.test(m2Src57),
+  '不落档 ⇒ 思考强度教学的内置文案只能等注入那一次');
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));
 process.exit(failures ? 1 : 0);

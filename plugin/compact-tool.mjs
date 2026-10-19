@@ -879,6 +879,16 @@ export function createCompactTool(deps) {
       }
       const ok = registerTool();
       d.installed = ok;
+      /* R62（用户实测「查看内置按钮点击显示空的」）：lastBuiltin 原先只在**模板渲染时**落档 ⇒
+       * 首轮注入之前面板点开永远是空的。这里在注册期先按**当前配置**预渲染一份内置文案，
+       * 面板随时可看；注入发生后会被真实活值版本覆盖（keepBuiltin 每次都写最新）。 */
+      try {
+        if (!state.m3.lastBuiltin || (!state.m3.lastBuiltin.brief && !state.m3.lastBuiltin.card)) {
+          syncTiers();
+          keepBuiltin('brief', renderBriefBuiltin({ criticalRatio: M3?.criticalRatio, retainRatio: M3?.retainRatioStandard, retainTokens: null }));
+          keepBuiltin('card', renderCardBuiltin({ ratio: null, minRatio: M3?.markerMinRatio, criticalRatio: M3?.criticalRatio, retainRatio: M3?.retainRatioStandard }));
+        }
+      } catch { /* 预览失败不影响工具注册 */ }
       return ok;
     } catch (e) {
       state.m3.compactToolDiag.error = msg(e);

@@ -363,13 +363,25 @@ window.__ModuleLoader__.load({
 			const [injAll, setInjAll] = react.useState(false);
 			const pullInj = react.useCallback(async () => {
 				try {
-					if (!hudRemoteSvc || typeof hudRemoteSvc.getHud !== "function") return;
+					if (!hudRemoteSvc || typeof hudRemoteSvc.getHud !== "function") return void 0;
 					const raw = await hudRemoteSvc.getHud("");
 					const env = raw && typeof raw === "object" && "value" in raw ? (raw.ok ? raw.value : null) : raw;
-					setInj(env && env.injected ? env.injected : null);
+					const got = env && env.injected ? env.injected : null;
+					setInj(got);
 					setCfg(env && env.config ? env.config : null);
-				} catch { /* 吞：拿不到就显示"尚未取到"，绝不影响设置面板本身 */ }
+					return got; // R62：返回本轮注入，供「刷新注入数据」给可见反馈
+				} catch { return void 0; /* 吞：拿不到就显示"尚未取到"，绝不影响设置面板本身 */ }
 			}, [hudRemoteSvc]);
+			/* R62（2026-10-19 用户反馈「2 个按钮点击没什么反应」）：手动刷新必须**有可见反馈**——
+			 * 原先点完和没点一样（数据没变就什么都不动）。现在点完回一句状态。 */
+			const refreshInj = react.useCallback(async () => {
+				const got = await pullInj();
+				try {
+					setMessage(got
+						? { kind: "ok", text: `已刷新注入数据（最近一轮 ${String(got.at || "").slice(11, 19)}）` }
+						: { kind: "ok", text: "已刷新：host 侧本轮还没有注入记录（等下一轮注入，或确认已 toggle 加载新版 host）" });
+				} catch { /* 忽略 */ }
+			}, [pullInj]);
 			react.useEffect(() => { pullInj(); }, [pullInj]);
 			react.useEffect(() => {
 				let alive = true;
@@ -596,14 +608,18 @@ window.__ModuleLoader__.load({
 					el("span", { className: "dcp-inj-n" }, inj
 						? `最近一轮 ${String(inj.at || "").slice(11, 19)}${inj.receiptOnly ? "（量测失败，仅回执）" : ""}`
 						: "尚未取到"),
-					/* R61：刷新按钮**说清刷什么**（用户反馈「上面的没有刷新按钮」——它原本就在标题行里，
-					 * 只是标签只有「刷新」、不够显眼）；并新增整段一个的展开开关。 */
+					/* R61/R62：刷新按钮**说清刷什么**并给可见反馈；展开按钮在无注入时**禁用**（否则点了没反应）。 */
 					el("button", {
 						className: "dcp-mini", type: "button", title: "重新拉取本轮注入原文与生效配置（内置文案也走这条）",
-						onClick: () => { pullInj(); },
+						onClick: () => { refreshInj(); },
 					}, "刷新注入数据"),
-					el("button", { className: "dcp-mini", type: "button", onClick: () => setInjAll((v) => !v) },
-						injAll ? "收起全部原文" : "展开全部原文"),
+					el("button", {
+						className: "dcp-mini", type: "button", disabled: inj === null,
+						title: inj === null
+							? "本轮还没有注入记录，没有原文可展开（点「刷新注入数据」，或等下一轮注入）"
+							: "展开/收起六段注入原文",
+						onClick: () => setInjAll((v) => !v),
+					}, injAll ? "收起全部原文" : "展开全部原文"),
 					inj ? el("span", { className: "dcp-inj-n" },
 						`本轮活值：占用 ${inj.values?.ratio != null ? `${Math.round(inj.values.ratio * 100)}%` : "?"}`
 						+ ` · 生效强制线 ${inj.values?.effCrit != null ? `${Math.round(inj.values.effCrit * 100)}%` : "?"}`
@@ -661,10 +677,10 @@ window.__ModuleLoader__.load({
 									),
 									tplOpen === field.key
 										? el("pre", { className: "dcp-builtin" },
-											(field.key === "tplBrief" ? inj?.builtinBrief
-												: field.key === "tplCard" ? inj?.builtinCard
-													: inj?.builtinEffBrief)
-												|| "（暂无可显示的内置文案：内置原文由 **host 半**随本轮注入下发。若一直为空，说明 host 还跑着旧版——请先 **toggle 插件**（关→开）加载新版 host，再点上面的「刷新」或等下一轮注入）")
+											(field.key === "tplBrief" ? (inj?.builtinBrief ?? cfg?.builtins?.brief)
+												: field.key === "tplCard" ? (inj?.builtinCard ?? cfg?.builtins?.card)
+													: (inj?.builtinEffBrief ?? cfg?.builtins?.effBrief))
+												|| "（暂无内置文案：点「刷新注入数据」重拉；若一直为空，先 toggle 插件（关→开）加载新版 host）")
 										: null,
 								)
 								: el("input", {
@@ -676,8 +692,11 @@ window.__ModuleLoader__.load({
 							}),
 						el("span", { className: "dcp-hint" }, hintFor(field)),
 					)),
+					/* R62（用户要求「本轮注入那些，移到强制压缩下面，再一个板块，现在没包含进去」）：
+					 * 放进 .dcp-grid（就是那个带边框的卡片）的最后一个子节点 ⇒ 落在「强制压缩冷却」行
+					 * 之下、**同一张卡片里**，作为它自己的一个板块（.dcp-inj 自带顶部分隔线）。 */
+					injSec,
 				),
-				injSec,
 				el("div", { className: "dcp-actions" },
 					el("button", {
 						className: "dcp-btn", disabled: !writable || saving || draft === null,
