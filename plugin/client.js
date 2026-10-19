@@ -644,6 +644,15 @@ window.__ModuleLoader__.load({
 					]
 					: el("div", { className: "dcp-inj-n" }, "（点「刷新」，或等下一轮注入）"),
 			);
+			/* R63（2026-10-19 用户实测「下面显示的全部，跟上面的内置文案不是一样的么？2 处重复的？」）：
+			 * 模板留空时，注入的就是**内置文案本身** ⇒ 再显示一份「查看内置文案」纯属重复展示。
+			 * 规则：模板留空 **且** 已有本轮注入 ⇒ 不显示按钮（改为一句说明，指向下方「本轮注入」同名段）；
+			 * 模板非空（注入≠内置，需要参照物）或还没有注入记录（内置是唯一来源）时才显示。 */
+			const TPL_BLOCK = { tplBrief: "一次性说明", tplCard: "决策卡", tplEffBrief: "思考强度教学" };
+			const builtinTextOf = (field) => (field.key === "tplBrief" ? (inj?.builtinBrief ?? cfg?.builtins?.brief)
+				: field.key === "tplCard" ? (inj?.builtinCard ?? cfg?.builtins?.card)
+					: (inj?.builtinEffBrief ?? cfg?.builtins?.effBrief));
+			const tplIsDupOfInj = (field) => String(valueOf(field) ?? "").trim() === "" && inj !== null;
 			return el("div", { className: "dcp-panel" },
 				el("div", { className: "dcp-grid" },
 					FIELDS.map((field) => el("div", { className: "dcp-row", key: field.key },
@@ -667,19 +676,21 @@ window.__ModuleLoader__.load({
 											value: String(valueOf(field)),
 											onChange: (e) => setField(field, e.target.value),
 										}),
-										/* R57：内置文案查看按钮（放在输入框**旁边**）。显示的是 host 落档的
-										 * **内置原文**——即模板留空时插件实际会用的那段文字，可逐字复制后再改。 */
-										el("button", {
-											className: "dcp-mini", type: "button",
-											title: "查看内置文案（模板留空时插件实际使用的原文）",
-											onClick: () => setTplOpen((v) => (v === field.key ? null : field.key)),
-										}, tplOpen === field.key ? "收起内置文案" : "查看内置文案"),
+										/* R57：内置文案查看按钮（放在输入框**旁边**）。显示 host 落档的
+										 * **内置原文**——即模板留空时插件实际会用的那段文字，可逐字复制后再改。
+										 * R63：模板留空且已有本轮注入时不显示（那就是下方同名段，重复）。 */
+										tplIsDupOfInj(field)
+											? el("span", { className: "dcp-hint dcp-tplnote" },
+												`留空 = 内置文案；本轮注入的「${TPL_BLOCK[field.key]}」就是它（见下方板块，不重复展示）`)
+											: el("button", {
+												className: "dcp-mini", type: "button",
+												title: "查看内置文案（模板留空时插件实际使用的原文）",
+												onClick: () => setTplOpen((v) => (v === field.key ? null : field.key)),
+											}, tplOpen === field.key ? "收起内置文案" : "查看内置文案"),
 									),
-									tplOpen === field.key
+									(!tplIsDupOfInj(field) && tplOpen === field.key)
 										? el("pre", { className: "dcp-builtin" },
-											(field.key === "tplBrief" ? (inj?.builtinBrief ?? cfg?.builtins?.brief)
-												: field.key === "tplCard" ? (inj?.builtinCard ?? cfg?.builtins?.card)
-													: (inj?.builtinEffBrief ?? cfg?.builtins?.effBrief))
+											builtinTextOf(field)
 												|| "（暂无内置文案：点「刷新注入数据」重拉；若一直为空，先 toggle 插件（关→开）加载新版 host）")
 										: null,
 								)
