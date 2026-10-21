@@ -682,8 +682,19 @@ ok('R16.13 文案：m5 为两种「非插件压缩」提供标签（不与「强
   /* ⑥ 趋势算术化（评审建议 2） */
   const cardTrend14 = api14.renderCard({ ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, usedTokens: 500000, deltaTokens: 50000, turnsToLine: 5 }) ?? '';
   ok('R16.14 决策卡：用实测增量给出「约几轮触线」（把预测题变算术题）',
-    /本轮 \+50k token/.test(cardTrend14) && /约 \*\*5 轮\*\*触/.test(cardTrend14) && /粗估/.test(cardTrend14),
+    /每轮 \+50k token/.test(cardTrend14) && /约 \*\*5 轮\*\*触/.test(cardTrend14) && /粗估/.test(cardTrend14),
     '仍要求模型自己预测未来占用 ⇒ 该条件「从未成立」（评审实测）');
+
+      /* R70 行为级（用户实测「这个趋势计算好像不太准确」）：均值样本数要标出来；
+       * 刚压缩过必须**明确不给外推**（否则拿压缩前的巨量增量算轮数，会把模型带偏）。 */
+      const cardSamp70 = api14.renderCard({ ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, usedTokens: 500000, deltaTokens: 50000, deltaSamples: 3, turnsToLine: 5 }) ?? '';
+      ok('R70 行为级：卡片标出样本轮数（近 3 轮均值粗估）',
+        /近 3 轮均值粗估/.test(cardSamp70),
+        '不标样本数 ⇒ 用户不知道这个外推基于几轮（单轮 vs 4 轮均值可信度差很多）');
+      const cardReset70 = api14.renderCard({ ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, usedTokens: 500000, resetByCompaction: true }) ?? '';
+      ok('R70 行为级：刚压缩时**不给外推**，明说基线已重置',
+        /刚刚压缩过/.test(cardReset70) && !/触 75% 强制线/.test(cardReset70),
+        '压缩后仍给轮数外推 ⇒ 用的是压缩前的巨量增量，会误导模型现在压');
   /* ⑦ set-tier 路径要在卡片与说明里都出现（否则模型不知道有这条低成本动作） */
   ok('R16.14 教学：卡片与一次性说明都教 set-tier 这条低成本动作',
     /action:'set-tier'/.test(card14) && /action:'set-tier'/.test(api14.renderBrief({ criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000 }) ?? ''),
@@ -703,7 +714,7 @@ const m3src14 = read('m3.compact.mjs'); // ⚠️ m3src 在本文件稍后声明
 ok('R16.14 接线：趋势数据（增量/触线轮数）由 m2 现算并注入卡片；m3 标注「系统代压」',
   /const trendOf = \(sid, ratio, win, crit\) => \{/.test(m2src)
     && /renderPolicyCard\(r\.ratio, effCrit, r\.window, trendOf\(sid, r\.ratio, r\.window, effCrit\)\)/.test(m2src)
-    && /lastUsedBySid\.set\(sid, used\)/.test(m2src)
+    && /trendHistory\.set\(sid, rec\)/.test(m2src) && /TREND_SAMPLES/.test(m2src)
     && /系统代压（本会话未申报档位/.test(m3src14)
     && /getCompactTool\(\)\?\.hasTier\?\.\(sidE\)/.test(m3src14),
   '任一环缺位 ⇒ 趋势是空的、或「系统代压」不显性（评审建议 2/7 落不了地）');
@@ -4708,6 +4719,24 @@ ok('R69：最近换档时间带**日期**（YYYY-MM-DD HH:MM:SS），不再只�
 ok('R69：不依赖 locale 拼时间（自补零）——不同 locale 的 toLocaleString 分隔符会打乱 tooltip',
   /const p = \(n\) => String\(n\)\.padStart\(2, '0'\);/.test(effortSrc69),
   '依赖 toLocaleString ⇒ 换 locale 后格式漂移');
+/* ═══ R70（2026-10-21 用户实测「这个趋势计算好像不太准确」）═══
+ * 旧实现：只看上一轮单轮增量 + 压缩后基线不重置 + 两处轮数取整不一致（ceil vs floor）。
+ * 新实现：最近 N 轮均值 / 骤降即重置基线 / 统一 Math.round(≥1)。 */
+ok('R70：趋势取**最近 N 轮均值**（TREND_SAMPLES），不再用单轮增量外推',
+  /const TREND_SAMPLES = 4;/.test(m2src) && /rec\.deltas\.reduce\(\(a, b\) => a \+ b, 0\) \/ samples/.test(m2src),
+  '仍用单轮增量 ⇒ 一轮贴图/大 diff 就能把「还有几轮」算成 1 轮（用户实测不准）');
+ok('R70：检测到上下文**骤降**即重置基线（压缩后不拿旧增量外推）',
+  /const resetByCompaction = prev != null/.test(m2src) && /rec\.deltas = \[\]/.test(m2src)
+  && /resetByCompaction/.test(m2src),
+  '压缩后基线不重置 ⇒ 增量为负、趋势行消失或算出离谱值');
+const ct70 = readFileSync(join(PLUGIN, 'compact-tool.mjs'), 'utf8');
+ok('R70：刚压缩时卡片**明确说明**基线已重置（不给外推）',
+  /刚刚压缩过（上下文骤降）⇒ 基线已重置/.test(ct70) && /resetByCompaction === true/.test(ct70),
+  '压缩后仍给一个外推轮数 ⇒ 用的是压缩前的巨量增量，误导决策');
+ok('R70：两处轮数**同口径取整**（turnsToLine 与「两个方向」里的 turns 都用 Math.round 且 ≥1）',
+  /Math\.max\(1, Math\.round\(\(\(crit - ratio\) \* win\) \/ deltaTokens\)\)/.test(m2src)
+  && /Math\.max\(1, Math\.round\(leftTokens \/ delta\)\)/.test(ct70),
+  'ceil/floor 混用 ⇒ 同一张卡出现 18 与 37 两个互相矛盾的数字（用户实测）');
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));
 process.exit(failures ? 1 : 0);

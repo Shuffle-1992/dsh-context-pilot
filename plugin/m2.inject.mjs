@@ -244,22 +244,46 @@ export function createM2Injection(deps) {
    * 记录每会话上一轮的上下文总量，算出「本轮增量」与「按此速度还有几轮触强制线」。
    * 评审原文：「我无法估算后面几步会产生多少 token，每轮的占用百分比都是事后给的。
    * 这个条件在我这里从未成立。」⇒ 用实测增量替代预测。 */
-  const lastUsedBySid = new Map();
+  /* ═══ R70（2026-10-21 用户实测「这个趋势计算好像不太准确」）═══
+   * 旧实现只看**上一轮单轮增量**（used − prevUsed），两个硬伤：
+   *   ① 单轮噪声极大：一轮贴图/大 diff 就能把「还有几轮」算成 1 轮；
+   *   ② **压缩后基线不重置**：上下文骤降 ⇒ 增量变负 ⇒ 趋势行直接消失（或下次算出离谱值）。
+   * 现在：增量取**最近 N 轮正增量的均值**（抗尖峰）；检测到上下文骤降即视为「刚压缩」⇒
+   * 清空样本、重置基线（本轮不外推）；轮数取整与卡片其余处统一（Math.round，且至少 1）。
+   * 仍然标注「粗估」：增量本身波动很大，任何外推都只是量级参考。 */
+  const TREND_SAMPLES = 4;        // 均值窗口（轮）
+  const TREND_RESET_MIN_RATIO = 0.02;   // 骤降判据：> 2% 窗口
+  const TREND_RESET_MIN_TOKENS = 2000; // 或 > 2000 token（小窗口下避免误判）
+  const trendHistory = new Map(); // sid -> { used: number|null, deltas: number[] }
   const trendOf = (sid, ratio, win, crit) => {
     try {
       if (!Number.isFinite(ratio) || !Number.isFinite(win) || win <= 0) return {};
       const used = Math.round(ratio * win);
-      const prev = lastUsedBySid.get(sid);
-      lastUsedBySid.set(sid, used);
-      if (lastUsedBySid.size > 64) { // 有界化：只保留最近 64 个会话
-        const oldest = lastUsedBySid.keys().next().value;
-        if (oldest !== sid) lastUsedBySid.delete(oldest);
+      const rec = trendHistory.get(sid) ?? { used: null, deltas: [] };
+      const prev = rec.used;
+      const resetByCompaction = prev != null
+        && (prev - used) > Math.max(TREND_RESET_MIN_RATIO * win, TREND_RESET_MIN_TOKENS);
+      if (resetByCompaction) {
+        rec.deltas = []; // 压缩改写了上下文 ⇒ 历史增量样本作废
+      } else if (prev != null && used > prev) {
+        rec.deltas.push(used - prev);
+        if (rec.deltas.length > TREND_SAMPLES) rec.deltas.shift();
       }
-      const delta = prev == null ? null : used - prev;
-      const turnsToLine = Number.isFinite(delta) && delta > 0 && Number.isFinite(crit) && ratio < crit
-        ? Math.ceil(((crit - ratio) * win) / delta)
+      const samples = rec.deltas.length;
+      const deltaTokens = samples > 0
+        ? Math.round(rec.deltas.reduce((a, b) => a + b, 0) / samples)
         : null;
-      return { sid, usedTokens: used, deltaTokens: Number.isFinite(delta) ? delta : null, turnsToLine };
+      rec.used = used;
+      trendHistory.set(sid, rec);
+      if (trendHistory.size > 64) { // 有界化：只保留最近 64 个会话
+        const oldest = trendHistory.keys().next().value;
+        if (oldest !== sid) trendHistory.delete(oldest);
+      }
+      const turnsToLine = Number.isFinite(deltaTokens) && deltaTokens > 0
+        && Number.isFinite(crit) && ratio < crit
+        ? Math.max(1, Math.round(((crit - ratio) * win) / deltaTokens))
+        : null;
+      return { sid, usedTokens: used, deltaTokens, deltaSamples: samples, turnsToLine, resetByCompaction };
     } catch { return {}; }
   };
 

@@ -589,7 +589,7 @@ export function createCompactTool(deps) {
    * 压缩会在下一步开始前落地。教学若没写清这点，模型会退回「停下等压缩」的旧习惯。
    * ⚠️ 卡片每轮（占用达标时）都出现 ⇒ 比一次性说明更该承担「先说再调用」的提醒职责。
    */
-  function renderCardBuiltin({ ratio, minRatio, criticalRatio, retainRatio, retainTokens, usedTokens, deltaTokens, turnsToLine, tierName, tierDeclared, tierState } = {}) {
+  function renderCardBuiltin({ ratio, minRatio, criticalRatio, retainRatio, retainTokens, usedTokens, deltaTokens, deltaSamples, turnsToLine, resetByCompaction, tierName, tierDeclared, tierState } = {}) {
     try {
       if (ratio == null || ratio < minRatio) return null;
       const pct = `${(ratio * 100).toFixed(0)}%`;
@@ -625,11 +625,16 @@ export function createCompactTool(deps) {
       }
       /* R16.14（评审建议 2）：把「若预计会推高」从预测题变成算术题（用实测的每轮增量）。 */
       const delta = Number(deltaTokens);
-      /* R16.15（评审建议 7）：单轮增量外推易被贴图/大 diff 拉偏 ⇒ 明确标注是**粗估**。 */
-      const trend = Number.isFinite(delta) && delta > 0
-        ? `**趋势（按最近一轮增量粗估）**：本轮 +${kfmt(delta)} token${Number.isFinite(Number(turnsToLine)) && Number(turnsToLine) > 0 ? `，约 **${Number(turnsToLine)} 轮**触 ${crit} 强制线` : ''}`
-          + `——若这个轮数很小，现在就是**声明档位的窗口期**。`
-        : '';
+      const samples = Number(deltaSamples);
+      /* R70：单轮增量外推易被贴图/大 diff 拉偏 ⇒ 改为**最近 N 轮均值**，并明确标出样本数；
+       * 刚压缩过时基线已重置，本轮**不给外推**（否则会拿"压缩前的巨量增量"误导模型）。 */
+      const trend = resetByCompaction === true
+        ? `**趋势**：刚刚压缩过（上下文骤降）⇒ 基线已重置，**下一轮起重新累计**（本轮不给外推）。`
+        : Number.isFinite(delta) && delta > 0
+          ? `**趋势（近 ${Number.isFinite(samples) && samples > 0 ? samples : 1} 轮均值粗估）**：每轮 +${kfmt(delta)} token`
+            + (Number.isFinite(Number(turnsToLine)) && Number(turnsToLine) > 0 ? `，约 **${Number(turnsToLine)} 轮**触 ${crit} 强制线` : '')
+            + `——轮数很小时就是**声明档位的窗口期**。`
+          : '';
       /* R16.15（评审建议 3/8）：决策行里的「tier 保持 X」原先无处可查（卡只给保留 token 数）
        * ⇒ 明确渲染**当前档位名**（含是否已登记），并把「现行生效」的语义限定为保留预算。 */
       const cur = typeof tierName === 'string' && tierName ? tierName : null;
@@ -651,7 +656,7 @@ export function createCompactTool(deps) {
         if (!Number.isFinite(b) || b <= 0 || !Number.isFinite(win) || win <= 0) return null;
         const pctAfter = b / win;
         const leftTokens = Math.max(0, (critR - pctAfter) * win);
-        const turns = (Number.isFinite(delta) && delta > 0) ? Math.floor(leftTokens / delta) : null;
+        const turns = (Number.isFinite(delta) && delta > 0) ? Math.max(1, Math.round(leftTokens / delta)) : null; // R70：与 turnsToLine 同口径取整
         return { pctAfter, turns };
       };
       const dirLine = (used != null && Number.isFinite(t) && t > 0 && used > t
