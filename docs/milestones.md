@@ -4081,3 +4081,20 @@ compact-tool **拿不到**原文 ⇒ 不能像 brief/card 那样自己渲染。�
 
 **守卫**：contract 1 条（必须有 `roundRatio` 且 `capNow` 用它归一）；R67 那条断言同步升级为含 `roundRatio` 的写法。
 **变异**：去掉归一 ⇒ **R67 + R68 两条同时红** ✓ CAUGHT。
+
+### R69 「最近切换」时间加上日期（2026-10-21，用户要求）
+
+用户：「把最近换档的时间加上日期显示。」（截图里 chip tooltip 只显示 `（01:09:35）`）
+
+**为什么需要日期**：`lastSwitch` 是**落盘数据**（`~/.dsh` 下按 sid 存），跨天、跨重启后仍会显示——
+只有 `时:分:秒` 的话完全看不出是哪天，用户看到 `01:09:35` 会误以为是"今天凌晨"（可能是几天前）。
+
+**改法**（`plugin/effort.mjs#hudPayload`）：原 `new Date(ls.at).toLocaleTimeString('zh-CN', {hour12:false})`
+改为自写 `fmtSwitchAt(ms)` ⇒ **`YYYY-MM-DD HH:MM:SS`**（本地时区）。选自写而不继续用 locale 的原因：
+不同 locale 的 `toLocaleString` 分隔符/顺序不一致（`2026/10/21 14:41:39` vs `2026-10-21 14:41:39`），
+会把 chip tooltip 的排版搞乱；自补零则跨环境稳定。
+
+**守卫**：contract 2 条源码级（必须有 `fmtSwitchAt` 且格式为 `YYYY-MM-DD HH:MM:SS`、不再用
+`toLocaleTimeString`；且自补零不依赖 locale）+ **1 条行为级**（`hudPayload.lastSwitch.at` 必须匹配
+`/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/`）。
+**变异**：退回 `toLocaleTimeString` ⇒ **行为级 + 源码级同时红** ✓ CAUGHT。

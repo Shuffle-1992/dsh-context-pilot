@@ -412,7 +412,9 @@ ok('R16.8 时机教学（回执侧）：压缩自检回执含「压缩后换档�
   const agentP = { session: { id: sidP, requestHeader: () => ({ config: { provider: 'deepseek-account', model: 'deepseek-flash', reasoningEffort: 'high' } }) }, id: sidP };
   const payload = await inst2.hudPayload(agentP, sidP);
   ok('R16.7b 行为级：重启后 hudPayload 恢复计数与最近切换（slot 合并落盘；R23 起显示名为「中文(id)」）',
-    payload?.switchCount === 1 && payload?.lastSwitch?.to === '最高(max)' && payload?.currentLabel === '高(high)',
+    payload?.switchCount === 1 && payload?.lastSwitch?.to === '最高(max)' && payload?.currentLabel === '高(high)'
+  /* R69（用户要求加日期）：at 必须是 YYYY-MM-DD HH:MM:SS 的完整日期时间 */
+  && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(payload?.lastSwitch?.at ?? ''),
     `实际 switchCount=${JSON.stringify(payload?.switchCount)} lastSwitch=${JSON.stringify(payload?.lastSwitch)} currentLabel=${JSON.stringify(payload?.currentLabel)}`);
   rmSync(tmpStats, { recursive: true, force: true });
 }
@@ -4695,6 +4697,17 @@ ok('R68：上限做浮点归一（4 位小数），否则输入框会显示 0.70
   /const roundRatio = \(x\) => Math\.round\(Number\(x\) \* 1e4\) \/ 1e4;/.test(client)
   && /Math\.max\(0, roundRatio\(engineThresholdNow - marginDraft\)\)/.test(client),
   '直接相减 ⇒ 0.75+0.05−0.1 的浮点误差被写进输入框（用户截图 0.7000000000000001）');
+/* ═══ R69（2026-10-21 用户要求「把最近换档的时间加上日期显示」）═══
+ * 原实现 toLocaleTimeString ⇒ 只有时:分:秒；lastSwitch 会落盘，跨天/跨重启后分不清是哪天。 */
+const effortSrc69 = readFileSync(join(PLUGIN, 'effort.mjs'), 'utf8');
+ok('R69：最近换档时间带**日期**（YYYY-MM-DD HH:MM:SS），不再只有时分秒',
+  /const fmtSwitchAt = \(ms\) => \{/.test(effortSrc69)
+  && /return \`\$\{d\.getFullYear\(\)\}-\$\{p\(d\.getMonth\(\) \+ 1\)\}-\$\{p\(d\.getDate\(\)\)\}/.test(effortSrc69)
+  && !/toLocaleTimeString\('zh-CN'/.test(effortSrc69),
+  '仍只有时:分:秒 ⇒ 跨天/跨重启后分不清是哪天（lastSwitch 是落盘数据）');
+ok('R69：不依赖 locale 拼时间（自补零）——不同 locale 的 toLocaleString 分隔符会打乱 tooltip',
+  /const p = \(n\) => String\(n\)\.padStart\(2, '0'\);/.test(effortSrc69),
+  '依赖 toLocaleString ⇒ 换 locale 后格式漂移');
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));
 process.exit(failures ? 1 : 0);

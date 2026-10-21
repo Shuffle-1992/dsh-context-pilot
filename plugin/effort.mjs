@@ -1006,14 +1006,23 @@ export function createEffort(deps) {
     const base = s?.switchedAt ?? 0;
     const until = base ? base + cap : 0;
     /* R16.6：chip tooltip 的「最近切换 / 会话切换次数」。
-     * 时间用 toLocaleTimeString（本地短时），与用户在 DSH 界面看到的时间口径一致。 */
+     * R69（2026-10-21 用户要求「把最近换档的时间加上日期显示」）：原用 toLocaleTimeString ⇒ 只有
+     * 时:分:秒，跨天/跨重启后就分不清是哪天（落盘的 lastSwitch 可能是几天前的）。改为
+     * **YYYY-MM-DD HH:MM:SS**（本地时区，与 DSH 界面口径一致），且自己补零而不依赖 locale
+     * （不同 locale 的 toLocaleString 分隔符/顺序不一致，会把 tooltip 排版搞乱）。 */
+    const fmtSwitchAt = (ms) => {
+      const d = new Date(Number(ms));
+      if (!Number.isFinite(d.getTime())) return "";
+      const p = (n) => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    };
     const ls = s?.lastSwitch ?? null;
     const stats = {
       cooldownUntil: until > Date.now() ? until : 0,
       cooldownTotalMs: cap,
       lastSwitch: ls ? {
         from: effortLabel(ls.from ?? '(默认)'), to: effortLabel(ls.to),
-        at: new Date(ls.at).toLocaleTimeString('zh-CN', { hour12: false }),
+        at: fmtSwitchAt(ls.at),
       } : null,
       switchCount: s?.switchCount ?? 0,
     };
