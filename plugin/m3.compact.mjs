@@ -527,6 +527,11 @@ export function createM3Compaction(deps) {
    * 触发来源两类：① 模型调用 `compact_context` 登记的意图（`wanted`）；② 占用越过生效强制线（`forced`）。
    */
   const preStepCompaction = async (payload) => {
+    /* R71（Flash F-11）：wanted 原先声明在 try **内部**，catch 拿不到 ⇒ 失败回执硬写
+     * trigger:pressure，而模型主动请求压缩时真实触发是 context-overflow（与 D8/F13「回执必须
+     * 用真实触发原因」同一原则）。现提到函数体开头，catch 里按 wanted 报真值。 */
+    let wanted = false;
+
     /* ═══ R49.1（既有隐患，测试暴露）：`sid` 必须在 `try` **之外**声明 ═══
      * 原实现在 try 内 `const sid`，而 catch 里要用它写「未执行」回执 ⇒ catch 自身 ReferenceError：
      * `lastPreStepError`（2026-10-08 专为"全线失败时报告里看不到原因"加的）与「吞掉、本轮照常继续」
@@ -569,7 +574,7 @@ export function createM3Compaction(deps) {
        *    现在：服务不可用 ⇒ 意图保留（下一步会再试；TTL 到期由模块清扫）。 */
       const tool = getCompactTool();
       const intent = tool ? tool.peekIntent(sid) : null;
-      const wanted = !!intent;
+      wanted = !!intent;
       /* 诊断：本 sid 无意图、但表里还有**别的 sid** 的未过期意图 ⇒ 很可能是 session id 轮转导致
        * 意图登记在旧键上（工具已回 scheduled，压缩却不会发生）。只留痕，**不跨会话执行**——
        * 在别的 agent 上执行压缩比不压更糟。 */
@@ -823,7 +828,7 @@ export function createM3Compaction(deps) {
       const code = errCodeOf(e);
       state.m3.preStepErrors[code] = (state.m3.preStepErrors[code] ?? 0) + 1;
       /* R15：失败同样留回执（模型要能看见「未执行 + 原因」）。R49.1：`sid` 已提到 try 之外 ⇒ 这里安全。 */
-      setCompactVerify(sid, { at: new Date().toISOString(), sessionId: sid, state: 'not-executed', why: code, trigger: 'pressure', read: false });
+      setCompactVerify(sid, { at: new Date().toISOString(), sessionId: sid, state: 'not-executed', why: code, trigger: wanted ? 'context-overflow' : 'pressure', read: false });
       /* ⚠️ 2026-10-08：此前**只记错误码、错误正文只进 log**——压缩全线失败（preStepOk=0）
        * 时报告里看不到原因，无法定位。现保留最近一次失败的完整信息。 */
       state.m3.lastPreStepError = {

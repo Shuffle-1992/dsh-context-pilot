@@ -171,6 +171,11 @@ export function createEffort(deps) {
    * 合并后只有一个删除点（dropSid），孤儿在结构上不可能出现。 */
   /** @type {Map<string, {want: string|null, wantAt: number, switchedAt: number, applied: string|undefined,
    *   lastSwitch: {from: string|null, to: string, at: number}|null, switchCount: number}>} */
+  /* R71（两份独立审查一致）：本表按 sid 建槽但**原先无上限**（dropSid 只在 foreign/noRoute/invalid
+   * 三条错误路径调用）⇒ 长时间多会话运行下无界增长，与全项目「按会话增长的集合必须有界」
+   * 的纪律（SET_CAP / TIER_SID_CAP / RATIO_SID_CAP / trendHistory 64）不一致。
+   * 上限取 200（远大于实际并发会话数；被淘汰会话最多多讲一次教学，switchCount 已落盘不丢）。 */
+  const EFFORT_SID_CAP = 200;
   const bySid = new Map();
   const slot = (sid) => {
     let s = bySid.get(sid);
@@ -184,6 +189,10 @@ export function createEffort(deps) {
         lastSwitch: saved?.lastSwitch ?? null, switchCount: saved?.switchCount ?? 0,
       };
       bySid.set(sid, s);
+      if (bySid.size > EFFORT_SID_CAP) { // 有界化：淘汰最旧（不淘汰刚建的这个）
+        const oldest = bySid.keys().next().value;
+        if (oldest !== sid) bySid.delete(oldest);
+      }
     }
     return s;
   };

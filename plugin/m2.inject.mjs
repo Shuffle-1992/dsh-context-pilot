@@ -129,7 +129,10 @@ export function createM2Injection(deps) {
    * 文案两段：① 现状（重复 N 次/轮）；② **可直接粘贴给 Agent 的纠正句**。每轮最多一次。 */
   const reportRepeat = (sid, count) => {
     try {
-      const hhmm = new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5);
+      /* R71（GLM #7）：这两处写的是**落盘持久**记录 ⇒ 不能依赖 locale（分隔符/顺序跨环境不一致）。
+       * 与 R69 对 effort.mjs 的修法同款：自己拼 HH:MM 并补零。 */
+      const dNow = new Date();
+      const hhmm = `${String(dNow.getHours()).padStart(2, '0')}:${String(dNow.getMinutes()).padStart(2, '0')}`;
       const text = `${hhmm} · 决策行重复 ${count} 次/轮 · 建议手动纠正；可直接复制：${REPEAT_FIX_TEXT}`;
       state.m2.repeatFixText = REPEAT_FIX_TEXT;
       state.m2.repeatReports = (state.m2.repeatReports ?? 0) + 1;
@@ -145,6 +148,9 @@ export function createM2Injection(deps) {
       if (!rec || rec.turn !== turn) return null;          // 本轮没检测到决策行
       if ((rec.count ?? 0) < 2) return null;               // 只写一次 = 守规矩 ⇒ 不打扰
       const bySid = state.m2.nudged = state.m2.nudged ?? {};
+      /* R71：与同文件 decisionRepeat（上方 64 键上限）对齐——本表原先是唯一无界的那张。 */
+      const nudgeKeys = Object.keys(bySid);
+      if (nudgeKeys.length > 64 && !(sid in bySid)) delete bySid[nudgeKeys[0]];
       const nd = bySid[sid] ?? { turn: null, count: 0, n: 0, reportedTurn: null };
       if (nd.turn !== turn) { nd.turn = turn; nd.count = 0; nd.n = 0; nd.reportedTurn = null; }
       bySid[sid] = nd;                                     // 先存：下面两个分支都可能直接 return
@@ -227,7 +233,7 @@ export function createM2Injection(deps) {
       const crit = Number.isFinite(effCrit) ? effCrit : M3.criticalRatio;
       /* R16.15（评审建议 3/8）：把**当前档位名**（含是否已登记）交给卡片——
        * 决策行要求写 `tier 保持 X`，而 X 原先在卡上无处可查（卡只给保留 token 数）。 */
-      const tierApi = getCompactToolApi?.() ?? null;
+      const tierApi = api; // R71：原先又调了一次 getCompactToolApi?.()（同一对象取两遍，两个名字易误解）
       const sidKey = trend?.sid ?? null;
       return api.renderCard({
         ratio, minRatio: M3.markerMinRatio, criticalRatio: crit, ...retentionTeach(win), ...(trend ?? {}),
@@ -448,10 +454,19 @@ export function createM2Injection(deps) {
         } catch { /* 判据不可用 ⇒ 保守允许提及（宁多一句话，也不误删教学） */ }
         const receiptMid = renderCompactReceipt(takeCompactReceipt(sidEarly), allowMid);
         /* R30/R31：回执优先；没有回执时，**仅在检测到本轮重复写决策行**（≥2 条）时才投反重复备注。 */
+        /* R71（两份独立审查一致，P1）：中步路径原先**直接**调 getCreateUserMessage()(...)，
+         * 漏了首步分支同款的空值守卫 ⇒ 工厂未就绪时 TypeError 被外层 catch 吞成 skip:'error'，
+         * 而一次性回执在 takeCompactReceipt 取出时就标了 read=true ⇒ **回执被吃掉却永不送达**
+         * （正是 R15 设计回执要防的静默丢失）。两处（反重复备注 / 中步回执）统一先判工厂。 */
+        const midFactory = getCreateUserMessage();
+        if (!midFactory) {
+          state.m2.skips.noFactory = (state.m2.skips.noFactory ?? 0) + 1;
+          return { skip: 'noFactory' };
+        }
         if (!receiptMid) {
           const nudgeMid = repeatNudge(sidEarly, turn);
           if (!nudgeMid) return { skip: 'not-step-1' };
-          const msgNudge = getCreateUserMessage()({
+          const msgNudge = midFactory({
             content: [{ type: 'text', text: nudgeMid }],
             source: { kind: SOURCE_KIND, form: 'snapshot', sections: [{ name: SOURCE_KIND, text: nudgeMid }] },
           });
@@ -463,7 +478,7 @@ export function createM2Injection(deps) {
           schedule('m2-inject', 500);
           return { message: msgNudge, text: nudgeMid, card: false, midStep: true, repeatNudge: true };
         }
-        const msgMid = getCreateUserMessage()({
+        const msgMid = midFactory({
           content: [{ type: 'text', text: receiptMid }],
           source: { kind: SOURCE_KIND, form: 'snapshot', sections: [{ name: SOURCE_KIND, text: receiptMid }] },
         });
@@ -560,7 +575,7 @@ export function createM2Injection(deps) {
       const effBriefBuiltin = eff && !effBriefedBySid.has(sid) ? (effortApi?.renderBrief(eff) ?? null) : null;
       const effBrief = effBriefBuiltin == null ? null
         : (getCompactToolApi?.()?.renderTemplated?.('tplEffBrief', effBriefBuiltin,
-          { tool: 'set_reasoning_effort', current: eff?.current ?? '', tiers: eff?.tiers ?? '' }) ?? effBriefBuiltin);
+          { tool: effortApi?.TOOL_NAME ?? 'set_reasoning_effort', current: eff?.current ?? '', tiers: eff?.tiers ?? '' }) ?? effBriefBuiltin); // R71：工具名从 api 取（同文件 actionToolNames 纪律）
       /* R62：思考强度教学的**内置原文**再长期留一份在 m2 —— HUD 的 config.builtins 要读它
        * （面板「查看内置文案」在还没等到下一轮注入时也能显示，而不是空着）。 */
       if (effBriefBuiltin != null) state.m2.lastEffBriefBuiltin = effBriefBuiltin;

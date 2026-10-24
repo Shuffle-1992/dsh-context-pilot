@@ -1140,7 +1140,10 @@ ok('意图门在 critical 门之前（低占用也能按模型请求压缩）',
   /* R10：意图表经 `getCompactTool()` 显式注入（不再直接闭包引用宿主的 compactToolApi）。 */
   /const tool = getCompactTool\(\);/.test(ctPreStep)
   && /const intent = tool \? tool\.peekIntent\(sid\) : null;/.test(ctPreStep)
-  && /const wanted = !!intent;/.test(ctPreStep)
+  && /let wanted = false;/.test(ctPreStep) && /wanted = !!intent;/.test(ctPreStep)
+  /* R71（审查 F-11）：wanted 由 try 内 const 提到函数体开头（catch 要看得见它报真实 trigger），
+   * 语义仍是「先判意图、再判强制线」，故同时校验两者顺序。 */
+  && ctPreStep.indexOf('wanted = !!intent;') < ctPreStep.indexOf('if (!wanted && ratio < effCritical) return;')
   && /if \(wanted\) tool\.takeIntent\(sid\);/.test(ctPreStep)
   && /if \(!wanted && ratio < effCritical\) return;/.test(ctPreStep),
   '顺序错 ⇒ 模型主动请求在低于强制线时被静默丢弃；工具也必须经注入取得');
@@ -1536,7 +1539,10 @@ ok('hudRemote 带上 criticalCap（弹窗才能算生效值）',
  * ① 备注一直显示「待探测」② 保存时**不钳制**。另：NS 属性变化不触发重渲染，必须用 React state。 */
 ok('面板**自己拉取**生效上限：真的从 getHud 的 criticalCap 取值',
   /const \[engineCap, setEngineCap\] = react\.useState/.test(client)
-  && /const pullCap = async \(\) => \{/.test(client)
+  /* R71（审查 #6 + F-10）：pullCap 已并入 pullInj —— 挂载只发**一次** getHud，且优先带 sid
+   * （原先两个 effect 各发一次无 sid 调用 ⇒ 载荷拉两遍，cap 还永不命中 modelPolicies）。 */
+  && /const pullInj = react\.useCallback/.test(client) && /getHud\(resolveSid\(\)\)/.test(client)
+  && !/const pullCap = async/.test(client)
   /* ⚠️ 必须断言**取值表达式本身**：只查「有 pullCap / 有 setEngineCap」会被
    * 「写了函数但 `const c = null`」蒙混过关（变异实测：弱版断言未抓住）。 */
   && /const c = env && typeof env\.criticalCap === "number" && Number\.isFinite\(env\.criticalCap\) \? env\.criticalCap : null;/.test(client)
@@ -4670,7 +4676,7 @@ ok('R60：compact-tool 导出 renderTemplated（给"别的域产出的文案"套
   /renderCard, renderTemplated, diag/.test(ctSrc57) && /const renderTemplated = \(which, text, extraVars = \{\}\)/.test(ctSrc57),
   '没有通用套壳 ⇒ 思考强度教学无法套模板（原文不在本域）');
 ok('R60：m2 对思考强度教学套模板，且 {tool} 覆盖为 set_reasoning_effort',
-  /renderTemplated\?\.\('tplEffBrief', effBriefBuiltin,/.test(m2Src57) && /tool: 'set_reasoning_effort'/.test(m2Src57),
+  /renderTemplated\?\.\('tplEffBrief', effBriefBuiltin,/.test(m2Src57) && /tool: effortApi\?\.TOOL_NAME \?\? 'set_reasoning_effort'/.test(m2Src57),
   '未套模板或工具名错 ⇒ 模板里的 {tool} 会指向压缩工具，模型调错工具');
 ok('R60：三个模板的内置原文都随 injected 下发（含 builtinEffBrief，两处 lastInjection）',
   (m2Src57.match(/builtinEffBrief/g) ?? []).length >= 2,
@@ -4737,6 +4743,50 @@ ok('R70：两处轮数**同口径取整**（turnsToLine 与「两个方向」里
   /Math\.max\(1, Math\.round\(\(\(crit - ratio\) \* win\) \/ deltaTokens\)\)/.test(m2src)
   && /Math\.max\(1, Math\.round\(leftTokens \/ delta\)\)/.test(ct70),
   'ceil/floor 混用 ⇒ 同一张卡出现 18 与 37 两个互相矛盾的数字（用户实测）');
+/* ═══ R71（GLM-5.3-Flash 两份独立审查 + 逐条验伪；本轮采纳 13 项）═══
+ * 说明：派发时指定的 GLM-5.3 被 runner 静默替换为 GLM-5.3-Flash（免费额度只授予 Flash），
+ * 故两份报告实际同模型不同思考强度；每条发现都由 Lead 回到源码逐条验真后才落地。 */
+const core71 = readFileSync(join(PLUGIN, 'core.mjs'), 'utf8');
+ok('R71 报告热路径：writeReport 用 stat 指纹门控，指纹一致才跳过全量 parse',
+  /writtenFingerprint = statFingerprint\(\)/.test(core71)
+  && /if \(writtenFingerprint != null && statFingerprint\(\) === writtenFingerprint\) \{/.test(core71)
+  && /const st = statSync\(reportPath\);/.test(core71),
+  '仍每次 JSON.parse 整份 MB 级报告 ⇒ 活跃期每秒一次全量解析（审查 F-01/#2）');
+ok('R71 死导出：messageTextLength 已删（定义与出口都不得残留）',
+  !/messageTextLength/.test(core71), '死导出残留 ⇒ 后人以为有人用（审查 F-05）');
+const m2r71 = readFileSync(join(PLUGIN, 'm2.inject.mjs'), 'utf8');
+ok('R71 回执送达：中步路径先判 createUserMessage（noFactory 守卫），不再裸调用',
+  /const midFactory = getCreateUserMessage\(\);/.test(m2r71)
+  && /if \(!midFactory\) \{/.test(m2r71)
+  && /state\.m2\.skips\.noFactory = \(state\.m2\.skips\.noFactory \?\? 0\) \+ 1;/.test(m2r71)
+  && !/const msgMid = getCreateUserMessage\(\)\(?:\{/.test(m2r71),
+  '工厂未就绪时 TypeError 被吞 ⇒ 一次性回执取出即丢、永不送达（审查 F-02/#3）');
+ok('R71 有界化：m2.nudged 有 64 键上限（与同文件 decisionRepeat 同款）',
+  /if \(nudgeKeys\.length > 64 && !\(sid in bySid\)\) delete bySid\[nudgeKeys\[0\]\];/.test(m2r71),
+  '无界 Map ⇒ 长跑多会话缓慢增长（审查 F-09/#5）');
+const effr71 = readFileSync(join(PLUGIN, 'effort.mjs'), 'utf8');
+ok('R71 有界化：effort.bySid 有 EFFORT_SID_CAP 且淘汰最旧',
+  /const EFFORT_SID_CAP = 200;/.test(effr71) && /if \(bySid\.size > EFFORT_SID_CAP\)/.test(effr71),
+  '无界 Map（审查 F-08/#4）');
+const m3r71 = readFileSync(join(PLUGIN, 'm3.compact.mjs'), 'utf8');
+ok('R71 回执原因真实：wanted 提到 try 外，catch 按真实触发报 trigger',
+  /let wanted = false;/.test(m3r71) && new RegExp("trigger: wanted \\? 'context-overflow' : 'pressure'").test(m3r71),
+  '失败回执硬写 pressure ⇒ 模型主动请求时原因失真（审查 F-11）');
+const sf71 = readFileSync(join(PLUGIN, 'session-facts.mjs'), 'utf8');
+ok('R71 中位：偶数样本取两中值平均（不再取上中位）',
+  /return a\.length % 2 \? a\[mid\] : \(a\[mid - 1\] \+ a\[mid\]\) \/ 2;/.test(sf71),
+  '上中位使回落量系统性偏大 ⇒ 稳定后占用偏低（审查 #9）');
+ok('R71 面板：挂载只拉一次 getHud 且带 sid（不再两次无 sid）',
+  /getHud\(resolveSid\(\)\)/.test(client) && !/const pullCap = async/.test(client)
+  && !/await hudRemoteSvc\.getHud\(""\)/.test(client),
+  '两次挂载 RPC + cap 永不命中 modelPolicies（审查 #6/F-10）');
+ok('R71 口径漂移收敛：不再宣传已退役的压缩标记通道，死样式 .dcp-inj* 已删',
+  !/压缩标记通道/.test(client) && !/\.dcp-inj\{/.test(client) && !/\.dcp-inj-h\{/.test(client),
+  '用户会照旧文案等一个不存在的机制（审查 #1/F-07）+ 死样式（Lead 独立发现）');
+const hi71 = readFileSync(join(PLUGIN, 'host.impl.mjs'), 'utf8');
+ok('R71 host.impl：删掉死解构 TAG/HISTORY_CAP（原仅出现在解构与注释里）',
+  !/HEARTBEAT_MS, TAG,/.test(hi71) && !/COMPACT_TIMEOUT_MS, HISTORY_CAP,/.test(hi71),
+  '死解构（审查 F-04）；注意：删注释不省代码行预算，此项收益在可读性不在预算');
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));
 process.exit(failures ? 1 : 0);

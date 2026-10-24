@@ -21,7 +21,7 @@
  * `attachSnapshot({buildSnapshot, slimSnapshot, isSlimReason})`。未注入时用**最小快照 + FULL 档位**
  * 兜底（宁可多写字段，也不要报告断档——R13 真事故就是这个形态）。
  */
-import { mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
+import { mkdirSync, readFileSync, statSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -621,8 +621,6 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
     }
     return out;
   };
-  const messageTextLength = (message) => messageText(message).length;
-
   /** assistant/message 事件文本提取——镜像官方 deriveEventMessage（dsh-session lib/index.js:214）：
    * user/message 的 data 即消息本体；assistant/message、tool/result 在 data.message。 */
   const extractEventText = (event) => {
@@ -668,6 +666,19 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
   let reportBase = null; // 缓存的报告数据（history 随写随追加，卸载即弃）
   let reportBaseLoaded = false;
   let lastWrittenAt = null; // 本实例最后一次写入条目的 at（尾部对账锚点）
+  /* R71（两份独立审查一致结论，P1）：原先**每次**写入都对报告文件做 readFileSync + JSON.parse
+   * 只为取磁盘尾条时间戳——注释自称「只在检测到他人写入时重读」，实现却每次都全量解析。
+   * 报告实测已达 MB 级（HISTORY_CAP=120 且 FULL 条目优先保留），而写入触发源很密
+   * （agent/status 1.5s 防抖 / m5-publish 400ms / m2-inject 500ms / 心跳 120s）⇒ 活跃期每秒级
+   * MB 解析 + MB 序列化，是全插件最重的热路径。
+   * 现改为**指纹门控**：本实例写完记下 {size,mtimeMs}，下次写先 stat 比对——一致即说明
+   * 「自上次写后没人动过磁盘」，直接跳过全量解析用缓存基线；不一致才走原对账逻辑。
+   * 语义不变：他人写入必然改变 size 或 mtime ⇒ 仍能被发现（极端同尺寸同毫秒写入的漏检
+   * 由下一写以 lastWrittenAt 锚点纠正，且报告是追加式取证、不是事务日志）。 */
+  let writtenFingerprint = null; // R71：本实例上次写成功后的磁盘指纹（size:mtimeMs）
+  const statFingerprint = () => {
+    try { const st = statSync(reportPath); return st.size + ':' + st.mtimeMs; } catch { return null; }
+  };
 
   const loadReportBase = () => {
     try {
@@ -687,17 +698,22 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
         data = loadReportBase();
       } else {
         /* 尾部对账：磁盘最后一条不是本实例刚写的那条 ⇒ 有他人写入 ⇒ 以磁盘为准重新接续（防互相覆盖） */
-        let diskTailAt = null;
-        try {
-          const onDisk = JSON.parse(readFileSync(reportPath, 'utf8'));
-          const dHist = Array.isArray(onDisk?.history) ? onDisk.history : [];
-          diskTailAt = dHist.length ? dHist[dHist.length - 1]?.at ?? null : null;
-          if (diskTailAt !== lastWrittenAt) {
-            data = onDisk;
-            log('info', `报告尾部对账：检测到他方写入（磁盘尾 ${diskTailAt} ≠ 本实例 ${lastWrittenAt}）→ 重读接续`);
-          }
-        } catch { /* 读失败则沿用缓存基线 */ }
-        if (!data) data = reportBase;
+        /* R71：指纹一致 ⇒ 自上次写后磁盘未被他人改动 ⇒ 无需全量解析（热路径省掉 MB 级 parse）。 */
+        if (writtenFingerprint != null && statFingerprint() === writtenFingerprint) {
+          data = reportBase;
+        } else {
+          let diskTailAt = null;
+          try {
+            const onDisk = JSON.parse(readFileSync(reportPath, 'utf8'));
+            const dHist = Array.isArray(onDisk?.history) ? onDisk.history : [];
+            diskTailAt = dHist.length ? dHist[dHist.length - 1]?.at ?? null : null;
+            if (diskTailAt !== lastWrittenAt) {
+              data = onDisk;
+              log('info', `报告尾部对账：检测到他方写入（磁盘尾 ${diskTailAt} ≠ 本实例 ${lastWrittenAt}）→ 重读接续`);
+            }
+          } catch { /* 读失败则沿用缓存基线 */ }
+          if (!data) data = reportBase;
+        }
       }
       data = data ?? {
         plugin: 'dsh-context-pilot',
@@ -722,6 +738,7 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
       mkdirSync(dirname(reportPath), { recursive: true });
       writeJsonAtomic(reportPath, data);
       lastWrittenAt = entry.at;
+      writtenFingerprint = statFingerprint(); // R71：记下本次写入后的指纹（供下次跳过全量对账）
     } catch (e) {
       log('warn', `报告写入失败：${msg(e)}`);
     }
@@ -860,7 +877,7 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
     state, log, msg, svc, tryOf, pick, kfmt, nfmt, errCodeOf, remember, SET_CAP,
     M3, mergeConfig, effEnabled, schedule, addListener, SOURCE_KIND, TAG, clearSchedules,
     COMPACT_TIMEOUT_MS, HISTORY_CAP, HEARTBEAT_MS, SESSION_CAP,
-    compactMeasure, summarizeBreakdown, messageText, messageTextLength, extractEventText, lastUserText,
+    compactMeasure, summarizeBreakdown, messageText, extractEventText, lastUserText,
     /* R25：占用口径单源（m3 触发/显示、m1 报告账本都用这两支）。 */
     projectedFromPressure, contextLedgerOf,
     loadCreateUserMessage, loadDefineTool, getCreateUserMessage: () => createUserMessage,

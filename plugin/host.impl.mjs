@@ -37,8 +37,8 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
   }
   const {
     state, log, msg, svc, tryOf, pick, kfmt, nfmt, M3, mergeConfig, effEnabled,
-    schedule, addListener, remember, SET_CAP, SOURCE_KIND, SESSION_CAP, HEARTBEAT_MS, TAG,
-    COMPACT_TIMEOUT_MS, HISTORY_CAP,
+    schedule, addListener, remember, SET_CAP, SOURCE_KIND, SESSION_CAP, HEARTBEAT_MS,
+    COMPACT_TIMEOUT_MS,
     compactMeasure, summarizeBreakdown, extractEventText, messageText, errCodeOf, projectedFromPressure, contextLedgerOf, // R25 占用口径单源：注入 M1（账本）与 M3（触发/显示）
     /* R54（独立审计 F1/F2）：`lastUserText` 与 `clearSchedules` 必须在**解构里**——
      * F1：第 317 行把 lastUserText 当自由标识符用（core 导出了但没取 ⇒ 每次调用 ReferenceError，
@@ -46,31 +46,6 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
      *     （既没解构、core 也没导出）⇒ 卸载第一行就抛、所有 disposer 都不执行。 */
     lastUserText, getCreateUserMessage, attachSnapshot, loadDefineTool, loadReportBase, clearSchedules,
   } = core;
-/**
- * dsh-context-pilot —— M1+M2 实现：用量读取验证 + 每轮注入。
- *
- * M1（已验证 2026-10-06）：sessions/agents 双句柄枚举 + tokenMeter.measure() 实测 + 事件监听 + 报告落盘。
- *  - 实测：Agent.session 持有 Session；measure(agent.session) 可用；投影 contextPressure 自带 contextWindow。
- *  - 实测：顶层 ctx 上 compaction absent（作用域隔离，M3 需解决）。
- * M2（已验证 2026-10-06 00:13）：镜像官方 dsh-time-context 惯用法——agent/pre-step waterfall 里往本步消息
- *  追加一条带 source.sections 的快照 user message，每轮 step 1 注入上下文用量三元组
- *  （window / used+pct / surface / system-message-tools 拆分）。
- * M3.5（2026-10-06）：决策主体 = 模型语义判断，插件负责读数/选项/执行。
- *  通道1 pre-step 轮内先压（next() 之前）：critical≥85% → compactIfNeeded("pressure")（官方同款）。
- *  通道2 政策卡：占用≥30% 时注入行追加政策文，教会模型场景1/2 与标记约定。
- *  通道3 idle 扫除双模式：safety-net 仅 critical 占用兜底（受 10min 冷却）；
- *        M3.6 marker 模式——模型回复尾行写 [cp:compact]（政策卡教会它），session/event 解析到即武装，
- *        idle 后立即 compactNow（≥20% 即执行，不受冷却）——用户零输入的"模型建议+自动执行"闭环。
- *  （关键词「先压缩」用户输入通道已裁撤：要手动触发不如直接用压缩指令。）
- *  官方依据：dsh-compaction-basic lib/index.js —— pressure 走引擎阈值（默认80%）的 pre-step 自动压缩；
- *  overflow 绕阈值（retain=0 → compactRegion，owner:"current-turn"）；compactNow 需 idle；
- *  session/event assistant/message 事件通道官方亦在用。
- *
- * 官方包导入（继承 zcode-dispatch ZB-01 结论）：第三方目录裸 import '@deepseek-ai/*' 必失败，
- * 走「bare → env → resourcesPath → 硬编码 asar 路径」×「import / require」候选链，全失败禁注入不报错。
- *
- * 纪律（README §7.5）：任何异常逐支吞掉只记录，绝不向上抛。
- */
   const IMPL_TS = (() => {
     try { return new URL(import.meta.url).searchParams.get('ts') || String(Date.now()); } catch { return String(Date.now()); }
   })();

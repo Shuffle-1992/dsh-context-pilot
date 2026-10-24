@@ -45,9 +45,14 @@ export function createSessionFacts({ state, log, pick, svc, summarizeBreakdown, 
       if (ks.length > cap) delete m[ks[0]];
     } catch { /* ignore */ }
   };
+  /* R71（GLM #9）：原实现取**上中位**（偶数样本返回较大的那个）。settle-drop 样本常只有 1-2 条，
+   * 2 条时上中位系统性偏大 ⇒「稳定后预计」占用偏低，与 R45/R50「不编数字」的诚实口径有细微偏差。
+   * 改为真中位（偶数取两中值平均）。 */
   const median = (xs) => {
     const a = xs.slice().sort((x, y) => x - y);
-    return a[Math.floor(a.length / 2)];
+    if (a.length === 0) return null;
+    const mid = a.length >> 1;
+    return a.length % 2 ? a[mid] : (a[mid - 1] + a[mid]) / 2;
   };
 
   /* ═══════════ ① 折算因子（R39）═══════════ */

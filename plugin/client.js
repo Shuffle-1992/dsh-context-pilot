@@ -193,15 +193,6 @@ window.__ModuleLoader__.load({
 			".dcp-summary{color:var(--dsw-alias-label-secondary,currentColor);opacity:.85}",
 			".dcp-grid{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l1,rgba(128,128,128,.35));border-radius:8px;background:var(--dsw-alias-bg-layer-1,transparent)}",
 			".dcp-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}",
-			/* R55：本轮注入区（只读展示注入原文 + 生效配置；等宽小字 + 可滚动，长文本不撑破弹窗）。 */
-			".dcp-inj{margin-top:10px;border-top:1px solid rgba(128,128,128,.28);padding-top:8px}",
-			/* R59：标题行改为**可换行的 flex 行**——「本轮活值 / 生效配置」并进来后一行放不下。 */
-			".dcp-inj-h{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;font-size:12px;font-weight:600;margin-bottom:2px}",
-			".dcp-inj-h .dcp-inj-n{margin-bottom:0;font-weight:400}",
-			".dcp-inj-n{font-size:11px;opacity:.75;margin-bottom:6px;line-height:1.45}",
-			".dcp-inj-b{margin:6px 0}",
-			".dcp-inj-t{display:flex;align-items:center;justify-content:space-between;font-size:11px;opacity:.85}",
-			".dcp-inj-p{margin:2px 0 0;padding:6px;font-size:11px;line-height:1.45;white-space:pre-wrap;word-break:break-word;max-height:180px;overflow:auto;background:rgba(128,128,128,.10);border-radius:6px;font-family:ui-monospace,Consolas,monospace}",
 			".dcp-mini{font-size:10px;padding:1px 6px;cursor:pointer}",
 			/* 开关滑块（bool 字段）：**复刻 DSH 原生 Switch**（dsh-client-ui-primitives Switch.module.css，
 			 * 已存 docs/reference 溯源；36×20 轨道 padding2 + 16px 旋钮 translateX16）。
@@ -359,34 +350,24 @@ window.__ModuleLoader__.load({
 			const [cfg, setCfg] = react.useState(null);
 			/* R57：哪一行模板正在展开「内置文案」（null = 全部收起）。必须与其他 hook 同层无条件调用。 */
 			const [tplOpen, setTplOpen] = react.useState(null);
+			/* R71（审查 #6 + F-10）：原先 pullInj 与 pullCap **两个 effect 各发一次 getHud("")** —— 同一载荷拉两遍
+			 * （上方注释自己写着「不加定时器以免 RPC 翻倍」，挂载路径却翻了倍）；且 cap 走**无 sid** 调用 ⇒
+			 * host 侧 modelPolicies 永不命中，面板钳制上限与该模型真实引擎阈值可能不符（弹窗那条带 sid）。
+			 * 现合并为**一次**调用，并优先带 sid（与弹窗 getHud(resolveSid()) 同源）。 */
 			const pullInj = react.useCallback(async () => {
 				try {
 					if (!hudRemoteSvc || typeof hudRemoteSvc.getHud !== "function") return void 0;
-					const raw = await hudRemoteSvc.getHud("");
+					const raw = await hudRemoteSvc.getHud(resolveSid());
 					const env = raw && typeof raw === "object" && "value" in raw ? (raw.ok ? raw.value : null) : raw;
 					const got = env && env.injected ? env.injected : null;
 					setInj(got);
 					setCfg(env && env.config ? env.config : null);
-					return got; // R62：返回本轮注入，供「刷新注入数据」给可见反馈
-				} catch { return void 0; /* 吞：拿不到就显示"尚未取到"，绝不影响设置面板本身 */ }
+					const c = env && typeof env.criticalCap === "number" && Number.isFinite(env.criticalCap) ? env.criticalCap : null;
+					if (c !== null) { NS.engineCap = c; setEngineCap(c); } // 保存路径与弹窗同源
+					return got; // R62：返回本轮注入，供可见反馈
+				} catch { return void 0; /* 吞：拿不到就显示「尚未取到」/按下限逻辑运行，绝不影响面板本身 */ }
 			}, [hudRemoteSvc]);
 			react.useEffect(() => { pullInj(); }, [pullInj]);
-			react.useEffect(() => {
-				let alive = true;
-				const pullCap = async () => {
-					try {
-						if (!hudRemoteSvc || typeof hudRemoteSvc.getHud !== "function") return;
-						const raw = await hudRemoteSvc.getHud("");
-						const env = raw && typeof raw === "object" && "value" in raw ? (raw.ok ? raw.value : null) : raw;
-						const c = env && typeof env.criticalCap === "number" && Number.isFinite(env.criticalCap) ? env.criticalCap : null;
-						if (!alive || c === null) return;
-						NS.engineCap = c; // 同步给弹窗面板共用（保存路径同源）
-						setEngineCap(c);
-					} catch { /* 吞：拿不到上限时按下限逻辑运行，host 侧还有同一道 min() 兜底 */ }
-				};
-				pullCap();
-				return () => { alive = false; };
-			}, []);
 			/**
 			 * 已存值**本身超过生效上限** ⇒ 自动钳回并保存（用户要求 2026-10-08：
 			 * 「如果原保存值超过钳回值，应该也直接钳回保存」）。
@@ -709,8 +690,8 @@ window.__ModuleLoader__.load({
 					message !== void 0 ? el("span", { className: message.kind === "ok" ? "dcp-msg-ok" : "dcp-msg-error", role: "status" }, message.text) : null,
 				),
 				el("div", { className: "dcp-hint" },
-					"保存写入插件配置并触发重载。压缩标记通道：模型回复尾行写标记 → 本轮结束自动压缩（详见政策卡）。"
-					+ "智能思考：开启后向 Agent 暴露当前思考档位（可选档由模型动态决定）并允许其调用 set_reasoning_effort 工具自主换档，本次任务内立即生效、不中断；关闭则提示词不注入、工具也不注册。"),
+			"保存写入插件配置并**即时生效**（host 在每个决策点活读，无需重载）；压缩由模型调用 compact_context 触发、在**下一步开始前**执行，越过强制线时由插件在 pre-step 自动发起。"
+			+ "智能思考：开启后向 Agent 暴露当前思考档位（可选档由模型动态决定）并允许其调用 set_reasoning_effort 工具自主换档，本次任务内立即生效、不中断；关闭则提示词不注入、工具也不注册。"),
 				el(PriceCalculator, { writable, saving, onApply: applyRecommendation, engineCap: capNow }),
 			);
 		}
