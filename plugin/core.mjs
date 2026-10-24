@@ -775,9 +775,11 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
       writeFileSync(tmp, body);
       renameSync(tmp, p);   // 同目录 rename：要么旧文件、要么新文件，永无半截
       return true;
-    } catch {
+    } catch (e) {
       try { unlinkSync(tmp); } catch { /* 吞 */ }
       writeFileSync(p, body);   // Windows 目标被占用时 rename 会 EBUSY ⇒ 退化为直写（宁可非原子，也别丢这次）
+      /* R74（审查 C7）：**非原子**路径必须留痕——半截 JSON 的风险在这里回来了，且发生了也无从取证。 */
+      try { log('warn', `原子写降级为直写（rename 失败：${String(e?.message ?? e)}）：${p}`); } catch { /* 吞 */ }
       return true;
     }
   };

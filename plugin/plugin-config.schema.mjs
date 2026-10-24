@@ -102,7 +102,8 @@ function buildWith(z) {
       tplBrief: z.string().default('').description('一次性说明模板；留空 = 用内置文案。占位符 {tool} {builtin} {critical} {tiers} {keepFromHint} {retainRatio} {retainTokens}；必须含 {tool}，缺则回退内置并在面板留痕').volatile(),
       tplCard: z.string().default('').description('决策卡模板；留空 = 用内置文案。占位符 {tool} {builtin} {critical} {minRatio} {ratio} {retainRatio} {retainTokens} {used} {window} {tiers}；必须含 {tool}').volatile(),
       tplEffBrief: z.string().default('').description('思考强度教学模板；留空 = 用内置文案。占位符 {tool}（= set_reasoning_effort）{builtin} {current} {tiers}；必须含 {tool}，缺则回退内置并在面板留痕').volatile(),
-      hudLastAct: z.string().default('').description('M5 状态：最近一次压缩摘要（host 自动写入，无需手改）').volatile(),
+      /* R74（审查 C11）：`hudLastAct` 已删除 —— 描述称「host 自动写入」，但 host 只写**内存**
+       * 的 state.m5.hud（publishHud），从不写 settings 的这个键 ⇒ 用户读它永远是空串。 */
       /* R7：`hudArmed`（武装灯）/ `hudPending`（待执行徽章）已删除——两个徽章退役后这两条链
        * 「host 写而无人读」。旧配置里的残留键会被**静默忽略**（schemastery 未知键不报错）。 */
     });

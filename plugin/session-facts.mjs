@@ -111,9 +111,11 @@ export function createSessionFacts({ state, log, pick, svc, summarizeBreakdown, 
       writeFileSync(tmp, body);
       renameSync(tmp, p);
       return true;
-    } catch {
+    } catch (e) {
       try { unlinkSync(tmp); } catch { /* 吞 */ }
       writeFileSync(p, body);   // Windows 目标被占用 ⇒ rename EBUSY ⇒ 退化直写
+      /* R74（审查 C7）：**非原子**路径必须留痕——半截 JSON 的风险在这里回来了，且发生了也无从取证。 */
+      try { log('warn', `原子写降级为直写（rename 失败：${String(e?.message ?? e)}）：${p}`); } catch { /* 吞 */ }
       return true;
     }
   };

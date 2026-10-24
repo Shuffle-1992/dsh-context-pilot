@@ -5011,6 +5011,18 @@ const run73 = readFileSync(join('test', 'run.mjs'), 'utf8');
 ok('R73（E7）：门禁自己有超时，且汇总取**最后一处**匹配',
   /timeout: 120_000/.test(run73) && /matchAll/.test(run73) && /all\[all\.length - 1\]/.test(run73),
   '无超时 ⇒ 套件挂起时整个 run 永挂（CI 上表现为"卡住"）；取第一处 ⇒ 读到回显里的假数字');
+/* ═══ R74：C7 原子写降级的留痕 + C11 死字段清理 ═══ */
+{
+  const copies74 = ['core.mjs', 'm5.hud.mjs', 'session-facts.mjs', 'effort.mjs', 'compact-tool.mjs'];
+  const hits74 = copies74.filter((f) => /原子写降级为直写/.test(readFileSync(join(PLUGIN, f), 'utf8')));
+  ok('R74（C7）：5 份 writeJsonAtomic 的**非原子降级**都留痕（rename 失败时能取证）',
+    hits74.length === 5,
+    `留有痕迹的文件 ${hits74.length}/5：${hits74.join(',')} —— 降级直写会重新引入半截 JSON 风险，且发生了也无从取证`);
+  const schema74 = readFileSync(join(PLUGIN, 'plugin-config.schema.mjs'), 'utf8');
+  ok('R74（C11）：删掉死配置字段 hudLastAct（host 只写内存 state.m5.hud，从不写 settings）',
+    !/hudLastAct: z\.string\(\)/.test(schema74),
+    '描述称「host 自动写入」⇒ 用户以为能读到，实际恒空串');
+}
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));
 process.exit(failures ? 1 : 0);

@@ -4239,3 +4239,24 @@ E4 effort 取证字段挂在 `state.m3`、E9 关键词正则与教学文案各�
 ⇒ **全部 CAUGHT**（E2 第一版只有源码断言、被"只关条件"的变异逃逸，补行为级后抓住）。
 
 **测试**：935 断言全绿（contract 745 / static 84 / report 54 / boot 22 / client-render 30）。
+### R74 收尾批次：原子写降级留痕 + 死配置字段（2026-10-24，用户「继续」续做）
+
+| # | 修法 | 性质 |
+|---|---|---|
+| C7 | 5 份 `writeJsonAtomic` 的 **rename 失败降级直写**分支原先**无任何留痕**（Windows 上 EBUSY/EPERM 不罕见）⇒ 半截 JSON 风险在这条路径上回来了，而发生了也无从取证。5 份都补 `log('warn', 原子写降级为直写…)`，并把 `catch {` 改为 `catch (e) {` 以带上错误信息 | 留痕（数据安全可观测） |
+| C11 | 删除配置 schema 里的死字段 `hudLastAct`：描述称「host 自动写入」，但 host 只写**内存** `state.m5.hud`（publishHud），从不写 settings 的这个键 ⇒ 用户读它永远是空串 | simplify / 口径 |
+
+**守卫**：contract 新增 2 条（C7 断言 5 份副本都留痕；C11 断言 schema 不再有该字段）。
+**变异**：删掉 m5 那一份留痕 ⇒ contract 红 ✓ CAUGHT。
+
+**测试**：937 断言全绿（contract 747 / static 84 / report 54 / boot 22 / client-render 30）。
+
+**至此 R72 清单里"低风险可机械落地"的 P2 已全部清空**。剩余 8 条都需要产品/风险判断，暂不动：
+- **C8** slim 快照仍全量测量（`≤50 会话 × measure`，每 120s 心跳的 RPC 大头）——省 RPC 会让 slim 条目**失去 top2 读数**，属取舍
+- **C12** schema 数值字段无范围约束（UI 与 host 有守卫、schema 没有，三端口径不一）——加 `.min/.max` 后非法 `set()` 会被拒，**改变现有行为**
+- **S3** core 的 dshLlm/dshTools 候选链两段 ~50 行同构——合并要动启动期加载逻辑，回归面大、收益是纯可读性
+- **S4** client 两份 envelope 解包（面板内联一份、弹窗一份）——需要把 `unwrapEnv` 提到模块作用域，失败形态（null vs `{ok:false}`）要先统一
+- **E1** m2 教学用的线索不含 m3 的动态余量（5–20pp）——需要把 m3 的 `effCritical` 抽成注入函数，属接线改动
+- **E3** 意图消费后执行失败不重试（只有回执补偿）——重新登记意图有失败循环风险，需上限设计
+- **E4** effort 取证字段挂在 `state.m3` 下（m2 教学计数在 `state.m2`）——迁移会改报告字段名，影响存量断言与面板读取
+- **E9** 换档关键词正则与教学文案各写一份——纯可读性，收益最小
