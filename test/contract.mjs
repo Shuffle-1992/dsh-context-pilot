@@ -1167,7 +1167,9 @@ const ctOwnRange = /const compactWithOwnRange = async \(agent, compaction, ctx\)
 ok('M3 执行核心已抽为叶子模块，且宿主不再重复实现',
   ctOwnRange.length > 0
   && /import\(`\.\/m3\.compact\.mjs\?ts=\$\{IMPL_TS\}`\)/.test(host)
-  && /const compactWithOwnRange = async \(agent, compaction, ctx\) =>\n    \(m3Ctl/.test(host)
+  /* R72（S1）：宿主的同名**转发**也零生产调用者（唯一消费者是这条断言）⇒ 一并删掉。
+   * 解耦目标达到后，宿主连"留个转发"都不需要——少一套真相，也省 4 行代码行预算（318→314）。 */
+  && !/compactWithOwnRange/.test(hostNoComment) // R72（S1）：只查代码（宿主注释里还有解释性提及）
   /* 加强（R9 变异验证：首版只查 `const ratioKept = api.RETAIN_RATIO;`，一处改名就能躲过）：
    * 「范围执行」整体不得回流宿主——保留比例读取与 selectRange 调用都属于模块职责。 */
   && !/api\.RETAIN_RATIO/.test(hostNoComment)
@@ -1179,7 +1181,8 @@ ok('M3 核心模块依赖全部注入（对宿主内部件零 import ⇒ 依赖�
   '叶子模块 import 了宿主内部件 ⇒ 打破依赖图约束');
 ok('M3 压缩域未就绪时不中断：降级为「本轮不压」并留痕',
   /const measureRatio = \(session\) => \(m3Ctl \? m3Ctl\.measureRatio\(session\) : \{ ok: false, error: 'm3-module-pending' \}\);/.test(host)
-  && /skipWhy: 'm3-module-pending'/.test(host)
+  /* R72（S1）：宿主同名转发已删；未就绪的降级改由 preStepCompaction 分支承担（写 why:'m3-module-missing' 回执）。 */
+  && /why: 'm3-module-missing'/.test(host)
   && /M3 压缩域模块加载失败（吞/.test(host),
   '未做空值降级 ⇒ 激活期会 TypeError（apply 不是 async，不能 await）');
 /* R10：编排层（preStepCompaction / idleSweep）也已搬走 ⇒ 宿主只许留**薄转发**。
@@ -1204,8 +1207,9 @@ ok('R5 保留策略：自选范围优先 + 官方 overflow 兜底',
   && /compactRegion\(sel\.start, end, agent, sig\)/.test(ctOwnRange)
   /* ⚠️ 必须连**回退次数上限**一起钉死：只断言 `return official('boundary-exhausted')` 会被
    * 「去掉 MAX_WALK_BACK 判断」的回归骗过去（变异验证实测逃逸过一次）。 */
-  && /if \(!prev \|\| walkBacks \+ 1 > api\.MAX_WALK_BACK\) return official\('boundary-exhausted'\);/.test(ctOwnRange)
-  && /return official\('invalid-boundary'\)/.test(ctOwnRange)
+  /* R72（H2）：两处官方兜底改走 guardOfficial（未越强制线 ⇒ 收手，越线才回落），断言跟着改。 */
+  && /if \(!prev \|\| walkBacks \+ 1 > api\.MAX_WALK_BACK\) return guardOfficial\('boundary-exhausted'\);/.test(ctOwnRange)
+  && /return guardOfficial\('invalid-boundary'\)/.test(ctOwnRange)
   && /compactIfNeeded\(agent, 'context-overflow', sig\)/.test(ctOwnRange),
   '自选范围未接上，或官方兜底缺失 ⇒ 要么丢掉保留预算，要么强制线不再兜底');
 ok('R5 意图先消费后执行（防每个 step 反复重试）',
@@ -1572,7 +1576,7 @@ ok('输入钳制不误伤输入过程（空串/半成品不改写）且上限未
  * ⇒ 保存按钮灰的，用户**没有可行的收敛路径**。⇒ 进面板即自动钳回并落盘（只做一次）。 */
 ok('已存值超上限 ⇒ 进面板自动钳回并保存（用户明确要求）',
   /const autoClamped = react\.useRef\(false\);/.test(client)
-  && /await writeField\(settingsScope, field, engineCap\);/.test(client)
+  && /await writeField\(settingsScope, field, roundRatio\(engineCap\)\);/.test(client) // R72（C3）：落盘前归一
   && /if \(!Number\.isFinite\(cur\) \|\| cur <= engineCap\) return;/.test(client),
   '没有自动钳制 ⇒ 已存超限值时保存按钮是灰的，用户无法收敛（实测卡点）');
 ok('自动钳制只做一次且有回读校验（失败可重试）',
@@ -1607,7 +1611,7 @@ ok('弹窗「距智能压缩线」的数据源真的搬进来了（E1 修）',
 const autoClampBlock = /const autoClamped = react\.useRef\(false\);[\s\S]*?\}, \[ready, writable, engineCap, stored\.criticalRatio\]\);/.exec(client)?.[0] ?? '';
 ok('autoClamped 异步分支有 alive 守卫（写入后 + 错误分支两处）',
   (autoClampBlock.match(/if \(!alive\) return;/g) ?? []).length === 2
-  && /await writeField\([\s\S]{0,200}if \(!alive\) return;/.test(autoClampBlock),
+  && /await writeField\([\s\S]{0,400}if \(!alive\) return;/.test(autoClampBlock), // R72：窗口放宽（中间多了注释块）
   '守卫缺失/只补一处 ⇒ 组件已卸载仍继续写配置或 setState（越权副作用）');
 /* ═══ 教学必须教**生效值**（2026-10-08 实测：卡片写「占用达 80%」而实际 75%） ═══ */
 ok('决策卡/一次性说明拿到的是**生效**强制线（不是配置值）',
@@ -3288,7 +3292,7 @@ console.log('\n== 6.28 R21.2：档位沿用 + 锚点失败痕（真机缺陷回�
     outNoNeed?.source === 'none' && outNoNeed?.retainSource === 'tier' && outNoNeed?.anchorFailReason === 'text:not-found',
     `实际 ${JSON.stringify(outNoNeed)}`);
   const P212b = mk3212({ ok: false, why: 'boundary-exhausted', firstIdx: 1 });
-  const outOfficial = await P212b.api.compactWithOwnRange({ session: { surface: { nodes: [] } } }, { service: { compactIfNeeded: async () => ({ shadowedTokenCount: 7 }) } }, ctx212({ retainedTokens: undefined }));
+  const outOfficial = await P212b.api.compactWithOwnRange({ session: { surface: { nodes: [] } } }, { service: { compactIfNeeded: async () => ({ shadowedTokenCount: 7 }) } }, ctx212({ retainedTokens: undefined, forced: true })); // R72（H2）：未越强制线已不再回落官方
   ok('R21.2 行为级②：**官方兜底**路径同样必须带 retainSource + 锚点失败原因',
     outOfficial?.source === 'official' && outOfficial?.retainSource === 'tier' && outOfficial?.anchorFailReason === 'text:not-found',
     `实际 ${JSON.stringify(outOfficial)}`);
@@ -4457,7 +4461,9 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
   let out52 = null; let err52 = null;
   try {
     out52 = await api52.compactWithOwnRange({ session: { id: 's52' } }, { service: svc52, via: 'stub' },
-      { forced: false, sig: AbortSignal.timeout(2000), sid: 's52', window: 1000000, measure: {}, tierName: 'standard',
+      /* R71（F-14）：低占用 + range 不可用 ⇒ 现在**不再**回落官方（改跳过，见 R71 行为级断言）；
+       * 本用例要守的是「已越强制线时官方兜底仍可用、且不得抛 TDZ」⇒ forced 改 true。 */
+      { forced: true, sig: AbortSignal.timeout(2000), sid: 's52', window: 1000000, measure: {}, tierName: 'standard',
         retainOverride: null, anchorSeq: null, anchorFailReason: 'text:not-found' });
   } catch (e) { err52 = String(e?.message ?? e); }
   ok('R52 行为级：`compact-range` 不可用 ⇒ 官方兜底**不得抛 TDZ**，且必须回报 source=official + 保留来源',
@@ -4691,7 +4697,11 @@ ok('R60/R62：面板内置文案覆盖**三个**模板，且缺注入时回落�
 const m5Src62 = readFileSync(join(PLUGIN, 'm5.hud.mjs'), 'utf8');
 ok('R62：compact-tool 在 ensure() 期**预渲染**内置文案（首轮注入前面板也能看）',
   /keepBuiltin\('brief', renderBriefBuiltin\(\{ criticalRatio: M3\?\.criticalRatio/.test(ctSrc57)
-  && /keepBuiltin\('card', renderCardBuiltin\(\{ ratio: null, minRatio: M3\?\.markerMinRatio/.test(ctSrc57),
+  /* R72（C1）：原先传 ratio:null ⇒ renderCardBuiltin 首行守卫直接返回 null ⇒ 决策卡内置文案**恒空**。
+   * 现传演示值（越过 markerMinRatio 才渲染得出卡片），断言改为「ratio 非 null + demo 标记」。 */
+  && /keepBuiltin\('card', renderCardBuiltin\(\{/.test(ctSrc57)
+  && /ratio: Math\.min\(0\.9, \(Number\(M3\?\.markerMinRatio\) \|\| 0\.3\) \+ 0\.08\)/.test(ctSrc57)
+  && /demo: true,/.test(ctSrc57),
   '只在渲染时落档 ⇒ 首个注入之前「查看内置文案」永远是空的（用户实测）');
 ok('R62：HUD 的 config 载荷带 builtins（含 effort 域的 effBrief）',
   /builtins: \{ \.\.\.\(state\.m3\?\.lastBuiltin \?\? \{\}\), effBrief: state\.m2\?\.lastEffBriefBuiltin \?\? null \}/.test(m5Src62),
@@ -4787,6 +4797,133 @@ const hi71 = readFileSync(join(PLUGIN, 'host.impl.mjs'), 'utf8');
 ok('R71 host.impl：删掉死解构 TAG/HISTORY_CAP（原仅出现在解构与注释里）',
   !/HEARTBEAT_MS, TAG,/.test(hi71) && !/COMPACT_TIMEOUT_MS, HISTORY_CAP,/.test(hi71),
   '死解构（审查 F-04）；注意：删注释不省代码行预算，此项收益在可读性不在预算');
+/* ═══ R71（F-14 修复：派发审查提出、Lead 深挖后落地）═══
+ * 依据：R5 真机实测 official(context-overflow) 的 retainTokens=0，在**仅 53% 占用**时把 surface 从
+ * 367,794 砍到 8,603（nodeCount 1117 → 4，-97.7%）。所以「range 模块未就绪」绝不能无条件回落该通道。 */
+{
+  const m3ModF14 = await import(pathToFileURL(join(PLUGIN, 'm3.compact.mjs')).href);
+  const stF14 = { m3: {} };
+  let officialCalls = 0;
+  const m3F14 = m3ModF14.createM3Compaction({
+    state: stF14, log: () => {}, msg: (e) => String(e?.message ?? e),
+    pick: (...a) => a.find((x) => x != null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    nfmt: (n) => String(n), errCodeOf: (e) => String(e?.code ?? 'err'), schedule: () => {},
+    svc: () => null, M3: {}, effEnabled: () => true, criticalCapOf: () => 0.8,
+    resolveCompactionFor: () => ({ service: null, via: 'stub' }),
+    publishHud: () => {}, recordHudAct: () => {}, formatAct: () => '',
+    clearBriefed: () => {}, awaitRange: async () => null, getCompactTool: () => null,
+    COMPACT_TIMEOUT_MS: 1000, SET_CAP: 200,
+  });
+  const svcF14 = { service: { compactIfNeeded: async () => { officialCalls += 1; return { shadowedTokenCount: 999999 }; } }, via: 'test' };
+  const ctxF14 = (forced) => ({ forced, sig: 'sig-f14', sid: 'sid-f14', window: 1000000, measure: {}, tierName: 'standard' });
+  const lowF14 = await m3F14.compactWithOwnRange({ session: {} }, svcF14, ctxF14(false));
+  ok('R71 行为级（F-14）：range 模块未就绪 + 未越强制线 ⇒ 不回落官方 overflow、不压',
+    lowF14.source === 'none' && lowF14.skipWhy === 'range-module-pending'
+    && lowF14.result === null && officialCalls === 0 && (stF14.m3.rangePendingSkips ?? 0) === 1,
+    `实际 ${JSON.stringify({ source: lowF14.source, skipWhy: lowF14.skipWhy, result: lowF14.result, officialCalls, skips: stF14.m3.rangePendingSkips })}`);
+  const hiF14 = await m3F14.compactWithOwnRange({ session: {} }, svcF14, ctxF14(true));
+  ok('R71 行为级（F-14）：已越强制线 ⇒ 仍回落官方（安全网必须保留）',
+    hiF14.source === 'official' && officialCalls === 1,
+    `实际 ${JSON.stringify({ source: hiF14.source, officialCalls })}`);
+}
+const m3src71 = readFileSync(join(PLUGIN, 'm3.compact.mjs'), 'utf8');
+ok('R71 源码级（F-14）：调用方守卫在**消费意图之前**，且内层也有二道防线',
+  m3src71.indexOf('if (!rangeReady) {') > 0
+  && m3src71.indexOf('if (!rangeReady) {') < m3src71.indexOf('tool.takeIntent(sid)')
+  && (m3src71.match(/range-module-pending/g) ?? []).length >= 2
+  /* R71：**两条路径都要计数**（调用方守卫 + 内层二道防线）——只数一处会让另一处的事故无从取证。 */
+  && (m3src71.match(/state\.m3\.rangePendingSkips =/g) ?? []).length >= 2, // 数**赋值点**（同一行里标识符会出现两次，数标识符会被蒙混）
+  '守卫在 takeIntent 之后 ⇒ 意图已白吃、模型以为排上了；只有一处 ⇒ 别的入口仍会清场');
+/* ═══ R72（真 GLM-5.3 审查：7 条 P1 + 若干 P2；每条先回源码验伪再落地）═══
+ * 背景：上一轮派发时 runner 把 GLM-5.3 静默替换成 Flash（只看单一 q.model 判定权益），
+ * 修成「按授予集合判定」后真 GLM-5.3 跑通（modelId 实测 GLM-5.3、providerError=null）。 */
+{
+  const ctModR72 = await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href);
+  let specR72 = null;
+  const stR72 = { m3: { compactToolDiag: { calls: 0 } } };
+  const apiR72 = ctModR72.createCompactTool({
+    svc: (k) => (k === 'tools' ? { register: () => {} } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    /* 必须**真的配一个模板**：applyTpl 在模板为空时返回 null ⇒ 回退内置原文（不经过占位符替换）。
+     * ⚠️ 模板来自**注入的 M3**（宿主 mergeConfig 的活值），不是 readCfg —— 我第一次就传错了位置。 */
+    M3: { tplEffBrief: '内置：先想到 {tool}；档位 {tiers}；当前 {current}' },
+    state: stR72, readCfg: () => ({ enabled: true, effortEnabled: true }),
+    getDefineTool: () => (sp) => { specR72 = sp; return sp; },
+    getRangeApi: rangeStub,
+  });
+  apiR72.ensure();
+  const agentR72 = { session: { id: 'sess-r72' }, id: 'sess-r72' };
+  const runR72 = (args) => specR72.execute(args, { agent: agentR72 });
+
+  /* H4：`{tool}` 必须被 extraVars 覆盖成**本域**工具名（否则思考强度教学教模型去调压缩工具） */
+  const outH4 = apiR72.renderTemplated('tplEffBrief',
+    '内置：先想到 {tool}；档位 {tiers}；当前 {current}', { tool: 'set_reasoning_effort', current: 'high', tiers: 'low/high/max' });
+  ok('R72 行为级（H4）：思考强度教学模板的 {tool} 解析成换档工具，绝不能是 compact_context',
+    typeof outH4 === 'string' && outH4.includes('set_reasoning_effort') && !outH4.includes('compact_context')
+    && outH4.includes('high') && outH4.includes('low/high/max'),
+    `实际 ${JSON.stringify(outH4)}`);
+
+  /* H5：action 打错字必须**可见失败**，不能静默落成真压缩 */
+  const rH5 = await runR72({ action: 'set_tier', tier: 'heavy' });
+  ok('R72 行为级（H5）：action 写错（set_tier）⇒ 明确报错，且不登记压缩意图',
+    rH5?.ok === false && /action 只能是 compact 或 set-tier/.test(String(rH5?.error)) && apiR72.peekIntent('sess-r72') === null,
+    `实际 ${JSON.stringify(rH5)}`);
+  const rH5ok = await runR72({ action: 'set-tier', tier: 'light' });
+  ok('R72 反向（H5）：合法 action 不被误伤（set-tier 仍只登记档位）',
+    rH5ok?.ok === true && rH5ok?.action === 'set-tier', `实际 ${JSON.stringify(rH5ok)}`);
+
+  /* C1：ensure() 期预渲染的**决策卡**内置文案必须非空（此前 ratio:null ⇒ 恒 null） */
+  ok('R72 行为级（C1）：ensure() 后决策卡内置文案非空（此前「查看内置文案」对卡片恒为空）',
+    typeof stR72.m3.lastBuiltin?.card === 'string' && stR72.m3.lastBuiltin.card.length > 100
+    && typeof stR72.m3.lastBuiltin?.brief === 'string' && stR72.m3.lastBuiltin.brief.length > 100,
+    `card=${(stR72.m3.lastBuiltin?.card ?? '').length} brief=${(stR72.m3.lastBuiltin?.brief ?? '').length}`);
+}
+
+/* H1：`lastUserText` 必须读 `surface.nodes`（DSH 的 Session.surface 是 SurfaceManager，不是数组） */
+const coreSrc72 = readFileSync(join(PLUGIN, 'core.mjs'), 'utf8');
+ok('R72（H1）：lastUserText 读 surface.nodes，且兼容"数组形态"',
+  /Array\.isArray\(session\?\.surface\) \? session\.surface : session\?\.surface\?\.nodes/.test(coreSrc72),
+  '只写 session?.surface ⇒ Array.isArray 恒 false ⇒ 恒返回空串 ⇒ 换档提醒两个触发从未生效');
+
+/* H2：其余 official 兜底入口同样只在**越强制线**时才允许走 retainTokens=0 通道 */
+const m3Src72 = readFileSync(join(PLUGIN, 'm3.compact.mjs'), 'utf8');
+ok('R72（H2）：guardOfficial 收口其余官方兜底（surface-mismatch/boundary-exhausted/invalid-boundary）',
+  /const guardOfficial = async \(why\) => \{/.test(m3Src72)
+  && /if \(forced\) return official\(why\);/.test(m3Src72)
+  && /return guardOfficial\(sel\.why\);/.test(m3Src72)
+  && /return guardOfficial\('boundary-exhausted'\);/.test(m3Src72)
+  && /return guardOfficial\('invalid-boundary'\);/.test(m3Src72),
+  'F-14 只堵了 no-range-module ⇒ 其余入口在低占用时仍会把近端砍光（R5 实测 1117 节点→4）');
+
+/* H3：中步回执必须**先判工厂再取回执**（顺序反了 = 取出即标 read ⇒ 永远丢） */
+const m2Src72 = readFileSync(join(PLUGIN, 'm2.inject.mjs'), 'utf8');
+ok('R72（H3）：中步回执的工厂判定在 takeCompactReceipt **之前**',
+  m2Src72.indexOf('const midFactory = getCreateUserMessage();') > 0
+  && m2Src72.indexOf('const midFactory = getCreateUserMessage();') < m2Src72.indexOf('takeCompactReceipt(sidEarly)'),
+  '顺序反了 ⇒ 回执被取出并标 read=true 后才 skip ⇒ 回执永久丢失（R71 修复不完整）');
+
+/* H6 / C2 / C3 / C9 / C10：client 侧四处修正 */
+ok('R72（H6）：面板不再指向不存在的「刷新页面」按钮',
+  !/刷新页面/.test(client) && /重新打开本面板后重试/.test(client),
+  '用户按提示找不到控件；R65 撤注入区时按钮被连带删除而文案残留');
+ok('R72（C2）：预设按钮用 data-active（React 不支持 dataset prop）',
+  /"data-active": active === p\.id \? "1" : "0"/.test(client) && !/dataset: \{ active/.test(client),
+  'dataset prop 不落成 DOM 属性 ⇒ CSS 选中态永不命中');
+ok('R72（C3）：自动钳回落盘前归一（否则浮点尾差写进配置并产生幽灵 dirty）',
+  /await writeField\(settingsScope, field, roundRatio\(engineCap\)\)/.test(client),
+  'R68 只归一了显示用的 capNow，落盘仍是原始浮点');
+ok('R72（C9）：窗口缺失时不渲染 NaN 距离',
+  /const occWin = num\(v\.occupancyWindow, null\);/.test(client) && /occWin \* \(crit - occ\)/.test(client),
+  'host 允许 ratio 有值而 window 为 null ⇒ 会显示「距智能压缩线 NaN」');
+ok('R72（C10）：清空「阈值余量」输入框不得把空串当 0',
+  /if \(typeof raw === "string" && raw\.trim\(\) === ""\) return marginSaved;/.test(client),
+  'Number("") === 0 会通过范围校验 ⇒ 草稿期上限瞬时变成引擎阈值全额');
+ok('R72（S1/H7）：宿主死委托已删，行预算注释与实测一致',
+  !/compactWithOwnRange/.test(readFileSync(join(PLUGIN, 'host.impl.mjs'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, ''))
+  && /314，余量仅 6 行/.test(readFileSync(join('test', 'static.mjs'), 'utf8')),
+  '死委托占预算；注释写 294 会误导后来者');
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));
 process.exit(failures ? 1 : 0);

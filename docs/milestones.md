@@ -4173,3 +4173,42 @@ compact-tool **拿不到**原文 ⇒ 不能像 brief/card 那样自己渲染。�
 **变异**：关掉 stat 门控 / 去掉 noFactory 守卫 / 退回上中位 ⇒ **全部 CAUGHT**。
 
 **测试**：907 断言全绿（contract 717 / static 84 / report 54 / boot 22 / client-render 30）。
+### R72 真 GLM-5.3 跨模型审查 + 7 条 P1 落地（2026-10-24，用户要求「两个模型都有免费额度，重新跑」）
+
+**先修了派发通道的真 bug**：上一轮 "GLM-5.3" 被 runner **静默替换**成 GLM-5.3-Flash。根因在
+`dsh-dispatch/collab-kit/zcode-run.mjs:896-910`（ZB-40 的模型⇄权益校验）：它只读额度对象的**单一**
+`q.model`（默认 Flash）就判定「权益只授予这一个」，而同一份数据里 `perModel` 明确有 GLM-5.3
+196.1M/200M 余额 ⇒ 权益是**逐模型**授予的。改为按**授予集合**（`model ∪ models ∪ perModel[].model`）
+判定：在集合内就照用，只有确实不在集合里才替换。修后实测 `modelId=GLM-5.3`、`providerError=null` ✓
+（改动在 dsh-dispatch 仓库，已单独提交；原文件备份 `.bak-20261024`）。
+
+**真 GLM-5.3 的审查质量明显更高**：913s / 305 次工具调用 / 14,924 字符，报出 **7 条 P1 + 20 余条 P2**，
+其中一条直接指出 **R71 的修复不完整**（H3）。本轮落地 13 项：
+
+| # | 修法 | 性质 |
+|---|---|---|
+| H1 | `lastUserText` 把 `session.surface`（SurfaceManager 对象）当数组判 ⇒ **恒返回空串** ⇒ effort 的「用户要求深入/快速」两个换档触发**从未工作过**。改读 `surface.nodes`，并兼容数组形态 | 正确性（功能复活） |
+| H2 | `official()` 是**同一条 retainTokens=0 通道**：F-14 只堵了 `no-range-module`，其余 `surface-mismatch`/`boundary-exhausted`/`invalid-boundary` 在低占用时仍会把近端砍光 ⇒ 统一收口为 `guardOfficial`（未越强制线 ⇒ 收手+计数+留痕；越线才回落） | 正确性（数据安全） |
+| H3 | 中步回执：R71 只补了「别裸调用」，但 `takeCompactReceipt`（取出即标 read=true）在工厂判定**之前** ⇒ 回执仍「取出即丢」。顺序改为先判工厂、再取回执 | 正确性（R71 补正） |
+| H4 | `renderTemplated`：`tplVars` 的键带花括号（`'{tool}'` 固定为压缩工具），而 `extraVars` 是裸键 ⇒ **覆盖不掉** ⇒ 思考强度教学把换档工具教成 `compact_context`（模型照调会真的触发一次压缩）。改为折成 `'{k}'` 键覆盖、不再写裸键 | 正确性（教错工具） |
+| H5 | `action` 只有二分判断 ⇒ `set_tier`/`Set-Tier` 等打错字**静默落成真压缩**。改为值不合法即返回 `ok:false`（可见失败、可纠正） | 正确性（危险侧静默） |
+| H6 | 面板提示指向**不存在的「刷新页面」按钮**（R65 撤注入区时按钮被连带删除、文案残留）⇒ 改为「重新打开本面板」 | 口径漂移 |
+| C1 | `ensure()` 预渲染 card 传 `ratio:null`，而卡片首行守卫 `ratio == null ⇒ null` ⇒ 决策卡内置文案**恒空**（R62 只达成了 brief）。改传演示值并标 `demo:true` | 功能缺口 |
+| C2 | 预设按钮用 `dataset:{active}`（React 不支持该 prop）⇒ CSS `[data-active]` **永不命中**，选中高亮从未生效。改 `"data-active"` | 正确性 |
+| C3 | 自动钳回落盘未过 `roundRatio` ⇒ host 下发的浮点尾差写进配置（R68 只归一了显示值） | 正确性 |
+| C9 | host 允许 `ratio` 有值而 `occupancyWindow` 为 null ⇒ 提示渲染「距智能压缩线 **NaN**」⇒ 窗口缺失时只报状态 | 正确性 |
+| C10 | 清空「阈值余量」输入框时 `Number("")===0` 通过校验 ⇒ 草稿期上限瞬时变成引擎阈值全额 ⇒ 空串按「未填」回退已存值 | 正确性 |
+| S1 | 宿主的 `compactWithOwnRange` **同名转发零生产调用者**（唯一消费者是一条源码形状断言）⇒ 删掉，代码行预算 **318 → 314**（余量 6 行） | simplify |
+| H7 | `test/static.mjs` 注释仍写「当前 294」⇒ 改为实测 314 并警示余量 | 文档 |
+
+**记在案但未落地**（20 余条 P2，按 GLM 报告编号）：C4 换档让位时序、C5 carry 路径误登记、C6 宿主
+`verifyBySid` 无界、C7 原子写降级无留痕、C8 slim 快照仍全量测量、C11 `hudLastAct` 死字段、
+C12 schema 无范围约束、S2 `diag()` 死出口+注释失实、S3 候选链两段同构、S4 envelope 解包两份、
+E1 m2 教学线不含动态余量、E2 用户模板可超 3000 预算、E3 意图消费后失败不重试、E4 effort 取证字段挂 m3、
+E5 报告损坏无备份、E7 run.mjs 无 timeout、E8/E9/E10/E11 小项。
+
+**守卫**：contract 新增 13 条（含 H4/H5/C1 三条**行为级**：模板 `{tool}` 必须解析成换档工具、
+`set_tier` 必须 ok:false、`ensure()` 后决策卡内置文案非空）。**变异**：H4 退回裸键 / H1 退回读对象 /
+H5 关校验 / C1 退回 `ratio:null` ⇒ **全部 CAUGHT**。
+
+**测试**：923 断言全绿（contract 733 / static 84 / report 54 / boot 22 / client-render 30）。

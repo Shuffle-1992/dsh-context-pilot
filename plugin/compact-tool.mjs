@@ -350,7 +350,15 @@ export function createCompactTool(deps) {
   const renderTemplated = (which, text, extraVars = {}) => {
     if (text == null) return text;
     try {
-      const vars = { ...tplVars(extraVars, String(text)), ...extraVars };
+      /* R72（真 GLM-5.3 审查 H4）：`tplVars` 产出的键**带花括号**（'{tool}' 固定为压缩工具名），
+       * 而 `extraVars` 是**裸键**（tool/current/tiers）⇒ 原先 `{...tplVars, ...extraVars}` 根本覆盖
+       * 不掉 '{tool}'，于是「思考强度教学」模板会把换档工具写成 `compact_context`
+       * （教错工具，模型照着调会**真的触发一次压缩**）。现统一折成 '{k}' 键再覆盖，且不再写入裸键
+       * （裸键会在替换阶段误伤正文里出现的同名字样）。 */
+      const vars = tplVars(extraVars, String(text));
+      for (const [k, v] of Object.entries(extraVars)) {
+        vars[k.startsWith('{') && k.endsWith('}') ? k : '{' + k + '}'] = v;
+      }
       return applyTpl(M3?.[which], vars, which) ?? text;
     } catch { return text; }
   };
@@ -430,7 +438,20 @@ export function createCompactTool(deps) {
        * 结构性原因——**唯一的低成本动作不存在**。现加 `action`：
        *   · 'compact'（默认）——登记意图并压缩（原行为，向后兼容）；
        *   · 'set-tier'——**只登记档位，不登记压缩意图**（不压、不丢近端、零缓存成本）。 */
-      const action = args?.action === 'set-tier' ? 'set-tier' : 'compact';
+      /* R72（真 GLM-5.3 审查 H5）：action 原先只有「=== 'set-tier' ? … : 'compact'」的二分，
+       * 于是 `set_tier` / `Set-Tier` / 任何打错字的值都会**静默落到真压缩**（副作用在危险侧：
+       * 摘要掉近端），而模型以为自己只是登记了档位。现在：值不合法 ⇒ 可见失败、要求重试。
+       * 参数校验的失败对模型是**可纠正**的，比静默误压便宜得多。 */
+      const actionRaw = args?.action;
+      const actionNorm = typeof actionRaw === 'string' ? actionRaw.trim() : actionRaw;
+      if (actionNorm != null && actionNorm !== '' && actionNorm !== 'compact' && actionNorm !== 'set-tier') {
+        return {
+          ok: false,
+          error: `action 只能是 compact 或 set-tier（收到「${String(actionRaw).slice(0, 40)}」）。`
+            + '若要「只登记档位、本次不压缩」，请传 action:\'set-tier\'。',
+        };
+      }
+      const action = actionNorm === 'set-tier' ? 'set-tier' : 'compact';
       /* R16：档位是**会话级持久偏好**（智能压缩线与强制线都读它）；未选/非法 ⇒ standard 兜底。
        * ⚠️ R21.2（2026-10-15 真机事故）：**「未选」必须与「非法」分开**——
        * 旧实现把 `args.tier == null` 也丢进 normTier ⇒ 返回 standard ⇒ **每次只传 keepFrom 的调用
@@ -891,7 +912,16 @@ export function createCompactTool(deps) {
         if (!state.m3.lastBuiltin || (!state.m3.lastBuiltin.brief && !state.m3.lastBuiltin.card)) {
           syncTiers();
           keepBuiltin('brief', renderBriefBuiltin({ criticalRatio: M3?.criticalRatio, retainRatio: M3?.retainRatioStandard, retainTokens: null }));
-          keepBuiltin('card', renderCardBuiltin({ ratio: null, minRatio: M3?.markerMinRatio, criticalRatio: M3?.criticalRatio, retainRatio: M3?.retainRatioStandard }));
+          /* R72（真 GLM-5.3 审查 C1）：`renderCardBuiltin` 首行守卫 `ratio == null ⇒ null`，而这里传的是
+           * `ratio: null` ⇒ 预渲染**恒为 null** ⇒ 首轮注入之前，面板「查看内置文案」对决策卡永远是空的
+           * （R62 只想让 brief/card 都能随时可看，card 这条一直没达成）。改传一个**演示值**（刚好越过
+           * markerMinRatio，让卡片完整渲染出趋势/两个方向等段落）；它只是文案预览，不是真实读数。 */
+          keepBuiltin('card', renderCardBuiltin({
+            ratio: Math.min(0.9, (Number(M3?.markerMinRatio) || 0.3) + 0.08),
+            minRatio: M3?.markerMinRatio, criticalRatio: M3?.criticalRatio, retainRatio: M3?.retainRatioStandard,
+            usedTokens: null, deltaTokens: null, turnsToLine: null, tierName: null, tierState: 'unset',
+            demo: true,
+          }));
         }
       } catch { /* 预览失败不影响工具注册 */ }
       return ok;

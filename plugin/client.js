@@ -390,7 +390,8 @@ window.__ModuleLoader__.load({
 				autoClamped.current = true;
 				(async () => {
 					try {
-						await writeField(settingsScope, field, engineCap);
+						/* R72（审查 C3）：落盘前归一，否则 host 下发的浮点尾差会写进配置并产生「幽灵 dirty」。 */
+						await writeField(settingsScope, field, roundRatio(engineCap));
 						/* E6（审查）：异步分支必须检查 `alive`——组件卸载后 setState 虽不报错，
 						 * 但这里还会**继续写配置**（越权副作用）；同文件其他异步路径都有这道守卫。 */
 						if (!alive) return;
@@ -432,6 +433,9 @@ window.__ModuleLoader__.load({
 				const f = fieldOf("engineCapMargin");
 				const raw = f && draft !== null && Object.prototype.hasOwnProperty.call(draft, "engineCapMargin")
 					? draft.engineCapMargin : (f ? toUi(f, stored.engineCapMargin) : marginSaved);
+				/* R72（审查 C10）：输入框被清空时 `Number("") === 0` 会**通过**下面的范围校验 ⇒
+				 * 草稿期 capNow 瞬时等于「引擎阈值全额」，钳制短暂放行。空串按"未填"处理，回退已保存值。 */
+				if (typeof raw === "string" && raw.trim() === "") return marginSaved;
 				const m = Number(raw);
 				return Number.isFinite(m) && m >= 0 && m < 0.5 ? m : marginSaved;
 			})();
@@ -664,7 +668,7 @@ window.__ModuleLoader__.load({
 									tplOpen === field.key
 										? el("pre", { className: "dcp-builtin" },
 											builtinTextOf(field)
-												|| "（暂无内置文案：先 toggle 插件（关→开）加载新版 host，再点上方「刷新页面」后重试）")
+												|| "（暂无内置文案：先 toggle 插件（关→开）加载新版 host，再重新打开本面板后重试；本面板不设刷新按钮）")
 										: null,
 								)
 								: el("input", {
@@ -741,7 +745,9 @@ window.__ModuleLoader__.load({
 				el("div", { className: "dcp-calc-title" }, "成本阈值计算器（参考值；点下方按钮可写入配置）"),
 				el("div", { className: "dcp-presets" },
 					PRICE_PRESETS.map((p) => el("button", {
-						key: p.id, className: "dcp-preset", dataset: { active: active === p.id ? "1" : "0" },
+						/* R72（真 GLM-5.3 审查 C2）：React 组件不支持 `dataset` prop（那是原生 DOM 属性）⇒ 原先
+							 * CSS `.dcp-preset[data-active="1"]` **永不命中**，预设选中高亮从未生效。改写成 data-* 属性。 */
+							key: p.id, className: "dcp-preset", "data-active": active === p.id ? "1" : "0",
 						title: p.note, onClick: () => pick(p),
 					}, p.label)),
 				),
@@ -1467,14 +1473,17 @@ window.__ModuleLoader__.load({
 							/* 「距离触发还差多少」——弹窗已在顶部显示当前占用，这里补最有决策价值的一行：
 							 * 距智能压缩线还有多少（达线后模型可自行决定压缩），以及是否已越线。 */
 							const occ = num(v.occupancyRatio, null); // host 侧未提供时跳过（保持向后兼容）
-							if (occ != null) {
+							/* R72（审查 C9）：host 允许 ratio 有值而 window 为 null（m5 的宽松透传）⇒
+							 * 直接乘会渲染「距智能压缩线 NaN」。窗口缺失时只报状态、不给距离。 */
+							const occWin = num(v.occupancyWindow, null);
+							if (occ != null && occWin != null) {
 								const smart = num(v.markerMinRatio, 0.2);
 								const crit = critEff; // ⚠️ 必须用生效值，否则会在「不会真正触发的线」上报已达线
 								const fmtK = (t) => (t >= 1000 ? `${(t / 1000).toFixed(0)}K` : String(Math.round(t)));
 								let hint;
 								if (occ >= crit) hint = "已达强制压缩线";
-								else if (occ >= smart) hint = `已过智能压缩线（距强制线 ${fmtK(v.occupancyWindow * (crit - occ))}）`;
-								else hint = `距智能压缩线 ${fmtK(v.occupancyWindow * (smart - occ))}`;
+								else if (occ >= smart) hint = `已过智能压缩线（距强制线 ${fmtK(occWin * (crit - occ))}）`;
+								else hint = `距智能压缩线 ${fmtK(occWin * (smart - occ))}`;
 								/* 用户反馈（2026-10-08 截图）：「已过智能压缩线（距强制线 305K）」被**从中间断开**
 								 * （显示成「…· 已过智」/「能压缩线（距强制线 305K）」）。
 								 * 根因：两条线 + 状态提示被拼进**同一个文本节点**，而弹窗宽仅 ~230px

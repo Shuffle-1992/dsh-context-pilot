@@ -554,6 +554,9 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
       preStepOk: 0,
       lastPreStep: null,
       preStepErrors: {},
+      /* R71（F-14）：range 模块未就绪 + 未越强制线 ⇒ 本轮跳过压缩的次数。
+       * 有此计数才可能回答「这条兜底路径到底发生过没有」（此前只有 warn 文本、无法取证）。 */
+      rangePendingSkips: 0,
       policyCards: 0,
       engineCapProbe: null, // C-own：引擎阈值探测留痕（via/ratio/fallback），取证「钳制用的是哪个值」
       /* 智能思考（effort）取证 —— R3 收敛（原先 12 个散字段 + 两处 `?? 0` 隐式初始化）。
@@ -635,7 +638,11 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
    * 读不到就返回空串 —— 调用方据此不提示，绝不影响注入主流程。 */
   const lastUserText = (session, maxNodes = 8, maxLen = 400) => {
     try {
-      const nodes = session?.surface;
+      /* R72（真 GLM-5.3 审查 H1）：DSH 的 `Session.surface` 是 **SurfaceManager**，节点列表在
+       * `surface.nodes`（getter）——原来把对象当数组判 `Array.isArray` 恒 false ⇒ **恒返回空串** ⇒
+       * effort 的「用户要求深入/快速」两个换档触发**从未工作过**。这里**两种形状都吃**（数组当旧版/测试桩），
+       * 避免下一次结构变化又静默失效。 */
+      const nodes = Array.isArray(session?.surface) ? session.surface : session?.surface?.nodes;
       if (!Array.isArray(nodes) || typeof session?.eventAt !== 'function') return '';
       for (let i = nodes.length - 1, k = 0; i >= 0 && k < maxNodes; i -= 1, k += 1) {
         const ev = session.eventAt(nodes[i]);

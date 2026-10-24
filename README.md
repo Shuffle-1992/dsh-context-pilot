@@ -52,10 +52,11 @@ profile `package.json` 两处要改（以本机 `desktop` profile 为例）：
 
 **当前版本 `v0.1.8`** · 逐版本历史与实证记录见 [`docs/milestones.md`](docs/milestones.md)。
 
-### 最近更新（v0.1.6 → v0.1.64）
+### 最近更新（v0.1.6 → v0.1.65）
 
 | 版本 | 更新 | 为什么值得知道 |
 | --- | --- | --- |
+| **v0.1.65** | **R72 真 GLM-5.3 跨模型审查（7 条 P1）** | 先修派发通道模型替换 bug（只读单一 q.model ⇒ 改按授予集合判定，真 GLM-5.3 跑通）。落地：`lastUserText` 读错 surface 形状（换档提醒两触发从未生效）、`guardOfficial` 收口其余 retainTokens=0 入口、中步回执顺序补正（R71 不完整）、`{tool}` 被解析成压缩工具（教错工具）、`action` 打错字静默真压、面板指向不存在的刷新按钮、预渲染决策卡恒空、dataset prop 无效、落盘浮点/NaN 距离/空串余量、删宿主死委托（行预算 318→314）。**923 断言** |
 | **v0.1.64** | **R71 双份审查交叉验证落地（13 项）** | 报告热路径 stat 指纹门控（不再每次 MB 级 JSON.parse）、中步回执补 noFactory 守卫、失败回执用真实 trigger、面板两次 RPC 合一且带 sid、两处无界 Map 有界化、偶数样本真中位、删死导出/死解构/6 个死样式类、面板删除已退役「压缩标记通道」说明。**907 断言** |
 | **v0.1.63** | **修趋势外推不准（R70）** | 三处真缺陷：①只看单轮增量（一轮贴图就能算成「1 轮触线」）；②压缩后基线不重置 ⇒ 增量变负、趋势行消失；③两处轮数取整不一致（同一张卡出现 18 与 37）。现改为**最近 4 轮均值**并标出样本数、**骤降即重置基线**（该轮不外推，明说「刚刚压缩过」）、两处统一 `Math.round(≥1)`。**897 断言** |
 | **v0.1.62** | **「最近切换」时间加日期（R69）** | chip tooltip 原先只显示 `时:分:秒`，而 `lastSwitch` 是**落盘数据**（跨天/跨重启仍在）⇒ 看不出是哪天。改为 `YYYY-MM-DD HH:MM:SS`（自写补零，不依赖 locale，避免不同环境分隔符漂移）。**891 断言** |
@@ -365,7 +366,7 @@ Agent 自改档不应改掉新会话的默认档。
 **已完成**：M1–M5（用量读取 / 每轮注入 / 会话自说明 / HUD 弹窗 / 历史持久化）、R1–R21
 （智能思考 + 换档工具、压缩改工具触发、保留范围自算、全面审查加固、**压缩档位三选一**、
 工具后自检回执、回执按会话隔离、**用户手动改档的轮首知情**、**单档模型零注入 + 工具静默**）。**9 个域模块 + core**，`host.impl.mjs` **1836 → 518 行**。
-**测试**：contract 717 + static 84 + report 54 + boot 22 + client-render 30 = **907 断言**全绿；关键回归均有变异验证。
+**测试**：contract 733 + static 84 + report 54 + boot 22 + client-render 30 = **923 断言**全绿；关键回归均有变异验证。
 逐里程碑台账（含踩坑与实测数值）：[`docs/milestones.md`](docs/milestones.md)；
 早期进度历史存档：[`docs/status-archive.md`](docs/status-archive.md)。
 
@@ -387,7 +388,7 @@ npm run test:report   # 只跑报告形状
 | `report.mjs` | 54 | 产出侧字段契约；`republishFromReport`（原 `bfOnce`）回填链依赖；C3② 关键事件必须走 full 档（含**满环优先淘汰 slim**，防 FULL 取证被高频事件挤出）；**getHud 作用域与 criticalCap 实参契约**；**调查结论留档**（探针退役后结论不得丢）；真实报告结构自洽（**无嵌套条件断言** ⇒ 断言数不得随数据漂移）；`hud-acts.json` 去重；dump 工具可跑 | 报告形状无声破坏（踩过 2 次：顶层读 m3/m5、脚本读已删字段）；**证据静默丢失**（120 条全 slim、FULL 被挤光而断言全绿） |
 | `boot.mjs` | 21 | **宿主启动冒烟**：真跑 `apply(ctx, {}, {pluginDir, reportPath})`（桩 ctx）→ HUD 面注册 → **真调 `getHud(null)` 必须 `ok:true`** → `criticalCap`/occupancy/`effortEnabled` 三线 → 四个监听器 → **真调 pre-step handler**（abort 与 step=1 两次）→ **M2 注入路径留下记账**（`m2.skips` 有键或 injections>0）→ 有历史时 `m5.lastPublish==='ok'` → 报告落盘。副作用边界：报告写临时目录、`hud-acts.json` 只读不写 | **接线不可达**（R11 真事故：接线块被嵌进 `schedule()` 函数体、语法合法、423 条源断言全绿，**压缩与弹窗全链路静默失效**）——`node --check` 与源断言都看不见「代码在不在正确的函数里」 |
 
-合计 **907 条断言**（四套：contract / static / report / **boot**）。
+合计 **923 条断言**（四套：contract / static / report / **boot**）。
 
 **已验证有效**：注入 3 个人为 bug（`m3-act` 误入精简档 / client face 改名 / host 引用 client.js），
 三套件全部抓到且定位精准。**新增断言均实测验证过「对回归确实失败」**（两边都通过的测试等于没测）：

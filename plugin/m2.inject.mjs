@@ -452,18 +452,16 @@ export function createM2Injection(deps) {
             allowMid = !gMid || gMid.canSwitch;
           }
         } catch { /* 判据不可用 ⇒ 保守允许提及（宁多一句话，也不误删教学） */ }
-        const receiptMid = renderCompactReceipt(takeCompactReceipt(sidEarly), allowMid);
-        /* R30/R31：回执优先；没有回执时，**仅在检测到本轮重复写决策行**（≥2 条）时才投反重复备注。 */
-        /* R71（两份独立审查一致，P1）：中步路径原先**直接**调 getCreateUserMessage()(...)，
-         * 漏了首步分支同款的空值守卫 ⇒ 工厂未就绪时 TypeError 被外层 catch 吞成 skip:'error'，
-         * 而一次性回执在 takeCompactReceipt 取出时就标了 read=true ⇒ **回执被吃掉却永不送达**
-         * （正是 R15 设计回执要防的静默丢失）。两处（反重复备注 / 中步回执）统一先判工厂。 */
+        /* R71（R72 补正：真 GLM-5.3 审查 H3）——**顺序错了**：工厂判定必须放在
+         * `takeCompactReceipt` **之前**。原因：`takeCompactReceipt` 取出时立刻把该条标 `read=true`
+         * （一次性回执），之后才 skip 就永远取不回来了 ⇒ 仍是「回执被吃掉却永不送达」。
+         * 现改为：先判工厂，拿不到就 skip（回执原样留给下一步）。 */
         const midFactory = getCreateUserMessage();
         if (!midFactory) {
           state.m2.skips.noFactory = (state.m2.skips.noFactory ?? 0) + 1;
           return { skip: 'noFactory' };
         }
-        if (!receiptMid) {
+        const receiptMid = renderCompactReceipt(takeCompactReceipt(sidEarly), allowMid);        if (!receiptMid) {
           const nudgeMid = repeatNudge(sidEarly, turn);
           if (!nudgeMid) return { skip: 'not-step-1' };
           const msgNudge = midFactory({

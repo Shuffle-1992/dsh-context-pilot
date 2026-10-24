@@ -344,10 +344,6 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
       return null;
     });
   const measureRatio = (session) => (m3Ctl ? m3Ctl.measureRatio(session) : { ok: false, error: 'm3-module-pending' });
-  const compactWithOwnRange = async (agent, compaction, ctx) =>
-    (m3Ctl
-      ? m3Ctl.compactWithOwnRange(agent, compaction, ctx)
-      : { result: null, source: 'none', skipWhy: 'm3-module-pending', retainBudget: null, walkBacks: 0 });
   /** pre-step 轮内先压（M3.5 通道 1）：模块未就绪时 no-op 并留痕（绝不上抛）。
    *  R15：**仅当有人登记了压缩意图**时补一条「未执行」自检回执——这正是 R11–R13 真机失效的形态
    *  （工具回 `ok/scheduled`，而消费者模块不在），必须让模型看得见。 */

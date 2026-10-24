@@ -404,8 +404,38 @@ export function createM3Compaction(deps) {
         };
       } finally { clearOwnCompaction(sid); }
     };
+    /** R72（真 GLM-5.3 审查 H2）：F-14 只堵了 `no-range-module`，但 `official()` 是**同一条
+     * retainTokens=0 通道**（R5 实测：53% 占用把 surface 367,794→8,603、nodeCount 1117→4），
+     * 其余 why 同样危险：`surface-mismatch`/`no-nodes`（measurement 与 surface 竞争窗口）、
+     * `boundary-exhausted`、`invalid-boundary`。三者都可能发生在「低占用 + 模型主动请求」，
+     * 那种场景本来完全可以不压。故统一收口：未越强制线 ⇒ 收手（skipWhy=该 why），越线 ⇒ 官方兜底。
+     * `nothing-to-compact + forced` 仍会走官方（越线必压是设计承诺），因为此时 forced=true。 */
+    const guardOfficial = async (why) => {
+      if (forced) return official(why);
+      state.m3.rangePendingSkips = (state.m3.rangePendingSkips ?? 0) + 1;
+      state.m3.lastRangeSkip = { at: new Date().toISOString(), sid, why };
+      return {
+        result: null, source: 'none', skipWhy: why, officialWhy: why,
+        retainBudget: null, retainSource,
+        anchorFailReason: useAnchor ? null : (anchorFailReason ?? null),
+        tier: tierInfo.tier, walkBacks: 0,
+      };
+    };
     const api = await awaitRange();
-    if (!api) return official('no-range-module');
+    if (!api) {
+      /* R71（F-14 二道防线）：直接调用 compactWithOwnRange 的入口（测试 / idle）同样不能在低占用下
+       * 用官方 overflow 通道清场（R5 实测该 trigger retainTokens=0，1117 节点→4）。理由同上。 */
+      if (!forced) {
+        state.m3.rangePendingSkips = (state.m3.rangePendingSkips ?? 0) + 1;
+        return {
+          result: null, source: 'none', skipWhy: 'range-module-pending', officialWhy: 'no-range-module',
+          retainBudget: null, retainSource,
+          anchorFailReason: useAnchor ? null : (anchorFailReason ?? null),
+          tier: tierInfo.tier, walkBacks: 0,
+        };
+      }
+      return official('no-range-module');
+    }
     /* R16：档位 → 保留预算。resolveTier 内含夹取（下限 40k、上限窗口 50%）与未知档位回落；
      * 调用方负责从会话档位偏好里解析 tierName（强制线/idle/工具触发三路同源）。 */
     /* R52：`tierInfo` 已提到 `official` 之前（先给安全默认）⇒ 这里是**覆盖**而不是声明。 */
@@ -474,7 +504,7 @@ export function createM3Compaction(deps) {
           tier: tierInfo.tier,
         };
       }
-      return official(sel.why);
+      return guardOfficial(sel.why);
     }
     let end = sel.end;
     let endIdx = sel.endIdx;
@@ -509,14 +539,14 @@ export function createM3Compaction(deps) {
         /* 末端不合法 ⇒ 回退一个 surface 节点重试（零副作用、零 LLM 成本，见文件头）。 */
         if (api.isEndBoundaryError(e)) {
           const prev = api.prevEnd(agent.session?.surface?.nodes, sel.firstIdx, endIdx);
-          if (!prev || walkBacks + 1 > api.MAX_WALK_BACK) return official('boundary-exhausted');
+          if (!prev || walkBacks + 1 > api.MAX_WALK_BACK) return guardOfficial('boundary-exhausted');
           walkBacks += 1;
           end = prev.end;
           endIdx = prev.endIdx;
           continue;
         }
         /* 起点不合法 / 找不到 seq / 无 open turn 等：重试无意义 ⇒ 官方兜底。 */
-        if (api.isValidationError(e)) return official('invalid-boundary');
+        if (api.isValidationError(e)) return guardOfficial('invalid-boundary');
         throw e;
       }
     }
@@ -620,6 +650,28 @@ export function createM3Compaction(deps) {
         });
         log('warn', `M3.5 pre-step 先压：解析不到作用域 compaction，跳过（意图保留待下次）`);
         return;
+      }
+      /* ═══ R71（F-14 调查结论；真机数字见 milestones R5 一节）═══
+       * 上一段确认了「有 compaction 服务」，但还有一类**不能安全执行**的情形：
+       * `compact-range.mjs` 未就绪（热换/首载的瞬时窗口）⇒ compactWithOwnRange 会回落
+       * `official('no-range-module')` = 官方 compactIfNeeded(agent, 'context-overflow')，而该 trigger 的
+       * retainTokens = 0：R5 真机实测在**仅 53% 占用**时把 surface 从 367,794 砍到 8,603
+       * （nodeCount 1117 → 4，-97.7%）。这条路径的典型场景恰恰是「低占用 + 模型主动请求」——
+       * 本来**完全可以不压**。故：未越强制线且模块未就绪 ⇒ 不压、留 not-executed 回执、
+       * **不消费意图**（下一步模块就绪后自然重试，TTL 兜底）；已越强制线 ⇒ 仍走官方（安全网：
+       * 宁可压，也不能撞窗口被引擎无记录地压）。 */
+      if (ratio < effCritical) {
+        let rangeReady = true;
+        try { rangeReady = !!(await awaitRange()); } catch { rangeReady = false; }
+        if (!rangeReady) {
+          state.m3.rangePendingSkips = (state.m3.rangePendingSkips ?? 0) + 1;
+          setCompactVerify(sid, {
+            at: new Date().toISOString(), sessionId: sid, state: 'not-executed',
+            why: 'range-module-pending', trigger: wanted ? 'context-overflow' : 'pressure', read: false,
+          });
+          log('warn', 'M3.5 pre-step 先压：自选范围模块未就绪且未越强制线 ⇒ 本轮不压（意图保留，下一步重试）');
+          return;
+        }
       }
       if (wanted) tool.takeIntent(sid); // F5：确能执行才消费
       state.m3.preStepActs += 1;
