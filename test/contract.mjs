@@ -1985,7 +1985,11 @@ ok('走官方 ctx.tools.register 注册',
   /tools\.register\(defineTool\(toolSpec\(\)\)\)/.test(effort) && /svc\('tools'\)/.test(effort),
   '未用 tools.register ⇒ 工具不生效');
 ok('defineTool 走候选链加载（bare→env→resourcesPath→硬编码）',
-  /async function loadDefineTool\(\)/.test(hostOrCore) && /dshToolsCandidates/.test(hostOrCore),
+  /* R76（S3）：两条候选链合并为参数化 loadFromOfficial（原先逐字同构各 ~50 行）——
+   * 断言改为「走同一加载器 + bare import 仍是字面量（R48 白名单扫描依赖它）」。 */
+  /const loadDefineTool = \(\) => loadFromOfficial\(\{/.test(hostOrCore)
+  && /pkgImport: async \(\) => await import\('@deepseek-ai\/dsh-tools'\)/.test(hostOrCore) // await 必须保留：R48 扫描器按 `await import(` 匹配
+  && /function candidatesOf\(\{ envKey, rel \}\)/.test(hostOrCore),
   '未走候选链 ⇒ 第三方目录下 bare import 必失败（本项目已有教训）');
 ok('effortEnabled 关闭时不注册工具（完全不介入）——R18 起还必须**撤回**已注册的',
   /if \(M3\.effortEnabled === true\) effortReady\.then\(\(api\) => api\?\.ensure\(\)\)/.test(host) &&
@@ -5086,6 +5090,42 @@ ok('R75（S4）：client 只剩**一份** unwrapEnv，面板复用模块级实�
   (client.match(/const unwrapEnv = /g) ?? []).length === 1
   && /const env = unwrapEnv\(raw\);/.test(client),
   '两份解包失败形态不一致（null vs {ok:false}）⇒ 易只改一处');
+/* ═══ R76：S3 候选链合并 / C12 非法配置留痕（保守变体）/ E9 关键词单源 ═══ */
+{
+  const core76 = readFileSync(join(PLUGIN, 'core.mjs'), 'utf8');
+  ok('R76（S3）：两条官方包候选链合并为一个参数化加载器（行为逐字不变）',
+    /async function loadFromOfficial\(\{ pkgImport, exportName, envKey, rel \}\) \{/.test(core76)
+    && /function candidatesOf\(\{ envKey, rel \}\) \{/.test(core76)
+    && /const loadCreateUserMessage = \(\) => loadFromOfficial\(\{/.test(core76)
+    && /const loadDefineTool = \(\) => loadFromOfficial\(\{/.test(core76)
+    && !/async function loadCreateUserMessage/.test(core76)
+    && !/function dshToolsCandidates/.test(core76),
+    '两段 ~50 行逐字同构仍各写一份 ⇒ 改一处漏一处（且 R48 白名单扫描依赖字面量 import，合并时必须保留 await import(...)）');
+  ok('R76（S3 反向）：合并后仍保留**字面量** await import（R48 依赖扫描的输入）',
+    /pkgImport: async \(\) => await import\('@deepseek-ai\/dsh-llm'\)/.test(core76)
+    && /pkgImport: async \(\) => await import\('@deepseek-ai\/dsh-tools'\)/.test(core76),
+    '改成变量 import ⇒ R48 的依赖白名单扫描变成空集（本轮就踩了一次，测试当场红）');
+
+  ok('R76（C12 保守变体）：非法配置值被拒时**留痕**（不改校验/写入行为）',
+    /const reject = \(field, why\) => \{/.test(core76)
+    && /state\.cfgRejected = \{ at: new Date\(\)\.toISOString\(\), field, why, value:/.test(core76)
+    /* 必须**逐分支**断言守卫条件本身：只数 `reject(` 出现次数时，把某个 `else if (...)` 改成
+     * `else if (false)` 仍能通过（变异实测逃逸一次）。 */
+    && /else if \(raw\[k\] !== undefined && raw\[k\] !== null\) reject\(k, '必须是 \(0, 1\]/.test(core76)
+    && /else if \(raw\[k\] !== undefined && raw\[k\] !== null\) reject\(k, '必须是 ≥0/.test(core76)
+    && /reject\('retainRatios'/.test(core76) && /reject\('engineCapMargin'/.test(core76)
+    && /reject\(k, '必须是字符串且 ≤8000 字符'\)/.test(core76),
+    `实际 reject( 调用 ${(core76.match(/reject\(/g) ?? []).length} 处 —— schema 无范围约束、面板有硬限、host 有守卫，三端不一致时用户看不到「存的值没生效」`);
+}
+{
+  const eff76 = readFileSync(join(PLUGIN, 'effort.mjs'), 'utf8');
+  ok('R76（E9）：换档关键词单一来源（数组 → 派生正则）',
+    /const WANT_DEEP_WORDS = \[/.test(eff76) && /const WANT_FAST_WORDS = \[/.test(eff76)
+    && /const wordsRe = \(words\) => new RegExp/.test(eff76)
+    && /const WANT_DEEP_RE = wordsRe\(WANT_DEEP_WORDS\);/.test(eff76)
+    && !/const WANT_DEEP_RE = \/\(排查/.test(eff76),
+    '正则字面量与文案各写一份 ⇒ 改词只改一处');
+}
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));
 process.exit(failures ? 1 : 0);

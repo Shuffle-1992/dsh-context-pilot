@@ -4276,3 +4276,20 @@ S4 改名 ⇒ **全部 CAUGHT**。
 
 **R72 清单剩余**：C8（slim 快照测量取舍，需产品判断）、C12（schema 范围会改变 set() 行为，需拍板）、
 S3（启动期候选链合并，回归面大）、E4（effort 取证字段迁移会改报告字段名）、E9（纯可读性，不建议动）。
+### R76 收尾三条：候选链合并 / 非法配置留痕 / 关键词单源（2026-10-24，用户「继续」）
+
+| # | 修法 | 性质 |
+|---|---|---|
+| **S3** | core 的两条官方包候选链（`createUserMessage` / `defineTool`）**逐字同构各 ~50 行** ⇒ 合并为参数化的 `candidatesOf({envKey, rel})` + `loadFromOfficial({pkgImport, exportName, envKey, rel})`，两个 loader 各 4 行。**行为逐字不变**（尝试顺序、probe 形状、via 命名、失败语义全部保留）。⚠️ 合并时踩到一个坑：把 bare import 改成变量后，R48 的「官方运行时依赖 ⊆ 白名单」扫描（按 `await import('@deepseek-ai/…')` 字面量匹配）变成空集 ⇒ **测试当场红**；现保留为 `pkgImport: async () => await import('...')` 字面量闭包 | simplify（去 ~40 行重复） |
+| **C12（保守变体）** | schema 的数值字段没有范围约束（UI 有硬限、host 有守卫、schema 没有 ⇒ 三端口径不一）。**不改校验/写入行为**（加 `.min/.max` 会让非法 `set()` 被拒，需单独拍板），只加**留痕**：`state.cfgRejected = {at, field, why, value}` + `cfgRejects` 计数，每个 `field|why` 只 warn 一次。用户「存了但没生效」从此可查 | 留痕（可观测） |
+| **E9** | 换档关键词原先只以**正则字面量**存在，教学文案另用人话分两类 ⇒ 改词容易只改一处。改为 `WANT_DEEP_WORDS` / `WANT_FAST_WORDS` 数组为单一来源、`wordsRe()` 派生正则；文案仍用「命中的那个词」不复制词表 | simplify（单一事实来源） |
+
+**守卫**：contract 新增 4 条（S3 合并 + **反向**「仍保留字面量 await import」防 R48 扫描失效；C12 留痕
+与 5 处调用；E9 单一来源）。**变异**：E9 退回正则字面量 / C12 关掉比率留痕 / C12 删掉助手 ⇒ **全部 CAUGHT**
+
+⚠️ 本轮修断言时自己踩过一次坑：C12 的计数写成 `reject('`，而前两处实参是变量 ⇒ 断言恒红（虚假通过的反面：恒定失败也会掩盖变异结论），已改为数 `reject(` 并复验。
+
+**测试**：947 断言全绿（contract 757 / static 84 / report 54 / boot 22 / client-render 30）。
+
+**R72 清单只剩 2 条**，都需要产品判断：**C8**（slim 快照测量：省 RPC 会让 slim 条目失去 top2 读数）、
+**E4**（effort 取证字段迁移到 `state.effort`：会改报告字段名，影响面板与存量断言）。

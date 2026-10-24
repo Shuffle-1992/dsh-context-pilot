@@ -251,101 +251,65 @@ export function contextLedgerOf(pressure, measure, breakdown) {
   };
 }
 
-/* ─────────── 官方 createUserMessage 解析（候选链：bare → env → resourcesPath → 硬编码，镜像 zcode-dispatch ZB-01） ─────────── */
-
-function dshLlmCandidates() {
+/* ─────────── 官方包解析（候选链：bare → env → resourcesPath → 硬编码） ───────────
+ * R76（审查 S3）：`createUserMessage` 与 `defineTool` 两条候选链原先**结构逐字同构**（各 ~50 行），
+ * 改一处漏一处的漂移面。现合并为一个参数化加载器；**行为逐字不变**：
+ *   尝试顺序（bare → env → resourcesPath/app.asar → .unpacked → abs D: → abs unpacked）
+ *   每个候选先 import 后 require；probe 的形状与 via 命名（`<source>|import|require`、`bare|import`）不变。
+ * 失败语义也不变：全失败 ⇒ 返回 `{ <exportName>: null, via: null, probe }`，调用方据此降级（绝不抛）。 */
+function candidatesOf({ envKey, rel }) {
   const out = [];
-  const env = process.env.DSH_CONTEXT_PILOT_DSH_LLM;
+  const env = process.env[envKey];
   if (typeof env === 'string' && env) out.push({ source: 'env', path: env });
   const res = typeof process.resourcesPath === 'string' ? process.resourcesPath : '';
   if (res) {
-    out.push({ source: 'resourcesPath/app.asar', path: join(res, 'app.asar', ...DSH_LLM_REL) });
-    out.push({ source: 'resourcesPath/app.asar.unpacked', path: join(res, 'app.asar.unpacked', ...DSH_LLM_REL) });
+    out.push({ source: 'resourcesPath/app.asar', path: join(res, 'app.asar', ...rel) });
+    out.push({ source: 'resourcesPath/app.asar.unpacked', path: join(res, 'app.asar.unpacked', ...rel) });
   }
-  out.push({ source: 'abs:D:/DeepSeek/resources/app.asar', path: join('D:/DeepSeek/resources/app.asar', ...DSH_LLM_REL) });
-  out.push({ source: 'abs:D:/DeepSeek/resources/app.asar.unpacked', path: join('D:/DeepSeek/resources/app.asar.unpacked', ...DSH_LLM_REL) });
+  out.push({ source: 'abs:D:/DeepSeek/resources/app.asar', path: join('D:/DeepSeek/resources/app.asar', ...rel) });
+  out.push({ source: 'abs:D:/DeepSeek/resources/app.asar.unpacked', path: join('D:/DeepSeek/resources/app.asar.unpacked', ...rel) });
   return out;
 }
 
-async function loadCreateUserMessage() {
+async function loadFromOfficial({ pkgImport, exportName, envKey, rel }) {
   const probe = [];
-  const accept = (mod) => (mod && typeof mod.createUserMessage === 'function' ? mod.createUserMessage : null);
+  const accept = (mod) => (mod && typeof mod[exportName] === 'function' ? mod[exportName] : null);
   try {
-    const fn = accept(await import('@deepseek-ai/dsh-llm'));
-    if (fn) return { createUserMessage: fn, via: 'bare|import', probe };
-    probe.push({ source: 'bare', ok: false, error: 'no createUserMessage export' });
+    const fn = accept(await pkgImport()); // R76：**字面量** import 由调用方提供 ⇒ R48 的依赖白名单扫描仍能看见
+    if (fn) return { [exportName]: fn, via: 'bare|import', probe };
+    probe.push({ source: 'bare', ok: false, error: `no ${exportName} export` });
   } catch (e) {
     probe.push({ source: 'bare', ok: false, error: msg(e) });
   }
   const require = createRequire(import.meta.url);
-  for (const cand of dshLlmCandidates()) {
-    try {
-      const fn = accept(await import(pathToFileURL(cand.path).href));
-      if (fn) return { createUserMessage: fn, via: `${cand.source}|import`, probe };
-      probe.push({ source: cand.source, ok: false, path: cand.path, error: 'no createUserMessage export' });
-    } catch (e) {
-      probe.push({ source: cand.source, ok: false, path: cand.path, error: msg(e) });
-    }
-    try {
-      const fn = accept(require(cand.path));
-      if (fn) return { createUserMessage: fn, via: `${cand.source}|require`, probe };
-      probe.push({ source: cand.source, ok: false, path: cand.path, error: 'no createUserMessage export' });
-    } catch (e) {
-      probe.push({ source: cand.source, ok: false, path: cand.path, error: msg(e) });
+  for (const cand of candidatesOf({ envKey, rel })) {
+    for (const via of ['import', 'require']) {
+      try {
+        const mod = via === 'import' ? await import(pathToFileURL(cand.path).href) : require(cand.path);
+        const fn = accept(mod);
+        if (fn) return { [exportName]: fn, via: `${cand.source}|${via}`, probe };
+        probe.push({ source: cand.source, ok: false, path: cand.path, error: `no ${exportName} export` });
+      } catch (e) {
+        probe.push({ source: cand.source, ok: false, path: cand.path, error: msg(e) });
+      }
     }
   }
-  return { createUserMessage: null, via: null, probe };
+  return { [exportName]: null, via: null, probe };
 }
 
-/* ─────────── R2：官方 defineTool 解析（同款候选链） ───────────
- * 依据：官方工具包 @deepseek-ai/dsh-tool-ask-user 的范式
- *   import { defineTool } from "@deepseek-ai/dsh-tools";
- *   ctx.tools.register(defineTool({ name, description, parameters, output, execute }));
- * 与 createUserMessage 一样走「bare → env → resourcesPath → 硬编码」候选链，
- * 全失败 ⇒ 不注册工具（换档退化为不可用，但主流程绝不受影响）。 */
-function dshToolsCandidates() {
-  const out = [];
-  const env = process.env.DSH_CONTEXT_PILOT_DSH_TOOLS;
-  if (typeof env === 'string' && env) out.push({ source: 'env', path: env });
-  const res = typeof process.resourcesPath === 'string' ? process.resourcesPath : '';
-  if (res) {
-    out.push({ source: 'resourcesPath/app.asar', path: join(res, 'app.asar', ...DSH_TOOLS_REL) });
-    out.push({ source: 'resourcesPath/app.asar.unpacked', path: join(res, 'app.asar.unpacked', ...DSH_TOOLS_REL) });
-  }
-  out.push({ source: 'abs:D:/DeepSeek/resources/app.asar', path: join('D:/DeepSeek/resources/app.asar', ...DSH_TOOLS_REL) });
-  out.push({ source: 'abs:D:/DeepSeek/resources/app.asar.unpacked', path: join('D:/DeepSeek/resources/app.asar.unpacked', ...DSH_TOOLS_REL) });
-  return out;
-}
+const loadCreateUserMessage = () => loadFromOfficial({
+  /* ⚠️ 必须写成**字面量** import：R48 的「官方运行时依赖 ⊆ 白名单」扫描按字面量匹配。 */
+  pkgImport: async () => await import('@deepseek-ai/dsh-llm'), exportName: 'createUserMessage',
+  envKey: 'DSH_CONTEXT_PILOT_DSH_LLM', rel: DSH_LLM_REL,
+});
 
-async function loadDefineTool() {
-  const probe = [];
-  const accept = (mod) => (mod && typeof mod.defineTool === 'function' ? mod.defineTool : null);
-  try {
-    const fn = accept(await import('@deepseek-ai/dsh-tools'));
-    if (fn) return { defineTool: fn, via: 'bare|import', probe };
-    probe.push({ source: 'bare', ok: false, error: 'no defineTool export' });
-  } catch (e) {
-    probe.push({ source: 'bare', ok: false, error: msg(e) });
-  }
-  const require = createRequire(import.meta.url);
-  for (const cand of dshToolsCandidates()) {
-    try {
-      const fn = accept(await import(pathToFileURL(cand.path).href));
-      if (fn) return { defineTool: fn, via: `${cand.source}|import`, probe };
-      probe.push({ source: cand.source, ok: false, path: cand.path, error: 'no defineTool export' });
-    } catch (e) {
-      probe.push({ source: cand.source, ok: false, path: cand.path, error: msg(e) });
-    }
-    try {
-      const fn = accept(require(cand.path));
-      if (fn) return { defineTool: fn, via: `${cand.source}|require`, probe };
-      probe.push({ source: cand.source, ok: false, path: cand.path, error: 'no defineTool export' });
-    } catch (e) {
-      probe.push({ source: cand.source, ok: false, path: cand.path, error: msg(e) });
-    }
-  }
-  return { defineTool: null, via: null, probe };
-}
+/* R2：官方 defineTool 解析走同一条链（依据 @deepseek-ai/dsh-tool-ask-user 的范式）。
+ * descriptor 由插件提供（name/description/parameters/output/execute）；全失败 ⇒ 不注册工具
+ * （换档退化为不可用，但主流程绝不受影响）。 */
+const loadDefineTool = () => loadFromOfficial({
+  pkgImport: async () => await import('@deepseek-ai/dsh-tools'), exportName: 'defineTool',
+  envKey: 'DSH_CONTEXT_PILOT_DSH_TOOLS', rel: DSH_TOOLS_REL,
+});
 
 export function createCore({ ctx, config, pluginDir, reportPath }) {
   const log = (level, text) => {
@@ -396,6 +360,11 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
    *  所以 mergeConfig 在每个决策点现调（effEnabled 入口统一调），活引用现读即最新值。 ---- */
   const M3 = { ...M3_DEFAULTS };
   let cfgErrLogged = false; // C1①：config 读取异常只报一次（防刷屏）
+  /* R76（审查 C12 保守变体）：非法配置值原先被**静默忽略**（保持上一次有效值）。
+   * 这不让用户看见「你存的值没生效」（schema 无范围约束、面板有硬限、host 有守卫 ⇒ 三端口径不一）。
+   * 这里只加**留痕**，不改任何校验/写入行为（加 .min/.max 会改变 set() 语义，需单独拍板）：
+   *   state.cfgRejected = {at, field, value, why} + state.cfgRejects 计数；每个 field|why 只 warn 一次。 */
+  const cfgRejectSeen = new Set();
   const mergeConfig = () => {
     try {
       const live = (v) => (v !== null && typeof v === 'object' && typeof v.get === 'function' ? v.get() : v);
@@ -406,6 +375,18 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
       for (const k of ['enabled', 'effortEnabled', 'criticalRatio', 'markerMinRatio', 'sweepMinIntervalMs', 'effortCooldownMs', 'retainRatioLight', 'retainRatioStandard', 'retainRatioHeavy', 'engineCapMargin', 'tplBrief', 'tplCard', 'tplEffBrief']) {
         raw[k] = live(config[k]);
       }
+      /* R76（C12）：被拒配置的统一留痕入口（每次 mergeConfig 现建，闭包捕获 raw）。 */
+      const reject = (field, why) => {
+        try {
+          state.cfgRejected = { at: new Date().toISOString(), field, why, value: typeof raw[field] === 'object' ? '[object]' : raw[field] };
+          state.cfgRejects = (state.cfgRejects ?? 0) + 1;
+          const seenKey = field + '|' + why;
+          if (!cfgRejectSeen.has(seenKey)) {
+            cfgRejectSeen.add(seenKey);
+            log('warn', `配置值被拒（保持上一次有效值）：${field}=${JSON.stringify(raw[field])} —— ${why}`);
+          }
+        } catch { /* 吞 */ }
+      };
       if (typeof raw.enabled === 'boolean') M3.enabled = raw.enabled;
       if (typeof raw.effortEnabled === 'boolean') M3.effortEnabled = raw.effortEnabled;
       /* F10（审查）：比率必须 **> 0**（原先是 `>= 0`）。填 0 不是「关闭」而是**瘫痪**：
@@ -413,9 +394,11 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
        * schema 无 `.min()`、面板只拦空串 ⇒ 这里必须挡住（非法值保持上一次的有效值）。 */
       for (const k of ['criticalRatio', 'markerMinRatio']) {
         if (typeof raw[k] === 'number' && Number.isFinite(raw[k]) && raw[k] > 0 && raw[k] <= 1) M3[k] = raw[k];
+        else if (raw[k] !== undefined && raw[k] !== null) reject(k, '必须是 (0, 1] 的数');
       }
       for (const k of ['sweepMinIntervalMs', 'effortCooldownMs']) {
         if (typeof raw[k] === 'number' && Number.isFinite(raw[k]) && raw[k] >= 0) M3[k] = raw[k];
+        else if (raw[k] !== undefined && raw[k] !== null) reject(k, '必须是 ≥0 的数（毫秒）');
       }
       /* R55①：三档比例 —— 全组校验，**任一项非法就整组不动**（保持上一次的有效值）。
        * 顺序约束 light < standard < heavy 必须成立，否则「深压/标准/浅压」的语义就反了。 */
@@ -423,16 +406,21 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
       if (trio.every((k) => typeof raw[k] === 'number' && Number.isFinite(raw[k]) && raw[k] > 0 && raw[k] < 1)
         && raw.retainRatioLight < raw.retainRatioStandard && raw.retainRatioStandard < raw.retainRatioHeavy) {
         for (const k of trio) M3[k] = raw[k];
+      } else if (trio.some((k) => raw[k] !== undefined && raw[k] !== null)) {
+        reject('retainRatios', '三档必须都在 (0,1) 且 light < standard < heavy（整组生效）');
       }
       /* R55②：引擎阈值余量 —— 0 ≤ v < 0.5（≥0.5 会把生效线压到一半以下，等于取消强制压缩）。 */
       if (typeof raw.engineCapMargin === 'number' && Number.isFinite(raw.engineCapMargin)
         && raw.engineCapMargin >= 0 && raw.engineCapMargin < 0.5) {
         M3.engineCapMargin = raw.engineCapMargin;
+      } else if (raw.engineCapMargin !== undefined && raw.engineCapMargin !== null) {
+        reject('engineCapMargin', '必须是 [0, 0.5) 的数（≥0.5 = 取消强制压缩）');
       }
       /* R55③ / R60：文案模板 —— 只收字符串，**上限 8000 字符**（模板每轮注入，无界会把上下文吃光；
        * 超限视为非法 ⇒ 保持现值）。占位符校验在消费端（compact-tool）：缺 `{tool}` ⇒ 回退内置。 */
       for (const k of ['tplBrief', 'tplCard', 'tplEffBrief']) {
         if (typeof raw[k] === 'string' && raw[k].length <= 8000) M3[k] = raw[k];
+        else if (raw[k] !== undefined && raw[k] !== null) reject(k, '必须是字符串且 ≤8000 字符');
       }
     } catch (e) {
       /* C1①（审查）：config 读取异常保持现值——留一句痕（仅一次），防「面板改值不生效」无从排查 */

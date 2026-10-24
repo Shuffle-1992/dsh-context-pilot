@@ -950,8 +950,13 @@ export function createEffort(deps) {
    * 冷却中一律不提示（避免「让你切、但工具必然拒绝」的无效往返）。 */
 
   /** 用户意图关键词（保守：宁可漏报，不可误报成噪声）。 */
-  const WANT_DEEP_RE = /(排查|根因|为什么|彻底|仔细|严谨|评估|权衡|架构|设计|深入|全面|复杂|难点)/;
-  const WANT_FAST_RE = /(快点|快些|尽快|简单|只要|仅需|直接改|格式化|改名|重命名|机械|省点|别啰嗦|别废话)/;
+  /* R76（审查 E9）：关键词原先**只**以正则字面量存在，教学文案另用人话分两类描述 ⇒ 改词容易只改一处。
+   * 现统一为数组（单一事实来源）→ 派生正则；文案仍用"命中的那个词"，不复制词表。 */
+  const WANT_DEEP_WORDS = ['排查', '根因', '为什么', '彻底', '仔细', '严谨', '评估', '权衡', '架构', '设计', '深入', '全面', '复杂', '难点'];
+  const WANT_FAST_WORDS = ['快点', '快些', '尽快', '简单', '只要', '仅需', '直接改', '格式化', '改名', '重命名', '机械', '省点', '别啰嗦', '别废话'];
+  const wordsRe = (words) => new RegExp('(' + words.join('|') + ')');
+  const WANT_DEEP_RE = wordsRe(WANT_DEEP_WORDS);
+  const WANT_FAST_RE = wordsRe(WANT_FAST_WORDS);
   const NUDGE_MIN_GAP = 4;    // 任意两次提醒的最小间隔（轮）
   const NUDGE_IDLE_TURNS = 8; // 「从未换档」提醒的起始轮次
   const NUDGE_IDLE_GAP = 10;  // 「从未换档」提醒的最小间隔（轮）
