@@ -5126,6 +5126,23 @@ ok('R75（S4）：client 只剩**一份** unwrapEnv，面板复用模块级实�
     && !/const WANT_DEEP_RE = \/\(排查/.test(eff76),
     '正则字面量与文案各写一份 ⇒ 改词只改一处');
 }
+/* ═══ R77：C8 先量化（只加计数）/ E4 评估后不改（只加注释）═══ */
+{
+  const m1_77 = readFileSync(join(PLUGIN, 'm1.snapshot.mjs'), 'utf8');
+  ok('R77（C8 观测）：快照/测量/投影三个计数写进 diag，且 slim 档也带（高频档才是成本所在）',
+    /state\.snapBuilds = \(state\.snapBuilds \?\? 0\) \+ 1;/.test(m1_77)
+    && /state\.measureCalls = \(state\.measureCalls \?\? 0\) \+ 1;/.test(m1_77)
+    && /state\.stateOfCalls = \(state\.stateOfCalls \?\? 0\) \+ 1;/.test(m1_77)
+    && /snapBuilds: state\.snapBuilds \?\? 0,/.test(m1_77)
+    && /measureCalls: state\.measureCalls \?\? 0,/.test(m1_77)
+    && /diag: snap\.diag \?\? null,/.test(m1_77),
+    '没有计数 ⇒ 只能继续凭猜测改测量；只有 FULL 档带 diag ⇒ 看不到高频档的真实量级');
+  const core77 = readFileSync(join(PLUGIN, 'core.mjs'), 'utf8');
+  ok('R77（E4 评估）：effort 取证字段**不迁移**，注释写明属域与"不改"的理由',
+    /R77（E4 评估结论：\*\*不改\*\*）/.test(core77)
+    && /effortSwitches: 0,/.test(core77),
+    '迁移会改报告字段形状（外部取证读取者风险），收益仅命名清晰');
+}
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));
 process.exit(failures ? 1 : 0);

@@ -86,6 +86,7 @@ export function createM1Snapshot(deps) {
       totals: snap.totals,
       sessions: topSessions,
       agents: topAgents,
+      diag: snap.diag ?? null, // R77（C8）：观测计数必须也进 slim 档（高频档才是成本所在）
       sessionsError: snap.sessionsError,
       agentsError: snap.agentsError,
       m2: snap.m2, // 含 lastText/injections/skips——注入取证要留
@@ -101,6 +102,12 @@ export function createM1Snapshot(deps) {
 
   /* ---- 快照：服务在位 + Session/Agent 枚举与测量 + M2 状态 ---- */
   const buildSnapshot = (reason) => {
+    /* R77（C8 评估：**先量化再改**，结论见 milestones R77）——slim 快照只裁**载荷**（top2 读数），
+     * 枚举与测量照旧跑。是否值得改取决于「快照频率 × 会话数」，此前没有数据、只有猜测。
+     * 这里只加 3 个计数（零行为变化、每次多 3 个数字），随快照落进 diag ⇒ 报告里可直接读量级：
+     *   若实测 ≈1 次/秒 × 数十会话 ⇒ 再做「只测当前会话」的折中；若只有心跳级 ⇒ 该条划掉。 */
+    state.snapBuilds = (state.snapBuilds ?? 0) + 1;
+    state.snapLastAt = new Date().toISOString();
     const snap = {
       at: new Date().toISOString(),
       reason,
@@ -123,6 +130,13 @@ export function createM1Snapshot(deps) {
         eff: { ...M3 }, // M4：生效参数（config 覆盖后的实际值）
         liveEnabled: effEnabled(), // 总开关现值（快照时点）
         m4Probe: state.m4Probe ? { ...state.m4Probe } : null,
+      },
+      /* R77（C8）：把三个计数随快照落盘（否则只在内存里，重启即丢、无法事后量化）。 */
+      diag: {
+        snapBuilds: state.snapBuilds ?? 0,
+        measureCalls: state.measureCalls ?? 0,
+        stateOfCalls: state.stateOfCalls ?? 0,
+        snapLastAt: state.snapLastAt ?? null,
       },
       m5: {
         lastPublish: state.m5.lastPublish ? { ...state.m5.lastPublish } : null,
@@ -154,12 +168,14 @@ export function createM1Snapshot(deps) {
       };
       let mv = null;
       if (canMeasure) {
+        state.measureCalls = (state.measureCalls ?? 0) + 1; // R77（C8）：测量次数（真正的成本项）
         const m = tryOf(() => tm.measure(s));
         if (m.error) row.measureError = m.error;
         else row.measure = compactMeasure(m.value);
         mv = m.error ? null : m.value;
       }
       if (sp && typeof sp.stateOf === 'function') {
+        state.stateOfCalls = (state.stateOfCalls ?? 0) + 1; // R77（C8）：投影读取次数（与 measure 同量级）
         const p = tryOf(() => sp.stateOf(s, 'contextPressure'));
         row.pressureProjection = p.error ? { error: p.error } : p.value ?? null;
         const b = tryOf(() => sp.stateOf(s, 'contextBreakdown'));

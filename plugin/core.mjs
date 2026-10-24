@@ -550,6 +550,9 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
       /* 智能思考（effort）取证 —— R3 收敛（原先 12 个散字段 + 两处 `?? 0` 隐式初始化）。
        * `effortMarkerHits`（文本标记时代，永不自增）与 `lastEffortMarker`（实为工具路径写入）
        * 已删除：前者是死字段，后者名字误导。 */
+      /* R77（E4 评估结论：**不改**）：effort 域的取证字段历史上挂在这里（R3 收敛时未迁移）。
+       * 迁移到 `state.effort` 会改**报告字段形状**——本项目把报告当「重启取证入口」，可能被外部脚本读；
+       * 而收益只是命名清晰 ⇒ 成本/收益不划算。此处留注释声明属域，字段名以 `effort*` 前缀区分即可。 */
       effortSwitches: 0, // 真换档次数（只在档位实际变化时自增，见 effort.mjs 结论④）
       effortReasserts: 0, // 每轮重复覆盖次数（防被官方内层打回，不计入换档）
       effortSkips: {}, // 跳过原因计数：foreign|noRoute|invalid|sameValue|cooldown
