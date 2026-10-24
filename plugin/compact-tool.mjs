@@ -199,6 +199,34 @@ export function createCompactTool(deps) {
     } catch { return null; }
   }
 
+  /** R75（审查 E3）：执行**失败**后重新登记意图（最多 1 次，防失败循环）。
+   * 背景：`takeIntent` 在真正执行**之前**就消费；若执行抛错（busy/摘要失败/abort），
+   * 意图已没了 ⇒ 模型收到「未执行」后只能靠自己记得再调一次。重挂让重试变成系统行为。 */
+  const INTENT_REARM_MAX = 1;
+  /* ⚠️ 重挂计数必须**独立于意图条目**：意图会被 takeIntent 删掉，若把 retry 存在条目上，
+   * 删了之后计数归零 ⇒ 上限形同虚设（行为级测试当场抓住过一次）。 */
+  const rearmBySid = new Map();
+  function rearmIntent(sid, reason) {
+    try {
+      const key = String(sid ?? '');
+      if (!key || !enabled()) return false;
+      const used = rearmBySid.get(key) ?? 0;
+      if (used >= INTENT_REARM_MAX) {
+        state.m3.compactIntentRearmCapped = (state.m3.compactIntentRearmCapped ?? 0) + 1;
+        return false;
+      }
+      rearmBySid.set(key, used + 1);
+      if (rearmBySid.size > 64) { // 有界化（与 intent 表同量级）
+        const k0 = rearmBySid.keys().next().value;
+        if (k0 !== key) rearmBySid.delete(k0);
+      }
+      const prev = bySid.get(key);
+      bySid.set(key, { at: Date.now(), reason: reason ?? prev?.reason ?? '', retry: used + 1 });
+      state.m3.compactIntentRearmed = (state.m3.compactIntentRearmed ?? 0) + 1;
+      return true;
+    } catch { return false; }
+  }
+
   /** 消费意图（宿主决定执行时调用）。返回被消费的意图或 null。 */
   function takeIntent(sid) {
     const it = peekIntent(sid);
@@ -487,6 +515,7 @@ export function createCompactTool(deps) {
       const prev = bySid.get(sid);
       sweepExpired(); // R73（审查 E10）：登记路径原先不扫过期 ⇒ TTL 只靠「宿主每 pre-step peek」兜底
       if (action === 'compact') bySid.set(sid, { at, reason });
+      if (action === 'compact') rearmBySid.delete(sid); // R75（E3）：新意图登记 ⇒ 重挂预算重置
       state.m3.compactToolCalls = (state.m3.compactToolCalls ?? 0) + 1;
       state.m3.lastCompactTool = {
         at: new Date().toISOString(),
@@ -969,5 +998,5 @@ export function createCompactTool(deps) {
     };
   }
 
-  return { TOOL_NAME, ensure, peekIntent, takeIntent, pending, getTier, hasTier, setTier, tierState, renderBrief, renderCard, renderTemplated, diag, tierText: (t) => textOf(t), getAnchor, normAnchor, TIER_DISPLAY_FALLBACK: TIER_FALLBACK };
+  return { TOOL_NAME, ensure, peekIntent, takeIntent, rearmIntent, pending, getTier, hasTier, setTier, tierState, renderBrief, renderCard, renderTemplated, diag, tierText: (t) => textOf(t), getAnchor, normAnchor, TIER_DISPLAY_FALLBACK: TIER_FALLBACK };
 }

@@ -73,6 +73,30 @@ export function createM3Compaction(deps) {
     COMPACT_TIMEOUT_MS, SET_CAP,
   } = deps;
 
+  /* ═══ R75（审查 E1）：把「生效强制线」抽成**单一函数** ═══
+   * 原先这段逻辑内联在 preStepCompaction 里，而 m2 的教学另算一套（min(配置, 引擎阈值−余量)）
+   * ⇒ 两条线不同源：单步增量大时实际触发线更低，「约 N 轮触线」系统性偏晚（用户两次反馈过趋势不准）。
+   * 现在 m2 经宿主注入的 effectiveCriticalOf 复用同一份计算，教学与实际触发不可能再漂移。 */
+  const effectiveCriticalOf = (agent) => {
+    const cap = criticalCapOf(agent);
+    try {
+      const eth = typeof engineThreshold === 'function' ? engineThreshold(agent) : null;
+      if (!Number.isFinite(eth)) return Math.min(M3.criticalRatio, cap);
+      const sidAny = String(pick(agent?.session?.id, agent?.sessionId, agent?.id, 'unknown'));
+      const hist = state.m3.ratioHist?.[sidAny];
+      let maxStep = 0;
+      if (Array.isArray(hist)) {
+        for (let i = 1; i < hist.length; i += 1) {
+          const d = hist[i].ratio - hist[i - 1].ratio;
+          if (d > maxStep) maxStep = d;
+        }
+      }
+      const margin = Math.min(0.20, Math.max(0.05, maxStep));
+      return Math.min(M3.criticalRatio, cap, Math.max(0, eth - margin));
+    } catch { return Math.min(M3.criticalRatio, cap); }
+  };
+
+
   /**
    * B2（审查）：measure + pressure 读取**收敛为单一来源**——
    * `renderUsageText`（每轮注入的用量行）/ `preStepCompaction` / `idleSweep` 三处共用。
@@ -617,23 +641,7 @@ export function createM3Compaction(deps) {
       /* R16.18：**动态余量**——把我们的线提前到「引擎可能到线的那一步之前」。
        * 引擎在 step 边界按 engineThreshold(=窗口×80%) 判定且排在我们的 pre-step 之前，
        * 单步增量一大我们就输（真机：s14→s15 之间引擎抢先压）。margin = clamp(5pp, 20pp, 单步最大增量)。 */
-      const effCritical = (() => {
-        const cap = criticalCapOf(agent);
-        try {
-          const eth = typeof engineThreshold === 'function' ? engineThreshold(agent) : null;
-          if (!Number.isFinite(eth)) return Math.min(M3.criticalRatio, cap);
-          const hist = state.m3.ratioHist?.[sid];
-          let maxStep = 0;
-          if (Array.isArray(hist)) {
-            for (let i = 1; i < hist.length; i += 1) {
-              const d = hist[i].ratio - hist[i - 1].ratio;
-              if (d > maxStep) maxStep = d;
-            }
-          }
-          const margin = Math.min(0.20, Math.max(0.05, maxStep));
-          return Math.min(M3.criticalRatio, cap, Math.max(0, eth - margin));
-        } catch { return Math.min(M3.criticalRatio, cap); }
-      })();
+      const effCritical = effectiveCriticalOf(agent); // R75（E1）：与 m2 教学同源
       if (!wanted && ratio < effCritical) return;
       /* R49：官方压缩事务进行中（未匹配的 `compaction/start`）⇒ **本轮让路**——官方 `/compact` 或引擎
        * 正在压，此刻发起必然撞 `busy`（官方 assertCompactionInactive）。⚠️ 放在**消费意图之前**：
@@ -881,6 +889,11 @@ export function createM3Compaction(deps) {
       state.m3.preStepErrors[code] = (state.m3.preStepErrors[code] ?? 0) + 1;
       /* R15：失败同样留回执（模型要能看见「未执行 + 原因」）。R49.1：`sid` 已提到 try 之外 ⇒ 这里安全。 */
       setCompactVerify(sid, { at: new Date().toISOString(), sessionId: sid, state: 'not-executed', why: code, trigger: wanted ? 'context-overflow' : 'pressure', read: false });
+      /* R75（审查 E3）：意图早在执行前就被 takeIntent 消费 ⇒ 失败后原地**重挂一次**，
+       * 让"重试"成为系统行为（上限 1 次，见 compact-tool.rearmIntent）。 */
+      if (wanted) {
+        try { getCompactTool()?.rearmIntent?.(sid, 'execute-failed'); } catch { /* 吞 */ }
+      }
       /* ⚠️ 2026-10-08：此前**只记错误码、错误正文只进 log**——压缩全线失败（preStepOk=0）
        * 时报告里看不到原因，无法定位。现保留最近一次失败的完整信息。 */
       state.m3.lastPreStepError = {
@@ -909,7 +922,7 @@ export function createM3Compaction(deps) {
       if (!mr.ok || mr.ratio == null) return;
       const now = Date.now();
       /* C-own：safety-net 同样钳到「引擎阈值 − 5pp」之下（同 pre-step，理由见 threshold.mjs） */
-      if (mr.ratio < Math.min(M3.criticalRatio, criticalCapOf(agent))) return; // 仅越强制线才兜底
+      if (mr.ratio < effectiveCriticalOf(agent)) return; // R75（E1）：与 pre-step/教学同一份计算
       if (now - (state.m3.sweeps[sid] ?? 0) < M3.sweepMinIntervalMs) return; // 兜底受冷却限制
       if (lockSkip(sid, mr.ratio, false, 'M3 idle 扫除')) return;   // R49/R50：同 pre-step（不消耗冷却，下次还能补）
       const reason = 'safety-net';
@@ -988,5 +1001,5 @@ export function createM3Compaction(deps) {
     }
   };
 
-  return { measureRatio, compactWithOwnRange, preStepCompaction, idleSweep, setCompactVerify, takeCompactVerify, isCompactionInFlight, noteEngineCompaction, noteRetainFactor, retainFactorOf, noteCompactSettle, settleDropOf, settleDropAny, noteSessionEvent, compactionLockActive, currentRouteOf };
+  return { measureRatio, compactWithOwnRange, preStepCompaction, idleSweep, effectiveCriticalOf, setCompactVerify, takeCompactVerify, isCompactionInFlight, noteEngineCompaction, noteRetainFactor, retainFactorOf, noteCompactSettle, settleDropOf, settleDropAny, noteSessionEvent, compactionLockActive, currentRouteOf };
 }

@@ -284,6 +284,8 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
       m2Ctl = m.createM2Injection({
         state, log, msg, pick, schedule, svc, tryOf, nfmt, summarizeBreakdown, remember,
         M3, effEnabled, criticalCapOf,
+        /* R75（审查 E1）：m2 的教学线与 m3 的实际触发线必须同源 ⇒ 注入同一个计算函数。 */
+        effectiveCriticalOf: (agent) => (m3Ctl?.effectiveCriticalOf ? m3Ctl.effectiveCriticalOf(agent) : Math.min(M3.criticalRatio, criticalCapOf(agent))),
         /* measureRatio 的宿主委托在下方 M3 接线处才声明 ⇒ 箭头包装（同上打破 TDZ）。 */
         measureRatio: (session) => (m3Ctl ? m3Ctl.measureRatio(session) : { ok: false, error: 'm3-module-pending' }),
         /* R16.1：压缩自检回执按 sid 存（M3 域内）；M2 消费**本会话**的那份。 */

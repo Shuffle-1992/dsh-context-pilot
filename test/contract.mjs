@@ -1499,8 +1499,9 @@ ok('生效上限抽成单一来源 criticalCapOf（= 引擎阈值 − 余量，�
 /* R10：两条门控随编排层搬进 plugin/m3.compact.mjs ⇒ 断言改查模块；宿主只保留 getHud 下发点。 */
 for (const [label, re, src] of [
   /* R16.18：pre-step 门控改为「criticalCapOf + 动态余量」的 IIFE（仍是同一上限函数来源）。 */
-  ['pre-step 门控（m3.compact.mjs）', /const effCritical = \(\(\) => \{[\s\S]{0,900}criticalCapOf\(agent\)[\s\S]{0,900}engineThreshold\(agent\)[\s\S]{0,900}\}\)\(\);/, m3src],
-  ['idle safety-net 门控（m3.compact.mjs）', /if \(mr\.ratio < Math\.min\(M3\.criticalRatio, criticalCapOf\(agent\)\)\) return;/, m3src],
+  /* R75（E1）：pre-step 与 idle 都改走 effectiveCriticalOf（单一函数）——断言改为「函数被抽出且两处都用它」。 */
+  ['pre-step 门控（m3.compact.mjs）', /const effCritical = effectiveCriticalOf\(agent\);/, m3src],
+  ['idle safety-net 门控（m3.compact.mjs）', /if \(mr\.ratio < effectiveCriticalOf\(agent\)\) return;/, m3src],
   ['getHud 下发（m5.hud.mjs）', /criticalCap: criticalCapOf\(targetAgent\),/, m5src],
 ]) {
   ok(`强制线三处同源：${label}`, re.test(src), '该处未用 criticalCapOf ⇒ 与其余两处不一致');
@@ -1615,7 +1616,9 @@ ok('autoClamped 异步分支有 alive 守卫（写入后 + 错误分支两处）
   '守卫缺失/只补一处 ⇒ 组件已卸载仍继续写配置或 setState（越权副作用）');
 /* ═══ 教学必须教**生效值**（2026-10-08 实测：卡片写「占用达 80%」而实际 75%） ═══ */
 ok('决策卡/一次性说明拿到的是**生效**强制线（不是配置值）',
-  /const effCrit = Math\.min\(M3\.criticalRatio, criticalCapOf\(agent\)\);/.test(m2src)
+  /* R75（E1）：教学线不再自己算，改用注入的 effectiveCriticalOf（含动态余量，与 m3 实际触发同源）。 */
+  /const effCrit = effectiveCriticalOf\(agent\);/.test(m2src)
+  && /effectiveCriticalOf: (?:effectiveCriticalInjected|\(agent\) =>)/.test(m2src + host)
   && /renderPolicyCard\(r\.ratio, effCrit, r\.window, trendOf\(sid, r\.ratio, r\.window, effCrit\)\)/.test(m2src) && /renderBrief\(effCrit, r\.window\)/.test(m2src),
   '教学仍用配置值 ⇒ 教一个不会触发的数字（与门控不同源）');
 ok('两个出口都把 effCrit 落进模块参数（不是各自再读 M3.criticalRatio）',
@@ -5023,6 +5026,66 @@ ok('R73（E7）：门禁自己有超时，且汇总取**最后一处**匹配',
     !/hudLastAct: z\.string\(\)/.test(schema74),
     '描述称「host 自动写入」⇒ 用户以为能读到，实际恒空串');
 }
+/* ═══ R75：E1 界线单源 / E3 意图失败重挂 / S4 解包统一 ═══ */
+{
+  const m3ModE1 = await import(pathToFileURL(join(PLUGIN, 'm3.compact.mjs')).href);
+  const stE1 = { m3: { ratioHist: { 'sid-e1': [{ ratio: 0.3 }, { ratio: 0.45 }] } } };
+  const apiE1 = m3ModE1.createM3Compaction({
+    state: stE1, log: () => {}, msg: (e) => String(e?.message ?? e),
+    pick: (...a) => a.find((x) => x != null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    nfmt: (n) => String(n), errCodeOf: (e) => String(e?.code ?? 'err'), schedule: () => {},
+    svc: () => null, M3: { criticalRatio: 0.75 }, effEnabled: () => true,
+    criticalCapOf: () => 0.75, engineThreshold: () => 0.8,
+    resolveCompactionFor: () => ({ service: null, via: 'stub' }),
+    publishHud: () => {}, recordHudAct: () => {}, formatAct: () => '', clearBriefed: () => {},
+    awaitRange: async () => null, getCompactTool: () => null, COMPACT_TIMEOUT_MS: 1000, SET_CAP: 200,
+  });
+  const vE1 = apiE1.effectiveCriticalOf({ session: { id: 'sid-e1' }, id: 'sid-e1' });
+  ok('R75 行为级（E1）：动态余量生效 —— 单步 15pp ⇒ 生效线 = 80% − 15pp = 65%（不是静态 75%）',
+    Math.abs(vE1 - 0.65) < 1e-9, `实际 ${vE1}`);
+  const vE1b = apiE1.effectiveCriticalOf({ session: { id: 'sid-none' }, id: 'sid-none' });
+  ok('R75 行为级（E1）：无历史 ⇒ 余量取下限 5pp（80−5=75，再被 cap 夹住）',
+    Math.abs(vE1b - 0.75) < 1e-9, `实际 ${vE1b}`);
+  const m3srcE1 = readFileSync(join(PLUGIN, 'm3.compact.mjs'), 'utf8');
+  ok('R75（E1）：pre-step 与 idle 都走 effectiveCriticalOf（不再各写一套）',
+    /const effCritical = effectiveCriticalOf\(agent\);/.test(m3srcE1)
+    && /if \(mr\.ratio < effectiveCriticalOf\(agent\)\) return;/.test(m3srcE1)
+    && /effectiveCriticalOf,/.test(m3srcE1),
+    '两处各写一套 ⇒ 教学线与触发线漂移（用户两次反馈趋势不准的根源之一）');
+}
+{
+  const ctModE3 = await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href);
+  let specE3 = null;
+  const stE3 = { m3: { compactToolDiag: { calls: 0 } } };
+  const apiE3 = ctModE3.createCompactTool({
+    svc: (k) => (k === 'tools' ? { register: () => {} } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: stE3, readCfg: () => ({ enabled: true }),
+    getDefineTool: () => (sp) => { specE3 = sp; return sp; }, getRangeApi: rangeStub,
+  });
+  apiE3.ensure();
+  const agE3 = { session: { id: 'sid-e3' }, id: 'sid-e3' };
+  await specE3.execute({ action: 'compact', reason: 'e3' }, { agent: agE3 });
+  const taken = apiE3.takeIntent('sid-e3');
+  const ok1 = apiE3.rearmIntent('sid-e3', 'execute-failed');
+  const back = apiE3.peekIntent('sid-e3');
+  apiE3.takeIntent('sid-e3');
+  const ok2 = apiE3.rearmIntent('sid-e3', 'execute-failed');
+  ok('R75 行为级（E3）：执行失败后重挂一次；第二次被上限拦住（防失败循环）',
+    taken != null && ok1 === true && back != null && back.retry === 1 && ok2 === false
+    && (stE3.m3.compactIntentRearmed ?? 0) === 1 && (stE3.m3.compactIntentRearmCapped ?? 0) === 1,
+    `taken=${JSON.stringify(taken)} ok1=${ok1} back=${JSON.stringify(back)} ok2=${ok2}`);
+  const m3srcE3 = readFileSync(join(PLUGIN, 'm3.compact.mjs'), 'utf8');
+  ok('R75（E3）：m3 的 catch 里真的重挂（wanted 时）',
+    /getCompactTool\(\)\?\.rearmIntent\?\.\(sid, 'execute-failed'\)/.test(m3srcE3),
+    '不重挂 ⇒ takeIntent 已消费，模型收到「未执行」后只能靠自己记得再调');
+}
+ok('R75（S4）：client 只剩**一份** unwrapEnv，面板复用模块级实现',
+  (client.match(/const unwrapEnv = /g) ?? []).length === 1
+  && /const env = unwrapEnv\(raw\);/.test(client),
+  '两份解包失败形态不一致（null vs {ok:false}）⇒ 易只改一处');
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));
 process.exit(failures ? 1 : 0);

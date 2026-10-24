@@ -37,11 +37,28 @@ export function createM2Injection(deps) {
   const {
     state, log, msg, pick, schedule, svc, tryOf, nfmt, summarizeBreakdown, remember,
     M3, effEnabled, criticalCapOf, measureRatio,
+    /* R75（审查 E1）：m3 的**生效强制线**（含 5–20pp 动态余量）——教学必须与它同源。 */
+    effectiveCriticalOf: effectiveCriticalInjected,
     getRangeApi, getCompactToolApi, getEffortApi, getCreateUserMessage, SOURCE_KIND, takeCompactVerify,
     getLastUserText,
     /* R35：把"持续重复"上报到面板（复用 m3 已有的 HUD 出口；文本进 acts 行，用户可直接复制） */
     recordHudAct, publishHud,
   } = deps;
+
+  /* ═══ R75（审查 E1）：教学线的**单一来源** ═══
+   * 原先 m2 自己算 `min(配置, 引擎阈值 − 余量)`，而 m3 实际触发用的还多扣了 5–20pp 动态余量
+   * （`eth − clamp(5pp,20pp,单步最大增量)`）⇒ 单步增量大时**实际线更低**，卡片上的
+   * 「约 N 轮触线」系统性偏晚（用户两次反馈过趋势不准，这是同一根源的第二个面）。
+   * 依赖未接（旧宿主/测试桩）⇒ 退回静态口径：行为与 R72 之前**逐字一致**，绝不因此少注入。 */
+  const effectiveCriticalOf = (agent) => {
+    try {
+      if (typeof effectiveCriticalInjected === 'function') {
+        const v = effectiveCriticalInjected(agent);
+        if (Number.isFinite(v)) return v;
+      }
+    } catch { /* 吞：m3 未就绪 */ }
+    return Math.min(M3.criticalRatio, criticalCapOf(agent));
+  };
 
   /* ═══════════ 一次性说明的「已讲」标记（R1：压缩后必须重讲） ═══════════
    * 原实现只有 add、无 delete ⇒ 压缩把说明收进摘要后，插件认为「讲过了」永不再讲；
@@ -535,7 +552,7 @@ export function createM2Injection(deps) {
       }
       /* 强制压缩线的**生效值**（= min(配置, 引擎阈值 − 5pp)）——教学与决策卡都必须教这个数，
        * 教配置值会让模型以为 80% 才触发（实际 75%）。与 pre-step/idle 门控同源。 */
-      const effCrit = Math.min(M3.criticalRatio, criticalCapOf(agent));
+      const effCrit = effectiveCriticalOf(agent); // R75（E1）：与 m3 实际触发同一份计算
       const sid = String(pick(agent.session.id, agent.sessionId, 'unknown'));
       /* R16.14：先用**实测的每轮增量**算趋势，再渲染卡片（评审建议 2：把预测题变算术题）。
        * R27（用户口径）：卡**照旧每轮一张**——它是「每轮开头落一次决策」的提醒位；

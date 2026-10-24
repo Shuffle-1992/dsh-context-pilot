@@ -44,6 +44,14 @@ window.__ModuleLoader__.load({
 			try { if (/(session-[A-Za-z0-9-]{8,})/.test(String(location.href || ""))) return "url"; } catch { /* 忽略 */ }
 			return NS.sid ? "fetch" : "none";
 		};
+		/** R75（审查 S4）：remote 信封解包**只有一份**（原先面板内联一份、弹窗里又一份，失败形态不一致）。
+		 *  规则：带 `value` 键 = 信封（`ok ? value : {ok:false,error}`）；否则视作直连值原样返回。 */
+		const unwrapEnv = (raw) => {
+			if (raw && typeof raw === "object" && "value" in raw) {
+				return raw.ok ? raw.value : { ok: false, error: (raw.error && raw.error.message) || String(raw.error ?? "remote error") };
+			}
+			return raw;
+		};
 
 		/** 卡片 key = bundle 包名（plugins.bundle.config slot 契约）。
 		 *  ⚠️ R56f：宿主派发用的是 **profile 的 bundle 名**（可能仍是旧别名 `@local/dsh-context-pilot`），
@@ -358,7 +366,7 @@ window.__ModuleLoader__.load({
 				try {
 					if (!hudRemoteSvc || typeof hudRemoteSvc.getHud !== "function") return void 0;
 					const raw = await hudRemoteSvc.getHud(resolveSid());
-					const env = raw && typeof raw === "object" && "value" in raw ? (raw.ok ? raw.value : null) : raw;
+					const env = unwrapEnv(raw); // R75（S4）：复用模块级解包（失败时是 {ok:false}，下面各字段自然取不到）
 					const got = env && env.injected ? env.injected : null;
 					setInj(got);
 					setCfg(env && env.config ? env.config : null);
@@ -1512,12 +1520,7 @@ window.__ModuleLoader__.load({
 					/* 5s 轮询 host（wire.host.mjs getHud → state.m5.hud）；立即拉一次 */
 					/* face 代理返回 {ok,value} 信封（browser-kit client.js:2098 同款实测坑）：必须拆包，
 					 * 否则 r.hudLastAct 恒 undefined ⇒ HUD 永远空态。无信封形态（直连）原样透传。 */
-					const unwrapEnv = (raw) => {
-						if (raw && typeof raw === "object" && "value" in raw) {
-							return raw.ok ? raw.value : { ok: false, error: (raw.error && raw.error.message) || String(raw.error ?? "remote error") };
-						}
-						return raw;
-					};
+					/* R75（S4）：原地的 unwrapEnv 已提到模块级（面板与弹窗共用一份）。 */
 					let everConnected = false; // C4：首次 pull 时 row 尚未 append（isConnected=false 属正常），只在「曾连过又断开」时自停
 					let myTimerId = null;
 					let myPullFn = null;
