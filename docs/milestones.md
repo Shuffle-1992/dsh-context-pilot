@@ -4212,3 +4212,30 @@ E5 报告损坏无备份、E7 run.mjs 无 timeout、E8/E9/E10/E11 小项。
 H5 关校验 / C1 退回 `ratio:null` ⇒ **全部 CAUGHT**。
 
 **测试**：923 断言全绿（contract 733 / static 84 / report 54 / boot 22 / client-render 30）。
+### R73 P2 批次（真 GLM-5.3 报告的第二梯队，2026-10-24，用户「继续」）
+
+承接 R72 记录的 20 余条 P2，本轮落地 10 条（其余见文末）：
+
+| # | 修法 | 性质 |
+|---|---|---|
+| C4 | 换档「他人显式指定」让位判据补 `acceptFrom`（**接受时刻**的当前档）。原判据只看 `applied`，而 `applied` 只在首次 apply 成功后才写 ⇒「工具刚接受、还没 apply」的窗口里用户手改档 → 判不出"他人指定" ⇒ 插件**强写自己的档、覆盖用户选择** | 正确性（覆盖用户） |
+| C5 | `setTier` 加 `explicit` 标记：carry 路径（只带锚点、没真传 tier）也写表，但**不算申报** ⇒ `hasTier=false`、`tierState='none'`。原先 carry 会把未申报会话标成「已申报 standard」（「系统代压」提示消失），并把落盘恢复的 `restored:true` 覆盖成 `set` | 正确性（取证口径） |
+| C6 | 宿主 `verifyBySid`（m3 模块缺失时的兜底写）**无上限** ⇒ 与 m3 的 `SET_CAP` 同口径淘汰最旧键 | 有界化 |
+| E2 | 用户模板超 3000 字符原先**静默放行**（`≤3000` 只是内置文案的回归断言）⇒ 加 `state.m3.tplOversize` 留痕 + warn。**不截断**：截断可能正好截掉 `{tool}`，比多花 token 更糟 | 留痕（诚实口径） |
+| E5 | 报告文件损坏时原先「按首写覆盖」⇒ **历史整份丢失**（`writeJsonAtomic` 只防半截写）。改为先 `rename` 成 `.corrupt-<ts>` 备份、再首写重建 | 正确性（数据保护） |
+| E7 | 门禁 `test/run.mjs` 的 `execFileSync` **无 timeout**（套件挂起 ⇒ 整个 run 永挂）、汇总正则取**第一处**匹配（回显里的假串会被读走）⇒ 加 120s 超时 + 取最后一处 + 超时提示 | 基础设施 |
+| E10 | 意图表 TTL 清扫原先只在「查询」路径触发（登记路径不扫）⇒ 有界性靠「宿主每 pre-step peek」这个**前提**成立；现登记前也 `sweepExpired()` | 有界化 |
+| E11 | `effort.bySid` 淘汰按插入序 ⇒ 可能淘汰**正在活跃、且有未 apply 的 want** 的槽（= 那次换档静默失效）⇒ 淘汰时优先挑 `want == null` 的槽 | 正确性 |
+| E8 | `wire.host.mjs` 契约注释里残留已退役字段 `acts?: string[]` ⇒ 改为 `actsDetail` | 口径漂移 |
+| S2 | `compact-tool.mjs#diag()` 注释声称「宿主 buildSnapshot 会调它把意图表落进报告」——**不实**（m1.snapshot 无此调用）⇒ 如实改为「未接线，若要看到现场需真接线」 | 虚假声明 |
+
+**仍未落地（后续）**：C7 原子写降级无留痕、C8 slim 快照仍全量测量（`≤50 会话 × measure`，
+每 120s 心跳的 RPC 大头）、C11 `hudLastAct` 死字段、C12 schema 数值无范围约束（三端口径不一）、
+S3 候选链两段同构、S4 envelope 解包两份、E1 m2 教学线不含动态余量、E3 意图消费后失败不重试、
+E4 effort 取证字段挂在 `state.m3`、E9 关键词正则与教学文案各写一份。
+
+**守卫**：contract 新增 11 条（含 **3 条行为级**：carry 不算申报 / 真传 tier 才算申报 /
+模板超预算留痕且不截断）。**变异**：C5 退回 carry 也算申报 / C4 去掉 acceptFrom / E2 关掉留痕
+⇒ **全部 CAUGHT**（E2 第一版只有源码断言、被"只关条件"的变异逃逸，补行为级后抓住）。
+
+**测试**：935 断言全绿（contract 745 / static 84 / report 54 / boot 22 / client-render 30）。

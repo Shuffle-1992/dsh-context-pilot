@@ -30,7 +30,7 @@ const FACE_METHOD_TABLE = [
 
 /**
  * 创建宿主 face。
- * @param {{ onGetHud: (sid?: string) => {ok: boolean, hudLastAct?: string, gen?: string, acts?: string[], occupancyRatio?: number|null, occupancyWindow?: number|null, at?: string, error?: string} }} hooks
+ * @param {{ onGetHud: (sid?: string) => {ok: boolean, hudLastAct?: string, gen?: string, actsDetail?: {at:string,text:string}[], occupancyRatio?: number|null, occupancyWindow?: number|null, at?: string, error?: string} }} hooks
  */
 export function createRemoteFace({ onGetHud }) {
   class RemoteFace {

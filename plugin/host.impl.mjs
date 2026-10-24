@@ -356,7 +356,12 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
            * 原实现只写全局镜像 `lastCompactVerify` ⇒ 这条「未执行」回执**永远读不回来**（静默降级）。
            * M3 模块缺失时调不了 setCompactVerify ⇒ 这里按同一形状直接写 per-sid 槽，再同步全局镜像。 */
           const rec = { at: new Date().toISOString(), sessionId: sid, state: 'not-executed', why: 'm3-module-missing', read: false };
-          state.m3.verifyBySid = { ...(state.m3.verifyBySid ?? {}), [sid]: rec };
+          /* R73（审查 C6）：这里原先**无上限**，而 m3 的 setCompactVerify 有 SET_CAP —— 与全项目
+           * 「按 sid 增长的集合必须有界」的纪律不对称。同口径淘汰最旧键。 */
+          const slots = { ...(state.m3.verifyBySid ?? {}), [sid]: rec };
+          const slotKeys = Object.keys(slots);
+          if (slotKeys.length > SET_CAP) delete slots[slotKeys[0]];
+          state.m3.verifyBySid = slots;
           state.m3.lastCompactVerify = rec;
         }
       } catch { /* 吞 */ }

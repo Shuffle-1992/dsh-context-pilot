@@ -28,13 +28,19 @@ for (const suite of SUITES) {
   let out = '';
   let pass = true;
   try {
-    out = execFileSync(process.execPath, [join(DIR, suite)], { encoding: 'utf8', stdio: 'pipe' });
+    /* R73（审查 E7）：门禁自己也要有超时 —— 套件挂起时整个 run 会永挂，CI 上表现为「卡住」。
+     * 120s 远大于最慢套件（boot ≈5s）。 */
+    out = execFileSync(process.execPath, [join(DIR, suite)], { encoding: 'utf8', stdio: 'pipe', timeout: 120_000 });
   } catch (e) {
     pass = false;
     out = String(e.stdout || '') + String(e.stderr || '');
+    if (e?.code === 'ETIMEDOUT') console.log(`   ⏱ 套件超时（120s）：${suite}`);
   }
   // 从各自汇总行提取通过数
-  const m = /：(\d+)\/(\d+) 通过/.exec(out);
+  /* R73（审查 E7）：取**最后一处**匹配 —— 套件内部若回显过包含该串的行（例如打印断言内容），
+   * 取第一处会读到错误的数字。 */
+  const all = [...out.matchAll(/：(\d+)\/(\d+) 通过/g)];
+  const m = all.length ? all[all.length - 1] : null;
   const [got, total] = m ? [Number(m[1]), Number(m[2])] : [pass ? '?' : 0, '?'];
   results.push({ suite, pass, got, total, ms: Date.now() - t0 });
   console.log(`${pass ? '✅' : '❌'} ${suite.padEnd(16)} ${String(got).padStart(3)}/${String(total).padEnd(3)} 通过  (${Date.now() - t0}ms)`);

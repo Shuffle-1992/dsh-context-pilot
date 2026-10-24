@@ -212,11 +212,14 @@ export function createCompactTool(deps) {
   /** 登记/更新会话档位（入参已由 normTier 规范化）。R16.16：**同时落盘**（跨 toggle/重启有效）。
    * R16.17：写入前有界化（只保留最近 TIER_SID_CAP 个会话）。
    * R21：锚点随档位一起存（`anchor` 缺省即不带 ⇒ **清除**旧锚点，见 normAnchor 的语义说明）。 */
-  function setTier(sid, tier, anchor) {
+  function setTier(sid, tier, anchor, explicit) {
     const key = String(sid ?? '');
     if (!key) return;
     tierSeq += 1;
-    const next = { tier, at: Date.now(), seq: tierSeq, restored: false };
+    /* R73（审查 C5）：`explicit` 标记本次是**模型真的指定了档位**（tierGiven），还是仅"沿用当前值"
+     * 的 carry 路径。carry 也写表（为了带上锚点），但**不算申报**，否则：未登记会话会被标成
+     * 「已申报 standard」⇒「系统代压」提示消失；落盘恢复的 restored:true 也会被覆盖成 set。 */
+    const next = { tier, at: Date.now(), seq: tierSeq, restored: false, explicit: explicit === true };
     if (anchor && typeof anchor === 'object' && Object.keys(anchor).length) next.anchor = { ...anchor };
     tierBySid.set(key, next);
     const dropped = pruneTiers(tierBySid);
@@ -236,7 +239,10 @@ export function createCompactTool(deps) {
 
   /** R16.14：本会话**是否申报过**档位（未申报=强制压缩走兜底 standard，UI/记录要标「系统代压」）。 */
   function hasTier(sid) {
-    try { return tierBySid.has(String(sid ?? '')); } catch { return false; }
+    try {
+      const it = tierBySid.get(String(sid ?? ''));
+      return it != null && it.explicit !== false; // R73（C5）：carry 登记不算「申报过」
+    } catch { return false; }
   }
 
   /** R16.16：档位来源（评审实测：热换后 Map 清空 ⇒ 已声明档位静默消失，文案却称「持久」）。
@@ -245,6 +251,7 @@ export function createCompactTool(deps) {
     try {
       const it = tierBySid.get(String(sid ?? ''));
       if (!it) return 'none';
+      if (it.explicit === false) return 'none'; // R73（C5）：仅 carry 写过 ⇒ 视同从未登记
       return it.restored === true ? 'restored' : 'set';
     } catch { return 'none'; }
   }
@@ -339,6 +346,16 @@ export function createCompactTool(deps) {
     }
     let out = raw;
     for (const k of Object.keys(vars)) out = out.split(k).join(String(vars[k]));
+    /* R73（审查 E2）：`desc+brief+card ≤ 3000` 原先只是**内置文案**的回归断言，用户模板可把它推到
+     * 任意长度且静默放行（而注释口径称"硬约束"）。这里**留痕不截断**：截断可能正好截掉 {tool}，
+     * 让模型不知道调哪个工具，比多花 token 更糟。 */
+    if (out.length > 3000) {
+      try {
+        state.m3.tplOversize = { at: new Date().toISOString(), which, len: out.length };
+        state.m3.tplOversizes = (state.m3.tplOversizes ?? 0) + 1;
+      } catch { /* 吞 */ }
+      log('warn', `文案模板（${which}）超预算：${out.length} > 3000 字符（不截断，避免截掉 {tool}）`);
+    }
     return out;
   };
   /**
@@ -463,9 +480,10 @@ export function createCompactTool(deps) {
         : { tier: getTier(sid), fallback: false, via: 'carry' };
       /* R21：语义锚点（可选）。缺省 ⇒ 清除旧锚点（"忘记重申"退化为按档位 = 安全方向）。 */
       const anchorNorm = normAnchor(args?.keepFrom);
-      setTier(sid, tier, anchorNorm.anchor);
+      setTier(sid, tier, anchorNorm.anchor, tierGiven); // R73（C5）：只有真的传了 tier 才算申报
       const at = Date.now();
       const prev = bySid.get(sid);
+      sweepExpired(); // R73（审查 E10）：登记路径原先不扫过期 ⇒ TTL 只靠「宿主每 pre-step peek」兜底
       if (action === 'compact') bySid.set(sid, { at, reason });
       state.m3.compactToolCalls = (state.m3.compactToolCalls ?? 0) + 1;
       state.m3.lastCompactTool = {
@@ -933,7 +951,9 @@ export function createCompactTool(deps) {
   }
 
   /** 取证快照（宿主报告用；只读，不暴露内部 Map）。
-   *  宿主 `buildSnapshot` 会调它把**意图表**落进报告——这是「意图登记了但没被消费」的唯一现场。 */
+   *  ⚠️ R73（审查 S2）：原注释称「宿主 buildSnapshot 会调它」——**不实**，m1.snapshot 并无此调用，
+   *  意图表实际**不进报告**（只在 compactIntentMiss/计数里留间接痕迹）。此处改为如实描述；
+   *  若将来要在报告里看到「登记了但没消费」的现场，需要真的接线（见 R72 遗留 S2）。 */
   function diag() {
     return {
       tracked: bySid.size,

@@ -186,12 +186,20 @@ export function createEffort(deps) {
       const saved = savedStats[sid];
       s = {
         want: null, wantAt: 0, switchedAt: 0, applied: undefined,
+        /* R73（审查 C4）：**接受时刻**的当前档位。让位判据原先只看 `applied`，而 applied 只在
+         * 首次 apply 成功后才写 ⇒ 「工具刚接受、还没 apply」的窗口里用户手动改档 → 判不出"他人指定"
+         * ⇒ 插件会强写自己想要的档，覆盖用户的选择。 */
+        acceptFrom: null,
         lastSwitch: saved?.lastSwitch ?? null, switchCount: saved?.switchCount ?? 0,
       };
       bySid.set(sid, s);
       if (bySid.size > EFFORT_SID_CAP) { // 有界化：淘汰最旧（不淘汰刚建的这个）
-        const oldest = bySid.keys().next().value;
-        if (oldest !== sid) bySid.delete(oldest);
+        /* R73（审查 E11）：优先淘汰**没有待生效 want** 的槽——淘汰一个 want 未 apply 的槽
+         * 等于让那次换档静默失效（本次迭代按插入序淘汰，正好最容易踩到活跃会话）。 */
+        let victim = null;
+        for (const [k, v] of bySid) { if (k !== sid && v.want == null) { victim = k; break; } }
+        if (victim === null) { const k = bySid.keys().next().value; if (k !== sid) victim = k; }
+        if (victim !== null) bySid.delete(victim);
       }
     }
     return s;
@@ -367,8 +375,12 @@ export function createEffort(deps) {
     /* 尊重「他人显式指定」：当前档既不是我们上次写的、也不是我们本次想写的 ⇒ 让位
      * （router-laya carriesExplicitRoute 语义）。必须同时排除 want：本钩子每轮都跑（pending 持久），
      * 而官方内层会把 config 设为持久化 header 值 —— 只比 applied 会漏判。 */
-    if (config?.reasoningEffort !== undefined && s.applied !== undefined
-        && config.reasoningEffort !== s.applied && config.reasoningEffort !== want) {
+    /* R73（C4）：`acceptFrom` 也算"本插件所见过的基线"——接受后、apply 前的那次请求里，
+     * 若用户手动改成了别的档位（≠ acceptFrom 且 ≠ want），必须让位；只看 `applied` 会漏这个窗口。 */
+    if (config?.reasoningEffort !== undefined
+        && (s.applied !== undefined || s.acceptFrom != null)
+        && config.reasoningEffort !== s.applied && config.reasoningEffort !== s.acceptFrom
+        && config.reasoningEffort !== want) {
       dropSid(sidKey);
       bumpSkip('foreign');
       log('info', `智能思考 让位：当前请求档位 ${config.reasoningEffort} 非本插件所写（他人显式指定）`);
@@ -523,6 +535,7 @@ export function createEffort(deps) {
       const st = slot(sid);
       st.want = want;
       st.wantAt = Date.now();
+      st.acceptFrom = eff.current ?? null; // R73（C4）：记下接受时刻的当前档位（让位判据的基线之一）
       /* R15.1（用户实测反馈：「切换到 Max 时 chip 没有进入冷却状态」）：
        * **冷却锚点必须落在「接受时刻」**，而不是 apply 时刻。
        * 实测时序：工具接受（05:02:08.696）→ 插件在**下一次请求**时 apply（.719）→ 客户端投影随之变化

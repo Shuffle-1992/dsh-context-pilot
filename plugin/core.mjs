@@ -693,7 +693,17 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
       if (prev && Array.isArray(prev.history)) return { ...prev };
       log('warn', '报告基线形状异常（无 history 数组）→ 将按首写覆盖（C1③ 留痕）');
     } catch (e) {
-      if (e?.code !== 'ENOENT') log('warn', `报告基线读取失败（按首写覆盖，原内容不保留）：${msg(e)}`); // ENOENT=首写属正常
+      if (e?.code !== 'ENOENT') {
+        /* R73（审查 E5）：损坏的报告原先直接「按首写覆盖」⇒ 历史**整份丢失**（writeJsonAtomic 防了
+         * 半截写，防不了外部损坏/磁盘错误）。改成先改名备份，再走首写重建。ENOENT=首写属正常。 */
+        try {
+          const bak = `${reportPath}.corrupt-${Date.now()}`;
+          renameSync(reportPath, bak);
+          log('warn', `报告基线损坏（${msg(e)}）⇒ 已备份到 ${bak}，随后按首写重建`);
+        } catch (e2) {
+          log('warn', `报告基线读取失败（按首写覆盖，原内容不保留）：${msg(e)}；备份亦失败：${msg(e2)}`);
+        }
+      }
     }
     return null;
   };

@@ -1914,8 +1914,10 @@ ok('有换档冷却（防频繁换档反复打断前缀缓存）',
   /export const DEFAULT_COOLDOWN_MS = 30_000/.test(effort) && /since < cap/.test(effort),
   '无冷却 ⇒ 模型可每轮换档，反复使缓存失效');
 ok('尊重他人显式指定档位（让位，不覆盖）',
-  /config\.reasoningEffort !== s\.applied && config\.reasoningEffort !== want/.test(effort),
-  '未区分「自己写的档」与「他人显式指定」⇒ 与用户/subagent 选择打架或自我锁死');
+  /* R73（C4）：判据新增 `acceptFrom`（接受时刻的当前档）——补上「接受后、apply 前用户手动改档」的窗口。 */
+  /config\.reasoningEffort !== s\.applied && config\.reasoningEffort !== s\.acceptFrom/.test(effort)
+  && /config\.reasoningEffort !== want/.test(effort),
+  '未区分「自己写的档」与「他人显式指定」⇒ 与用户/subagent 选择打架；缺 acceptFrom ⇒ 接受后 apply 前的窗口会让位判不出（覆盖用户手改）');
 /* ⚠️ 必须 prepend：官方 installModelSelection 挂在**同一** agent/request 上且在内层，
  * 它 await next() 后 delete reasoningEffort 再套回持久化 header 值 ⇒ 非最外层会被剥掉。
  * 实测缺陷（2026-10-07）：applied:true 但之后每轮注入仍是旧档 ⇒ 换档实际未生效。 */
@@ -4924,6 +4926,91 @@ ok('R72（S1/H7）：宿主死委托已删，行预算注释与实测一致',
   !/compactWithOwnRange/.test(readFileSync(join(PLUGIN, 'host.impl.mjs'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, ''))
   && /314，余量仅 6 行/.test(readFileSync(join('test', 'static.mjs'), 'utf8')),
   '死委托占预算；注释写 294 会误导后来者');
+/* ═══ R73：P2 批次（真 GLM-5.3 报告的 C4/C5/C6/E2/E5/E10/E11 + E8/S2 口径）═══ */
+{
+  const eff73 = readFileSync(join(PLUGIN, 'effort.mjs'), 'utf8');
+  ok('R73（C4）：换档让位判据补上 acceptFrom（接受后、apply 前的手改窗口）',
+    /acceptFrom: null,/.test(eff73) && /st\.acceptFrom = eff\.current \?\? null;/.test(eff73)
+    && /config\.reasoningEffort !== s\.acceptFrom/.test(eff73),
+    '只看 applied ⇒ 接受后 apply 前用户手改档会被插件强写覆盖');
+  ok('R73（E11）：按插入序淘汰时跳过「还有未 apply 的 want」的槽',
+    /if \(k !== sid && v\.want == null\)/.test(eff73),
+    '淘汰活跃会话的槽 = 那次换档静默失效');
+
+  const ct73 = readFileSync(join(PLUGIN, 'compact-tool.mjs'), 'utf8');
+  ok('R73（C5）：carry 路径不算「申报过档位」（explicit 标记 + hasTier/tierState 同口径）',
+    /function setTier\(sid, tier, anchor, explicit\) \{/.test(ct73)
+    && /explicit: explicit === true/.test(ct73)
+    && /return it != null && it\.explicit !== false;/.test(ct73)
+    && /if \(it\.explicit === false\) return 'none';/.test(ct73)
+    && /setTier\(sid, tier, anchorNorm\.anchor, tierGiven\)/.test(ct73),
+    'carry 也登记 ⇒ 未申报会话被标「已申报 standard」、「系统代压」提示消失、restored 被覆盖成 set');
+  ok('R73（E2）：用户模板超 3000 字符**留痕不截断**',
+    /state\.m3\.tplOversize = \{ at: new Date\(\)\.toISOString\(\), which, len: out\.length \}/.test(ct73),
+    '预算只在内置文案的回归断言里 ⇒ 用户模板可无限膨胀且静默放行（截断又会截掉 {tool}）');
+  ok('R73（E10）：登记路径也扫过期（TTL 不只靠读侧 peek 兜底）',
+    /sweepExpired\(\); \/\/ R73/.test(ct73), '若有人优化掉宿主 peek，TTL 就只剩读侧');
+  ok('R73（S2）：diag() 注释不再声称「宿主已接线」（原注释不实）',
+    /不实/.test(ct73) && !/buildSnapshot` 会调它/.test(ct73), '虚假声明会让后人以为意图表在报告里');
+
+  const core73 = readFileSync(join(PLUGIN, 'core.mjs'), 'utf8');
+  ok('R73（E5）：报告损坏先改名备份、再按首写重建',
+    /\.corrupt-\$\{Date\.now\(\)\}/.test(core73) && /renameSync\(reportPath, bak\)/.test(core73),
+    '直接首写覆盖 ⇒ 一份坏 JSON 把历史全抹掉（writeJsonAtomic 只防半截写）');
+
+  const host73 = readFileSync(join(PLUGIN, 'host.impl.mjs'), 'utf8');
+  ok('R73（C6）：宿主 verifyBySid 与 m3 的 SET_CAP 同口径有界',
+    /const slotKeys = Object\.keys\(slots\);/.test(host73) && /slotKeys\.length > SET_CAP/.test(host73),
+    '宿主这条兜底路径无上限 ⇒ 与全项目有界化纪律不对称');
+}
+{
+  /* C5 行为级：carry（只传 action、不传 tier）不得把这会话标成「已申报」 */
+  const ctModR73 = await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href);
+  let specR73 = null;
+  const apiR73 = ctModR73.createCompactTool({
+    svc: (k) => (k === 'tools' ? { register: () => {} } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { compactToolDiag: { calls: 0 } } }, readCfg: () => ({ enabled: true }),
+    getDefineTool: () => (sp) => { specR73 = sp; return sp; },
+    getRangeApi: rangeStub,
+  });
+  apiR73.ensure();
+  const agR73 = { session: { id: 'sess-r73' }, id: 'sess-r73' };
+  const rCarry = await specR73.execute({ action: 'set-tier', reason: '沿用当前档位' }, { agent: agR73 });
+  ok('R73 行为级（C5）：只沿用的 carry 调用不把会话标成「已申报档位」',
+    rCarry?.ok === true && apiR73.hasTier('sess-r73') === false && apiR73.tierState('sess-r73') === 'none'
+    && apiR73.getTier('sess-r73') === 'standard',
+    `实际 hasTier=${apiR73.hasTier('sess-r73')} tierState=${apiR73.tierState('sess-r73')} r=${JSON.stringify(rCarry)}`);
+  const rExplicit = await specR73.execute({ action: 'set-tier', tier: 'heavy' }, { agent: agR73 });
+  ok('R73 行为级（C5）：真的传了 tier 才算申报（hasTier=true / tierState=set）',
+    rExplicit?.ok === true && apiR73.hasTier('sess-r73') === true && apiR73.tierState('sess-r73') === 'set'
+    && apiR73.getTier('sess-r73') === 'heavy',
+    `实际 hasTier=${apiR73.hasTier('sess-r73')} tierState=${apiR73.tierState('sess-r73')}`);
+}
+{
+  /* E2 行为级：用户把模板写超预算 ⇒ 必须留痕（且不截断，故长度仍是原文长度） */
+  const ctModE2 = await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href);
+  const big = '{tool}' + 'A'.repeat(3100);
+  const stE2 = { m3: { compactToolDiag: { calls: 0 } } };
+  const apiE2 = ctModE2.createCompactTool({
+    svc: (k) => (k === 'tools' ? { register: () => {} } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    M3: { tplBrief: big }, state: stE2, readCfg: () => ({ enabled: true }),
+    getDefineTool: () => (sp) => sp, getRangeApi: rangeStub,
+  });
+  apiE2.ensure();
+  const txtE2 = apiE2.renderBrief({ criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000 }) ?? '';
+  ok('R73 行为级（E2）：模板超 3000 字符 ⇒ 留痕 tplOversize 且**不截断**',
+    stE2.m3.tplOversize != null && stE2.m3.tplOversize.len === txtE2.length && txtE2.length > 3000
+    && stE2.m3.tplOversizes >= 1,
+    `实际 len=${txtE2.length} oversize=${JSON.stringify(stE2.m3.tplOversize)}`);
+}
+const run73 = readFileSync(join('test', 'run.mjs'), 'utf8');
+ok('R73（E7）：门禁自己有超时，且汇总取**最后一处**匹配',
+  /timeout: 120_000/.test(run73) && /matchAll/.test(run73) && /all\[all\.length - 1\]/.test(run73),
+  '无超时 ⇒ 套件挂起时整个 run 永挂（CI 上表现为"卡住"）；取第一处 ⇒ 读到回显里的假数字');
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));
 process.exit(failures ? 1 : 0);
