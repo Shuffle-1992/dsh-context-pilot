@@ -297,6 +297,7 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
          * （实现在 core.lastUserText：只读 surface 尾部并跳过插件自己的注入行）。 */
         getLastUserText: (agent) => lastUserText(agent?.session), recordHudAct, publishHud, // R35：m2 也要能把"决策行持续重复"上报到面板
         getCreateUserMessage,
+        extractEventText, // R78：卡片按锚点派生预算时需要它解析文本锚点
         SOURCE_KIND,
       });
       return m2Ctl;

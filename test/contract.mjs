@@ -713,7 +713,8 @@ ok('R16.13 文案：m5 为两种「非插件压缩」提供标签（不与「强
 const m3src14 = read('m3.compact.mjs'); // ⚠️ m3src 在本文件稍后声明 ⇒ 就地取，避免 TDZ
 ok('R16.14 接线：趋势数据（增量/触线轮数）由 m2 现算并注入卡片；m3 标注「系统代压」',
   /const trendOf = \(sid, ratio, win, crit\) => \{/.test(m2src)
-    && /renderPolicyCard\(r\.ratio, effCrit, r\.window, trendOf\(sid, r\.ratio, r\.window, effCrit\)\)/.test(m2src)
+    /* R78：renderPolicyCard 多接一个上下文（session/measure），用于按会话实际策略派生预算。 */
+    && /renderPolicyCard\(r\.ratio, effCrit, r\.window, trendOf\(sid, r\.ratio, r\.window, effCrit\), \{ session: agent\.session/.test(m2src)
     && /trendHistory\.set\(sid, rec\)/.test(m2src) && /TREND_SAMPLES/.test(m2src)
     && /系统代压（本会话未申报档位/.test(m3src14)
     && /getCompactTool\(\)\?\.hasTier\?\.\(sidE\)/.test(m3src14),
@@ -752,11 +753,12 @@ ok('R16.14 接线：趋势数据（增量/触线轮数）由 m2 现算并注入�
   ok('R16.15 预算：三处教学合计 ≤ 3000 字符（去重前 ≈3900）',
     total15 <= 3000, `实际合计 ${total15}（desc ${desc15.length} + brief ${brief15.length} + card ${card15.length}）`);
   /* R43（用户 2026-10-16）：「决策卡里是优先用 keepFrom 还是档位？使用时应该说清哪种模式。要求都是中文」。 */
-  const mode43 = (card15.match(/• \*\*两种模式[\s\S]*?锚点未命中自动退回档位。/) ?? [''])[0];
-  ok('R43 文本级：卡里写明「两种模式（二选一，**锚点优先**）」+ 按比例/按位置 + 锚点不折算 + 未命中退档位',
-    /两种模式（二选一，锚点优先）/.test(card15) && /①\*\*按比例\*\*/.test(card15) && /②\*\*按位置\*\*/.test(card15)
+  /* R78（调查报告 §8.3）：决策顺序收敛为**两步**（先判起点→锚点；再选档），并补上省略语义对称（§4.2）。 */
+  const mode43 = (card15.match(/• \*\*决策顺序[\s\S]*?锚点未命中自动退回档位。/) ?? [''])[0];
+  ok('R78 文本级：决策顺序两步（锚点优先）+ 省略语义对称（tier 沿用 / keepFrom 清除）',
+    /决策顺序（两步，锚点优先）/.test(card15) && /①\*\*按位置\*\*/.test(card15) && /②锁定不了才\*\*按比例\*\*/.test(card15)
     && /原样保留、不折算/.test(card15) && /锚点未命中自动退回档位/.test(card15)
-    && /表盘 ≈ 档位名 \+ 约 3%/.test(card15),
+    && /不传 .tier. = \*\*沿用\*\*已登记档位/.test(card15) && /不传 .keepFrom. = \*\*清除\*\*锚点/.test(card15),
     `实际：${mode43.slice(0, 220)}`);
   ok('R43 中文守卫：模式说明**除代码标识符外全中文**（剥掉反引号片段后不得残留拉丁字母）',
     mode43.length > 40 && !/[A-Za-z]/.test(mode43.replace(/`[^`]*`/g, '')),
@@ -767,8 +769,10 @@ ok('R16.14 接线：趋势数据（增量/触线轮数）由 m2 现算并注入�
   const cardDecl = api15.renderCard({ ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, tierName: 'heavy', tierDeclared: true }) ?? '';
   const cardUnd = api15.renderCard({ ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, tierName: 'standard', tierDeclared: false }) ?? '';
   ok('R16.15 卡给出**当前档位**（已登记 / 兜底两态可辨；R19 起用中文说法）',
-    /当前档位：浅压24%（已登记）/.test(cardDecl) && /当前档位：标准16%（兜底/.test(cardUnd)
-      && /不是档位说法/.test(cardDecl) && !/当前档位：heavy/.test(cardDecl),
+    /* R78：改为「当前策略：档位 X + 其真实预算」，并把"已登记/兜底"两态一并断言。 */
+    /当前策略：档位 浅压24%/.test(cardDecl) && /当前策略：档位 标准16%/.test(cardUnd)
+      && /（已登记）/.test(cardDecl) && /（\*\*兜底\*\*：未登记档位）/.test(cardUnd)
+      && !/当前策略：档位 heavy/.test(cardDecl),
     '决策行要求写 tier 保持 X 而 X 无处可查 ⇒ 模型只能猜（评审建议 3）');
   ok('R16.15 措辞：明确「不传 tier = 沿用已登记档位（不是重置）」',
     /沿用已登记档位/.test(desc15) && /不是重置/.test(card15),
@@ -851,7 +855,8 @@ ok('R16.14 接线：趋势数据（增量/触线轮数）由 m2 现算并注入�
     `实际 tier=${api16b.getTier('sess-16')} has=${api16b.hasTier('sess-16')} state=${api16b.tierState('sess-16')}`);
   const cardRestored = api16b.renderCard({ ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, tierName: api16b.getTier('sess-16'), tierDeclared: true, tierState: api16b.tierState('sess-16') }) ?? '';
   ok('R16.16 卡片：热换后区分「由落盘恢复」与「本次登记/从未登记」三态',
-    /当前档位：浅压24%（已登记；本次由\*\*落盘恢复\*\*/.test(cardRestored),
+    /* R78：当前策略行里夹着预算片段（≈160k token（窗口 × 16%））⇒ 用容忍窗口断言三态。 */
+    /当前策略：档位 浅压24%[\s\S]{0,80}（已登记；本次由\*\*落盘恢复\*\*/.test(cardRestored),
     '三态不可辨 ⇒ 用户/模型无法判断档位是否真的还在（评审实测点）');
   /* ③ 评审剩余三条 */
   const brief16 = api16.renderBrief({ criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000 }) ?? '';
@@ -1425,7 +1430,8 @@ ok('拿不到活值时不编**当前窗口的 token 数**（档位比例是常�
 ok('「保留多少」活值传进两个教学出口（读常量 + 按当前窗口现算，查 m2.inject.mjs）',
   /const ratio = getRangeApi\(\)\?\.RETAIN_RATIO \?\? null;/.test(m2src)
   && /Math\.floor\(w \* ratio\)/.test(m2src)
-  && /renderCard\(\{[\s\S]{0,300}retentionTeach\(win\)[\s\S]{0,300}\}/.test(m2src)
+  /* R78：卡片不再用固定 RETAIN_RATIO，改按会话策略（strategyOf）⇒ brief 仍走 retentionTeach。 */
+  && /renderCard\(\{[\s\S]{0,300}\.\.\.strat[\s\S]{0,300}\}/.test(m2src)
   && /renderBrief\(\{ criticalRatio: crit, \.\.\.retentionTeach\(win\) \}\)/.test(m2src),
   '活值没接上 ⇒ 教学与实际保留范围脱节（写死 16%/160k 会随常量与窗口漂移）');
 
@@ -1619,7 +1625,7 @@ ok('决策卡/一次性说明拿到的是**生效**强制线（不是配置值�
   /* R75（E1）：教学线不再自己算，改用注入的 effectiveCriticalOf（含动态余量，与 m3 实际触发同源）。 */
   /const effCrit = effectiveCriticalOf\(agent\);/.test(m2src)
   && /effectiveCriticalOf: (?:effectiveCriticalInjected|\(agent\) =>)/.test(m2src + host)
-  && /renderPolicyCard\(r\.ratio, effCrit, r\.window, trendOf\(sid, r\.ratio, r\.window, effCrit\)\)/.test(m2src) && /renderBrief\(effCrit, r\.window\)/.test(m2src),
+  && /renderPolicyCard\(r\.ratio, effCrit, r\.window, trendOf\(sid, r\.ratio, r\.window, effCrit\), \{ session/.test(m2src) && /renderBrief\(effCrit, r\.window\)/.test(m2src),
   '教学仍用配置值 ⇒ 教一个不会触发的数字（与门控不同源）');
 ok('两个出口都把 effCrit 落进模块参数（不是各自再读 M3.criticalRatio）',
   /* 必须数**两处**（renderPolicyCard 与 renderBrief 各一）——只匹配到一处时，
@@ -3018,8 +3024,8 @@ console.log('\n== 6.24 R19：档位说法改中文（深压8%/标准16%/浅压24
     '教学里仍以英文档位名作展示');
   const card19 = api19.renderCard({ ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000, usedTokens: 500000, deltaTokens: 50000, turnsToLine: 5, tierName: 'heavy', tierDeclared: true }) ?? '';
   ok('R19 行为级：卡片的「当前档位」与档位行都用中文说法',
-    /当前档位：浅压24%（已登记）/.test(card19) && /深压8%/.test(card19) && /标准16%/.test(card19)
-    && !/\*\*heavy\*\*/.test(card19) && !/当前档位：heavy/.test(card19),
+    /当前策略：档位 浅压24%/.test(card19) && /深压8%/.test(card19) && /标准16%/.test(card19)
+    && !/\*\*heavy\*\*/.test(card19) && !/当前策略：档位 heavy/.test(card19),
     '卡片仍是英文/旧词');
   const run19 = (args) => (spec19?.execute ? spec19.execute(args, { agent: { session: { id: 'sess-r19' } } }) : Promise.resolve(null));
   const vAlias = await run19({ tier: '浅压', action: 'set-tier' });
@@ -5142,6 +5148,62 @@ ok('R75（S4）：client 只剩**一份** unwrapEnv，面板复用模块级实�
     /R77（E4 评估结论：\*\*不改\*\*）/.test(core77)
     && /effortSwitches: 0,/.test(core77),
     '迁移会改报告字段形状（外部取证读取者风险），收益仅命名清晰');
+}
+/* ═══ R78（调查报告 §5/§8）：决策卡必须按「本会话实际策略」派生预算 + 锚点可见 + 决策顺序两步 ═══ */
+{
+  const ctMod78 = await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href);
+  const api78 = ctMod78.createCompactTool({
+    svc: (k) => (k === 'tools' ? { register: () => {} } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { compactToolDiag: { calls: 0 } } }, readCfg: () => ({ enabled: true }),
+    getDefineTool: () => (sp) => sp, getRangeApi: rangeStub,
+  });
+  api78.ensure();
+  const base78 = { ratio: 0.5, minRatio: 0.3, criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000 };
+  /* ① §5.1 已复现 bug 的回归守卫：档位预算必须用**会话档位**，不能固定 16%/160k */
+  const heavy78 = api78.renderCard({ ...base78, tierName: 'heavy', tierBudget: 240000, tierRatio: 0.24, tierState: 'set' }) ?? '';
+  ok('R78 行为级（§5.1）：卡片预算 = **会话档位的真实预算**（24% ⇒ 240k/24%，不再固定 16%/160k）',
+    /当前策略：档位 浅压24%/.test(heavy78) && /≈240k token/.test(heavy78) && /窗口 × 24%/.test(heavy78)
+    && !/≈160k token/.test(heavy78),
+    `实际：${heavy78.slice(0, 200)}`);
+  const light78 = api78.renderCard({ ...base78, tierName: 'light', tierBudget: 80000, tierRatio: 0.08, tierState: 'set' }) ?? '';
+  ok('R78 行为级（§5.1）：深压 8% ⇒ 卡片显示 80k/8%（三档各自正确）',
+    /当前策略：档位 深压8%/.test(light78) && /≈80k token/.test(light78) && /窗口 × 8%/.test(light78),
+    `实际：${light78.slice(0, 200)}`);
+  /* R78 补充：渲染自查发现**第二处不一致** —— 策略行说 240k、损失行仍按传入的 retainTokens(160k) 算。
+   * 现卡片统一以档位预算为准 ⇒ 断言"两行必须同源"，防回归。 */
+  ok('R78 行为级（§5.1 补）：策略行与损失行**同源**（都说 240k，不再一行 240k 一行 160k）',
+    /本档位保留预算 240k/.test(heavy78) && !/本档位保留预算 160k/.test(heavy78) && /≈240k token/.test(heavy78),
+    `实际：${heavy78.split('\n').filter((l) => /保留预算|当前策略/.test(l)).join(' ｜ ').slice(0, 240)}`);
+  /* ② §5.2 锚点状态可见：模式 + 具体锚点 + 预计预算 + 失败回退目标 */
+  const anchor78 = api78.renderCard({ ...base78, tierName: 'heavy', tierBudget: 240000, tierRatio: 0.24, tierState: 'set',
+    anchorLabel: '按文本「独立模块调查」定位', anchorBudget: 40000 }) ?? '';
+  ok('R78 行为级（§5.2）：锚点模式可见（模式 + 锚点描述 + 预计预算 + 回退档位）',
+    /当前策略：锚点（按位置）/.test(anchor78) && /按文本「独立模块调查」定位/.test(anchor78)
+    && /≈40k token/.test(anchor78) && /回退到\*\*浅压24%\*\*/.test(anchor78),
+    `实际：${anchor78.slice(0, 220)}`);
+  const anchorFail78 = api78.renderCard({ ...base78, tierName: 'heavy', tierBudget: 240000, tierRatio: 0.24,
+    anchorLabel: '从最近第 1 条你的消息起', anchorFail: 'text:not-found' }) ?? '';
+  ok('R78 行为级（§5.2）：锚点解析失败必须**明示**（并说明会回退档位），不能装作无事',
+    /上次解析失败（text:not-found）/.test(anchorFail78) && /锚点未命中会自动回退/.test(anchorFail78),
+    `实际：${anchorFail78.slice(0, 220)}`);
+  /* ③ §4.1 去偏向：档位描述改为中性判据（不再把浅压写成"多文件联调/长推理链"专属） */
+  ok('R78 行为级（§4.1）：档位描述改为**信息需求**判据（去掉"近端细节不再需要"这类单向措辞）',
+    !/近端细节不再需要/.test(heavy78) && /边界清晰、旧资料可从文件重读/.test(heavy78)
+    && /保留最多原始细节/.test(heavy78),
+    '文案偏向浅压 ⇒ 模型倾向"尽量别丢细节"，与报告 §4.1 指出的机制一致');
+}
+{
+  /* ④ m2 的接线：预算与锚点都从会话实际状态派生（而非固定常量） */
+  const m2_78 = readFileSync(join(PLUGIN, 'm2.inject.mjs'), 'utf8');
+  ok('R78 结构级：m2 用 resolveTier(会话档位) + getAnchor 派生卡片预算',
+    /const strategyOf = \(win, sid, measure, session\) => \{/.test(m2_78)
+    && /range\?\.resolveTier\?\.\(tierName, w\)/.test(m2_78)
+    && /tool\.getAnchor\?\.\(sid\)/.test(m2_78)
+    && /range\.resolveAnchorBudget\(\{ session, measurement: measure, want, window: w, textOf: extractEventText \}\)/.test(m2_78)
+    && /strategyOf\(win, trend\?\.sid \?\? null, actx\.measure/.test(m2_78),
+    '仍固定读 RETAIN_RATIO ⇒ 卡上「当前档位」与「现行预算」继续自相矛盾（报告 §5.1 已复现）');
 }
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));

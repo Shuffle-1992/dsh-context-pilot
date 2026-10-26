@@ -659,13 +659,17 @@ export function createCompactTool(deps) {
    * 压缩会在下一步开始前落地。教学若没写清这点，模型会退回「停下等压缩」的旧习惯。
    * ⚠️ 卡片每轮（占用达标时）都出现 ⇒ 比一次性说明更该承担「先说再调用」的提醒职责。
    */
-  function renderCardBuiltin({ ratio, minRatio, criticalRatio, retainRatio, retainTokens, usedTokens, deltaTokens, deltaSamples, turnsToLine, resetByCompaction, tierName, tierDeclared, tierState } = {}) {
+  function renderCardBuiltin({ ratio, minRatio, criticalRatio, retainRatio, retainTokens, usedTokens, deltaTokens, deltaSamples, turnsToLine, resetByCompaction, tierName, tierDeclared, tierState, tierBudget, tierRatio, anchorLabel, anchorBudget, anchorFail } = {}) {
     try {
       if (ratio == null || ratio < minRatio) return null;
       const pct = `${(ratio * 100).toFixed(0)}%`;
       const crit = `${Math.round((Number(criticalRatio) || 0.8) * 100)}%`;
-      const r = Number(retainRatio);
-      const t = Number(retainTokens);
+      /* R78：预算一律以**档位预算**为准（tierBudget 缺省才回落 retainTokens）——
+       * 否则会出现「策略行说 240k、损失行说 160k」的自相矛盾（正是调查报告 §5.1 那类问题）。 */
+      const tb0 = Number(tierBudget ?? retainTokens);
+      const tr0 = Number(tierRatio ?? retainRatio);
+      const r = Number.isFinite(tr0) && tr0 > 0 ? tr0 : Number(retainRatio);
+      const t = Number.isFinite(tb0) && tb0 > 0 ? tb0 : Number(retainTokens);
       /* R16：档位行按**当前窗口**折算三档的近似保留量；拿不到时给比例不给 token 数。
        * R19：① 展示用中文说法；② 预算按**真实窗口**折算（win = 当前档位预算 ÷ 当前档位比例），
        * 不再用 0.5×/1.5× 的倍数魔法——那只是「8/16/24 恰好成倍数」时的巧合，常量一改就错。 */
@@ -674,11 +678,14 @@ export function createCompactTool(deps) {
       const bLight = budgetOf('light');
       const bStd = budgetOf('standard');
       const bHeavy = budgetOf('heavy');
-      const tierLine = Number.isFinite(t) && t > 0
-        ? `**${textOf('light')}**=保留窗口 × ${pctOf('light')}%（当前 ≈${kfmt(bLight)} token）——近端细节不再需要/要预留大量空间时用；`
-          + `**${textOf('standard')}**=× ${pctOf('standard')}%（≈${kfmt(bStd)}）——默认，拿不准就用它；`
-          + `**${textOf('heavy')}**=× ${pctOf('heavy')}%（≈${kfmt(bHeavy)}）——接下来仍要频繁引用近端一大段（多文件联调/长推理链）时用。`
-        : `**${textOf('light')}**=窗口 × ${pctOf('light')}%；**${textOf('standard')}**=× ${pctOf('standard')}%（默认）；**${textOf('heavy')}**=× ${pctOf('heavy')}%。`;
+      /* R78（调查报告 §4.1）：三档描述改为**中性判据**、并去掉卡片里的 token 折叠数
+       * （brief 已给过数字；卡片每轮都出现，省下的是每请求成本）。
+       * 原文案把浅压写成"接下来仍要频繁引用近端一大段（多文件联调/长推理链）"——
+       * 一般开发任务很容易符合，而深压的"近端细节不再需要"很难被模型确信 ⇒ 单向偏向 24%。
+       * 现改为「按**信息需求**选，不按任务难度选」，并把"选浅压要说明保留什么"写进决策顺序行。 */
+      const tierLine = `**${textOf('light')}**（最省：边界清晰、旧资料可从文件重读）；`
+        + `**${textOf('standard')}**（默认：边界拿不准）；`
+        + `**${textOf('heavy')}**（保留最多原始细节：跨文件联调/复杂排错，证据不能过早只剩摘要）。`;
       const keep = Number.isFinite(r) && r > 0 && Number.isFinite(t) && t > 0
         ? `近端约 ${kfmt(t)} token 原样保留（窗口 × ${Math.round(r * 100)}%），更早的转摘要；未超预算则什么都不压`
         : '近端内容原样保留，更早的转摘要；未超预算则什么都不压';
@@ -707,14 +714,34 @@ export function createCompactTool(deps) {
           : '';
       /* R16.15（评审建议 3/8）：决策行里的「tier 保持 X」原先无处可查（卡只给保留 token 数）
        * ⇒ 明确渲染**当前档位名**（含是否已登记），并把「现行生效」的语义限定为保留预算。 */
+      /* ═══ R78（调查报告 §5.1：已复现的信息错误）═══
+       * 原实现把「现行生效预算」固定在默认比例（0.16），而执行侧按**会话档位** resolveTier
+       * ⇒ 同一张卡里出现「当前档位 24%」与「现行 160k/16%」并存（真实运行报告里出现过）。
+       * 现在预算由 m2 按本会话**实际策略**派生（档位预算或已登记锚点），这里只负责如实渲染：
+       *   · 锚点模式 ⇒ 模式 + 锚点描述 + 预计预算（解析不到就说"压缩时解析"，不编造）+ 回退目标
+       *   · 档位模式 ⇒ 档位 + 其**真实预算**（与 m3 执行侧同一函数 resolveTier 的结果）
+       * 同时满足 §8.1「预算与总占用分开呈现」：这里说的是**近端保留预算**，占用在上面的趋势/损失行。 */
       const cur = typeof tierName === 'string' && tierName ? tierName : null;
-      const tierNow = cur
-        ? `**当前档位：${textOf(cur)}`
-          + (tierState === 'restored' ? '（已登记；本次由**落盘恢复**——跨 toggle/重启仍有效）'
-            : tierState === 'set' ? '（已登记）'
-              : tierDeclared === true ? '（已登记）' : '（兜底，本会话从未登记）')
-          + `——目录里的「现行生效」说的是**保留 token 数**，不是档位说法。**`
+      /* R78 兼容：直连调用（测试/旧接线）只给 retainRatio/retainTokens 时，把它们当作档位预算——
+       * 这样「预算=档位预算」的语义在两种调用下都成立，不会出现"卡片没有数字"的空档。 */
+      const tb = t;
+      const tr = r;
+      const tbTxt = Number.isFinite(tb) && tb > 0
+        ? ` ≈${kfmt(tb)} token` + (Number.isFinite(tr) && tr > 0 ? `（窗口 × ${Math.round(tr * 100)}%）` : '')
         : '';
+      const tierStateTxt = tierState === 'restored' ? '（已登记；本次由**落盘恢复**）'
+        : tierState === 'set' ? '（已登记）'
+          : tierDeclared === true ? '（已登记）' : '（**兜底**：未登记档位）';
+      const tierNow = cur == null
+        ? (Number.isFinite(tb) && tb > 0 ? `**近端保留预算**${tbTxt}（不是压后总占用）。` : '')
+        : (anchorLabel
+          ? `**当前策略：锚点（按位置）**——${anchorLabel}`
+          + (Number.isFinite(Number(anchorBudget)) && Number(anchorBudget) > 0
+            ? `，预计保留 ≈${kfmt(Number(anchorBudget))} token（锚点预算不折算）`
+            : '，预算在压缩时按实际边界解析（不折算）')
+          + (anchorFail ? `；上次解析失败（${String(anchorFail).slice(0, 40)}）` : '')
+          + `。锚点未命中会自动回退到**${textOf(cur)}**${tbTxt}。`
+          : `**当前策略：档位 ${textOf(cur)}**${tbTxt}${tierStateTxt}——这是**近端保留预算**（不是压后总占用）。`);
       /* R20（用户要求「卡片对称化」）：**多留与少留两个方向都变数字**。
        * 原实现只在 used > 当前预算 时给一句「若先声明浅压24% 少丢多少」——**只量化了多留的好处**，
        * 从不说多留的代价（压后占用更高 ⇒ 更早再压一次，而每次压缩都要付摘要 LLM + 缓存重置）。
@@ -764,13 +791,14 @@ export function createCompactTool(deps) {
           + `调用后请**直接继续当前任务**——不要为了压缩而停下、不要结束回合。`,
         `• 档位（3 选 1）：${tierLine}`
           + `**只想登记档位、现在不压** ⇒ 加 \`action:'set-tier'\`。`
-          + `**不传 tier = 沿用已登记档位**（不是重置）。${overLine}`
-          + `（现行生效：${keep}。）`,
+          + `${overLine}`,
         /* R43（用户 2026-10-16）：**两种模式必须写清优先级与差别**——此前只在句尾顺带提了一句
          * `keepFrom`，既没说"锚点优先"，也没说两种口径不同（按比例 vs 按位置）。要求全中文。 */
-        `• **两种模式（二选一，锚点优先）**：①**按比例**（默认）\`tier 浅压24%\` ⇒ 表盘 ≈ 档位名 + 约 3%；`
-          + `②**按位置** \`keepFrom:{recentUser:1}\`（或 \`{text:'开头十来字'}\`）⇒ 该处起**原样保留、不折算**`
-          + `（表盘由位置定，回执给落点）。锚点未命中自动退回档位。`,
+        /* R78（调查报告 §8.3 / §4.1）：把选档决策收敛为**两步**，并纠正对 24% 的单向偏向——
+         * 原先把「按比例」列在①、「按位置」列在②，示例还写 `tier 浅压24%` ⇒ 示例偏向 + 锚点认知成本高。
+         * 现在：先问"能否锁定任务起点"（能 ⇒ 锚点），不能再选档；并要求选浅压时说明保留什么。 */
+        `• **决策顺序（两步，锚点优先）**：①**按位置**：能锁定「当前任务从哪条消息开始」⇒ 用 \`keepFrom:{recentUser:N}\` 或 \`{text:'开头十来字'}\`——该处起**原样保留、不折算**，能压掉更早的无关历史（最省无关上下文）；②锁定不了才**按比例**选档（默认），选浅压时**说明要保留什么**。锚点未命中自动退回档位。`,
+        `• **省略语义不对称**：不传 \`tier\` = **沿用**已登记档位（不是重置）；不传 \`keepFrom\` = **清除**锚点——要持续用锚点就必须每次都带。`,
         loss,
         dirLine,
         trend,

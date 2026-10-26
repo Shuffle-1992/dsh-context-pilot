@@ -39,7 +39,7 @@ export function createM2Injection(deps) {
     M3, effEnabled, criticalCapOf, measureRatio,
     /* R75（审查 E1）：m3 的**生效强制线**（含 5–20pp 动态余量）——教学必须与它同源。 */
     effectiveCriticalOf: effectiveCriticalInjected,
-    getRangeApi, getCompactToolApi, getEffortApi, getCreateUserMessage, SOURCE_KIND, takeCompactVerify,
+    getRangeApi, getCompactToolApi, getEffortApi, getCreateUserMessage, SOURCE_KIND, takeCompactVerify, extractEventText,
     getLastUserText,
     /* R35：把"持续重复"上报到面板（复用 m3 已有的 HUD 出口；文本进 acts 行，用户可直接复制） */
     recordHudAct, publishHud,
@@ -214,6 +214,7 @@ export function createM2Injection(deps) {
       used,
       window,
       ratio: window && used != null ? used / window : null,
+      measure: mr.measure ?? null, // R78：策略派生（锚点预算）需要它
     };
   };
 
@@ -237,28 +238,77 @@ export function createM2Injection(deps) {
     return { retainRatio: ratio, retainTokens: Number.isFinite(w) && w > 0 ? Math.floor(w * ratio) : null };
   };
 
+  /* ═══ R78（调查报告 §5 已复现 bug）：卡片的「现行预算」必须从**本会话实际策略**派生 ═══
+   * 原实现固定读 `RETAIN_RATIO`（0.16）⇒ 同一张卡里「当前档位 24%」与「现行 160k/16%」并存，
+   * 而执行侧走的是 resolveTier(会话档位) ⇒ 卡片在预算/损失等数字上不可信。
+   * 现在两种模式都按实际情况算：
+   *   · 档位模式 ⇒ 用 `resolveTier(tier, window)`（**与 m3 执行侧同一函数**）；
+   *   · 锚点模式 ⇒ 用 `resolveAnchorBudget(...)` 预算（含余量/下限/夹取），解析不到就明说
+   *     「压缩时按实际边界解析」——**绝不编造数字**（本项目纪律）。
+   * 失败一律退回档位口径，保证卡片永远有可信数字。 */
+  const anchorLabelOf = (want) => {
+    try {
+      if (!want || typeof want !== 'object') return null;
+      if (want.text) return `按文本「${String(want.text).slice(0, 12)}」定位`;
+      if (want.recentUser) return `从最近第 ${Number(want.recentUser)} 条你的消息起`;
+      return '你指定的位置';
+    } catch { return null; }
+  };
+  const strategyOf = (win, sid, measure, session) => {
+    const range = getRangeApi();
+    const tool = getCompactToolApi();
+    const w = Number(win);
+    const tierName = (tool && sid) ? (tool.getTier?.(sid) ?? 'standard') : 'standard';
+    let tierRatio = null;
+    let tierBudget = null;
+    try {
+      const t = range?.resolveTier?.(tierName, w);
+      if (t && Number.isFinite(t.budget) && t.budget > 0) { tierBudget = t.budget; tierRatio = Number.isFinite(t.ratio) ? t.ratio : null; }
+    } catch { /* 吞：明细在卡片里退回比例口径 */ }
+    if (tierBudget == null) {
+      const ratio = range?.RETAIN_RATIO ?? null;
+      if (Number.isFinite(ratio) && ratio > 0 && Number.isFinite(w) && w > 0) { tierRatio = ratio; tierBudget = Math.floor(w * ratio); }
+    }
+    let anchorLabel = null;
+    let anchorBudget = null;
+    let anchorFail = null;
+    try {
+      const want = (tool && sid) ? (tool.getAnchor?.(sid) ?? null) : null;
+      if (want) {
+        anchorLabel = anchorLabelOf(want) ?? '你指定的位置';
+        if (range?.resolveAnchorBudget && measure && session && typeof extractEventText === 'function') {
+          const a = range.resolveAnchorBudget({ session, measurement: measure, want, window: w, textOf: extractEventText });
+          if (a?.ok === true && Number.isFinite(a.budget) && a.budget > 0) anchorBudget = a.budget;
+          else anchorFail = a?.reason ?? 'unknown';
+        }
+      }
+    } catch (e) { anchorFail = `anchor-error:${msg(e)}`; }
+    return {
+      retainRatio: tierRatio, retainTokens: tierBudget,
+      tierName, tierBudget, tierRatio,
+      tierDeclared: tool && sid ? tool.hasTier?.(sid) : undefined,
+      tierState: tool && sid ? tool.tierState?.(sid) : undefined,
+      anchorLabel, anchorBudget, anchorFail,
+    };
+  };
+
   /** M3.5 通道2：政策卡——教会模型「何时值得压缩、如何触发」。
    *  ⚠️ 2026-10-07 用户决定：**决策卡门槛 = 标记最低占用**（`markerMinRatio`，不再独立配置）。
    *  原设计缺陷（用户发现）：`policyCardMinRatio` 独立时，markerMinRatio < 卡门槛 的区间是死区——
    *  模型收不到卡 ⇒ 不知道标记 ⇒ 永远不写标记 ⇒ 该区间内标记通道完全不可达；
    *  且若 markerMinRatio > 卡门槛则反向错配（教了却不执行）。现统一为同一门槛。
    *  ⚠️ 门槛名里的 `marker` 是**历史遗留**：文本标记通道已退役，这个字段现在只是「决策卡注入门槛」。 */
-  const renderPolicyCard = (ratio, effCrit, win, trend) => {
+  const renderPolicyCard = (ratio, effCrit, win, trend, actx = {}) => {
     try {
       const api = getCompactToolApi();
       if (!api) { warnTeachOnce('压缩教学模块未就绪：决策卡与一次性说明本次为空（模型将看不到压缩工具的用法）'); return null; }
       const crit = Number.isFinite(effCrit) ? effCrit : M3.criticalRatio;
       /* R16.15（评审建议 3/8）：把**当前档位名**（含是否已登记）交给卡片——
        * 决策行要求写 `tier 保持 X`，而 X 原先在卡上无处可查（卡只给保留 token 数）。 */
-      const tierApi = api; // R71：原先又调了一次 getCompactToolApi?.()（同一对象取两遍，两个名字易误解）
-      const sidKey = trend?.sid ?? null;
+      /* R78：预算/档位/锚点**全部来自本会话实际策略**（此前固定 16%，与实际执行矛盾）。 */
+      const strat = strategyOf(win, trend?.sid ?? null, actx.measure ?? null, actx.session ?? null);
       return api.renderCard({
-        ratio, minRatio: M3.markerMinRatio, criticalRatio: crit, ...retentionTeach(win), ...(trend ?? {}),
-        tierName: tierApi && sidKey ? tierApi.getTier?.(sidKey) : undefined,
-        tierDeclared: tierApi && sidKey ? tierApi.hasTier?.(sidKey) : undefined,
-        /* R16.16：区分「本次登记」「热换后由落盘恢复」「从未登记」——评审实测指出后两者
-         * 在文案上都显示为「已登记/兜底」，无法判断档位是否真的还在。 */
-        tierState: tierApi && sidKey ? tierApi.tierState?.(sidKey) : undefined,
+        ratio, minRatio: M3.markerMinRatio, criticalRatio: crit, ...strat, ...(trend ?? {}),
       });
     } catch (e) { warnTeachOnce(`决策卡渲染异常：${msg(e)}`); return null; }
   };
@@ -557,7 +607,7 @@ export function createM2Injection(deps) {
       /* R16.14：先用**实测的每轮增量**算趋势，再渲染卡片（评审建议 2：把预测题变算术题）。
        * R27（用户口径）：卡**照旧每轮一张**——它是「每轮开头落一次决策」的提醒位；
        * 要改的是**决策行的作用域**（每轮开头一次 + 中途变更再一次），不是卡的频率（见卡内文案）。 */
-      const card = renderPolicyCard(r.ratio, effCrit, r.window, trendOf(sid, r.ratio, r.window, effCrit)); // M3.5 通道2：政策卡（相关占用以上才出现）
+      const card = renderPolicyCard(r.ratio, effCrit, r.window, trendOf(sid, r.ratio, r.window, effCrit), { session: agent.session, measure: r.measure }); // M3.5 通道2：政策卡（相关占用以上才出现）
       /* 智能思考：**独立门控**（effortEnabled），与压缩的 markerMinRatio 完全解耦——
        * 用户明确要求「全程允许」：低占用也必须能注入/换档（压缩的卡在低占用时是不注入的）。 */
       const effortApi = getEffortApi();
