@@ -1,0 +1,7 @@
+{
+  "task": "C1",
+  "arm": "baseline",
+  "verifyExit": 0,
+  "omissions": 0,
+  "fails": []
+}
