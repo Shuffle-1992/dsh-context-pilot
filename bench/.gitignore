@@ -8,3 +8,5 @@ seed2.md
 seed2.json
 questions-verbatim.json
 answers-verbatim.json
+# 阶段 2 每臂隔离运行目录（避免臂之间互相看到实现；由脚本复制生成）
+tasks/_runs/

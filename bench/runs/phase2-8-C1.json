@@ -1,0 +1,10 @@
+{
+  "task": "C1",
+  "arm": "8%",
+  "verifyExit": 0,
+  "omissions": 0,
+  "fails": [],
+  "recalledConstraints": 8,
+  "contaminated": true,
+  "contaminatedWhy": "复用 bench/tasks/C1/solution/ 作输出目录，write 工具要求先读后写 ⇒ agent 读到了基线实现，不是纯凭压缩后记忆"
+}

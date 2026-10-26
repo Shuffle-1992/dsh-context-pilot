@@ -5,10 +5,10 @@ import url from 'node:url';
 export const TOKEN_VERSION = '1';
 export const E_INVALID_INPUT = 'E_INVALID_INPUT';
 
-// 空白：U+0020 / U+0009 / U+000A / U+000D / U+000C / U+000B，不产生 token。
+// 空白（空格/制表/换行/回车/换页/垂直制表）不产生 token。
 const WHITESPACE = new Set([0x20, 0x09, 0x0a, 0x0d, 0x0c, 0x0b]);
 
-// CJK 闭区间，命中即单码点 1 token 并计入 cjk。
+// CJK 闭区间：命中即「单码点 = 1 token」，并计入 cjk。
 const CJK_RANGES = [
   [0x4e00, 0x9fff],
   [0x3400, 0x4dbf],
@@ -72,8 +72,8 @@ export function stats(text) {
     tokens += 1;
     i += 1;
   }
-  const out = { chars: cps.length, tokens, cjk, latin };
-  return out;
+  // 键序固定：chars, tokens, cjk, latin。
+  return { chars: cps.length, tokens, cjk, latin };
 }
 
 export function countTokens(text) {
@@ -123,7 +123,7 @@ function main(argv) {
   let text;
   try {
     text = fs.readFileSync(opts.file, 'utf8');
-  } catch (err) {
+  } catch {
     process.stderr.write(`E_NOENT: cannot read ${opts.file}\n`);
     process.exitCode = 2;
     return;
