@@ -10,3 +10,7 @@ questions-verbatim.json
 answers-verbatim.json
 # 阶段 2 每臂隔离运行目录（避免臂之间互相看到实现；由脚本复制生成）
 tasks/_runs/
+
+# 由 bench/gen-evidence.mjs 从 seed2 确定性扩展（阶段 3 证据型）
+seed4.md
+seed4.json
