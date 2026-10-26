@@ -1,0 +1,76 @@
+{
+  "tasks": [
+    {
+      "id": "A1",
+      "class": "A",
+      "dir": "bench/tasks/A1",
+      "verify": "node bench/tasks/A1/verify.mjs",
+      "constraints": 0,
+      "title": "LRU + TTL 缓存",
+      "artifact": "bench/tasks/A1/solution/lru.mjs"
+    },
+    {
+      "id": "A2",
+      "class": "A",
+      "dir": "bench/tasks/A2",
+      "verify": "node bench/tasks/A2/verify.mjs",
+      "constraints": 0,
+      "title": "最小行级 diff 与回填",
+      "artifact": "bench/tasks/A2/solution/diff.mjs"
+    },
+    {
+      "id": "A3",
+      "class": "A",
+      "dir": "bench/tasks/A3",
+      "verify": "node bench/tasks/A3/verify.mjs",
+      "constraints": 0,
+      "title": "配置解析：深合并 + env 覆盖 + 白名单",
+      "artifact": "bench/tasks/A3/solution/config.mjs"
+    },
+    {
+      "id": "A4",
+      "class": "A",
+      "dir": "bench/tasks/A4",
+      "verify": "node bench/tasks/A4/verify.mjs",
+      "constraints": 0,
+      "title": "命令行文本统计工具",
+      "artifact": "bench/tasks/A4/solution/wordstat.mjs"
+    },
+    {
+      "id": "C1",
+      "class": "C",
+      "dir": "bench/tasks/C1",
+      "verify": "node bench/tasks/C1/verify.mjs",
+      "constraints": 8,
+      "title": "中英混排 token 计数器（库 + CLI）",
+      "artifact": "bench/tasks/C1/solution/tokenize.mjs"
+    },
+    {
+      "id": "C2",
+      "class": "C",
+      "dir": "bench/tasks/C2",
+      "verify": "node bench/tasks/C2/verify.mjs",
+      "constraints": 8,
+      "title": "确定性 JSON 序列化器",
+      "artifact": "bench/tasks/C2/solution/stable.mjs"
+    },
+    {
+      "id": "C3",
+      "class": "C",
+      "dir": "bench/tasks/C3",
+      "verify": "node bench/tasks/C3/verify.mjs",
+      "constraints": 7,
+      "title": "令牌桶限速器（注入时钟，惰性结算）",
+      "artifact": "bench/tasks/C3/solution/ratelimit.mjs"
+    },
+    {
+      "id": "C4",
+      "class": "C",
+      "dir": "bench/tasks/C4",
+      "verify": "node bench/tasks/C4/verify.mjs",
+      "constraints": 8,
+      "title": "CSV 解析 / 规范化 / 表头映射（库 + CLI）",
+      "artifact": "bench/tasks/C4/solution/csv.mjs"
+    }
+  ]
+}

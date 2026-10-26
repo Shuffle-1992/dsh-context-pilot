@@ -1,0 +1,5 @@
+# 由 bench/gen-seed.mjs 确定性生成（同样输入逐字节相同）⇒ 不入库，跑一次即可重建
+seed.md
+seed.json
+questions.json
+answers.json
