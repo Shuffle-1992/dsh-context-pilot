@@ -1,0 +1,1 @@
+{"arm":"16%","answers":{"Q01":"v0.9.42-beta","Q02":"CASE-4471","Q03":"根因=缓存键冲突，其它现象都是这一条的派生。","Q04":"MAX_RETRY=7","Q05":"anchor_window=13","Q06":"qps_guard_3017","Q07":"ERR_KEEP_RANGE_DRIFT","Q08":"budget_floor_2860","Q09":"v0.2.1-compat.9","Q10":"KEEP_RECENT_TURNS=4","Q11":"hud_refresh_900ms","Q12":"冲突裁定=Kimi-GPT5","C01":"不知道","C02":"不知道","C03":"不知道","C04":"不知道"}}
