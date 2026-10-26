@@ -284,6 +284,8 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
       m2Ctl = m.createM2Injection({
         state, log, msg, pick, schedule, svc, tryOf, nfmt, summarizeBreakdown, remember,
         M3, effEnabled, criticalCapOf,
+        /* R82（F1）：卡片要按**执行侧真实口径**渲染（m3 会用 factor 折算档位预算）。 */
+        retainFactorOf: (sid) => (m3Ctl?.retainFactorOf ? m3Ctl.retainFactorOf(sid) : 1),
         /* R75（审查 E1）：m2 的教学线与 m3 的实际触发线必须同源 ⇒ 注入同一个计算函数。 */
         effectiveCriticalOf: (agent) => (m3Ctl?.effectiveCriticalOf ? m3Ctl.effectiveCriticalOf(agent) : Math.min(M3.criticalRatio, criticalCapOf(agent))),
         /* measureRatio 的宿主委托在下方 M3 接线处才声明 ⇒ 箭头包装（同上打破 TDZ）。 */

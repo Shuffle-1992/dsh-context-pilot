@@ -659,7 +659,12 @@ export function createCompactTool(deps) {
    * 压缩会在下一步开始前落地。教学若没写清这点，模型会退回「停下等压缩」的旧习惯。
    * ⚠️ 卡片每轮（占用达标时）都出现 ⇒ 比一次性说明更该承担「先说再调用」的提醒职责。
    */
-  function renderCardBuiltin({ ratio, minRatio, criticalRatio, retainRatio, retainTokens, usedTokens, deltaTokens, deltaSamples, turnsToLine, resetByCompaction, tierName, tierDeclared, tierState, tierBudget, tierRatio, anchorLabel, anchorBudget, anchorFail } = {}) {
+  /* R82（Qwen3.8-Flash 交叉审查 F1/F2/F6）：新增
+   *   window        —— **真实窗口**（不再用 `预算÷名义比例` 反推；夹取时那会反出 2.5× 假窗口）
+   *   clamped       —— resolveTier 是否夹取过（预算被抬到下限 40k）
+   *   retainFactor  —— 执行侧真正会用的折算因子（m3 把档位预算 ÷它 后才交给范围选择）
+   *   allowSwitchTalk / switchToolName —— 换档工具是否真的存在（默认关闭时不得教模型调它） */
+  function renderCardBuiltin({ ratio, minRatio, criticalRatio, retainRatio, retainTokens, usedTokens, deltaTokens, deltaSamples, turnsToLine, resetByCompaction, tierName, tierDeclared, tierState, tierBudget, tierRatio, anchorLabel, anchorBudget, anchorFail, window, clamped, retainFactor, allowSwitchTalk, switchToolName } = {}) {
     try {
       if (ratio == null || ratio < minRatio) return null;
       const pct = `${(ratio * 100).toFixed(0)}%`;
@@ -675,14 +680,34 @@ export function createCompactTool(deps) {
        * ⇒ 锚点 40k、档位 240k、占用 570k 时，卡上说"会摘要掉 ~330k"，实际会摘要 ~530k
        * —— **低估损失 200k，直接误导"现在压划不划算"的决策**。
        * 现按"此刻真正会执行的策略"取预算：锚点已解析 ⇒ 用锚点预算；否则档位预算。 */
+      /* R82（F1）：执行侧在 resolveTier 之后还有一步 `÷retainFactor`（m3.compact.mjs:480-481
+       * tierBudgetHeur = scaleRetainBudget(tierBudget, factor)），卡片原先只对齐到 resolveTier
+       * ⇒ 名义 240k 而实际只留 ~171k，会给出「近端一点都不丢」的**假承诺**。
+       * 现按真实执行口径算；factor≈1 时不显示（避免 ×1.00 噪声）。 */
+      const factor82 = Number(retainFactor) > 1.05 ? Number(retainFactor) : 1;
+      const realTierBudget = factor82 > 1 ? Math.round(t / factor82) : t;
       const anchorB81 = Number(anchorBudget);
-      const execBudget = Number.isFinite(anchorB81) && anchorB81 > 0 ? anchorB81 : t;
-      const execLabel = Number.isFinite(anchorB81) && anchorB81 > 0 ? '锚点预计保留预算' : '本档位保留预算';
+      const execBudget = Number.isFinite(anchorB81) && anchorB81 > 0 ? anchorB81 : realTierBudget;
+      const execLabel = Number.isFinite(anchorB81) && anchorB81 > 0
+        ? '锚点预计保留预算'
+        : (factor82 > 1 ? `保留预算（真实口径 ×${factor82.toFixed(2)}）` : '本档位保留预算');
       /* R16：档位行按**当前窗口**折算三档的近似保留量；拿不到时给比例不给 token 数。
        * R19：① 展示用中文说法；② 预算按**真实窗口**折算（win = 当前档位预算 ÷ 当前档位比例），
        * 不再用 0.5×/1.5× 的倍数魔法——那只是「8/16/24 恰好成倍数」时的巧合，常量一改就错。 */
-      const win = (Number.isFinite(t) && t > 0 && Number.isFinite(r) && r > 0) ? t / r : null;
-      const budgetOf = (name) => (win == null ? null : Math.round(win * pctOf(name) / 100));
+      /* R82（F2）：`win = t/r` 只在「未夹取」时等于真实窗口。默认档 + 200k 窗口就会被抬到 40k 下限
+       * ⇒ 反推出 2.5× 假窗口，「两个方向」的留量/丢量/距线轮数全错（实测 13 轮 vs 真实 5 轮）。
+       * 现优先用 m2 传入的**真实窗口**，并用 `resolveTier(name, window)`（**执行侧同一函数**）现算三档预算。 */
+      const realWindow = Number(window) > 0 ? Number(window) : null;
+      const win = realWindow ?? ((Number.isFinite(t) && t > 0 && Number.isFinite(r) && r > 0) ? t / r : null);
+      const rangeNow82 = (() => { try { return getRangeApi?.(); } catch { return null; } })();
+      const budgetOf = (name) => {
+        if (win == null) return null;
+        try {
+          const b = rangeNow82?.resolveTier?.(name, win)?.budget;
+          if (Number.isFinite(b) && b > 0) return b;
+        } catch { /* 吞：退回比例折算 */ }
+        return Math.round(win * pctOf(name) / 100);
+      };
       const bLight = budgetOf('light');
       const bStd = budgetOf('standard');
       const bHeavy = budgetOf('heavy');
@@ -732,8 +757,11 @@ export function createCompactTool(deps) {
        * 这样「预算=档位预算」的语义在两种调用下都成立，不会出现"卡片没有数字"的空档。 */
       const tb = t;
       const tr = r;
+      /* R82（F2）：夹取时「窗口 × N%」是**错的占比**（预算被抬到下限）⇒ 显示真实占比并标注下限。 */
       const tbTxt = Number.isFinite(tb) && tb > 0
-        ? ` ≈${kfmt(tb)} token` + (Number.isFinite(tr) && tr > 0 ? `（窗口 × ${Math.round(tr * 100)}%）` : '')
+        ? ` ≈${kfmt(tb)} token` + (clamped === true && realWindow != null
+          ? `（实际占窗口 ${Math.round((tb / realWindow) * 100)}%，已抬到下限）`
+          : (Number.isFinite(tr) && tr > 0 ? `（窗口 × ${Math.round(tr * 100)}%）` : ''))
         : '';
       const tierStateTxt = tierState === 'restored' ? '（已登记；本次由**落盘恢复**）'
         : tierState === 'set' ? '（已登记）'
@@ -748,7 +776,9 @@ export function createCompactTool(deps) {
           /* R81：这是**本次**解析的结果（卡片每轮现算），不是"上次"——措辞如实。 */
           + (anchorFail ? `；锚点本次未能定位（${String(anchorFail).slice(0, 40)}）` : '')
           + `。锚点未命中会自动回退到**${textOf(cur)}**${tbTxt}。`
-          : `**当前策略：档位 ${textOf(cur)}**${tbTxt}${tierStateTxt}——这是**近端保留预算**（不是压后总占用）。`);
+          : `**当前策略：档位 ${textOf(cur)}**${tbTxt}${tierStateTxt}——这是**近端保留预算**（不是压后总占用）`
+            + (factor82 > 1 ? `；执行侧按真实口径 ×${factor82.toFixed(2)} 折算 ⇒ 实际约 ${kfmt(realTierBudget)} token` : '')
+            + '。');
       /* R20（用户要求「卡片对称化」）：**多留与少留两个方向都变数字**。
        * 原实现只在 used > 当前预算 时给一句「若先声明浅压24% 少丢多少」——**只量化了多留的好处**，
        * 从不说多留的代价（压后占用更高 ⇒ 更早再压一次，而每次压缩都要付摘要 LLM + 缓存重置）。
@@ -815,8 +845,12 @@ export function createCompactTool(deps) {
           + `**但「不压」的代价不是零**：占用达 ${crit} 时**系统会代替你压缩**——时机由系统选、按**那一刻**生效的档位执行、`
           + `摘要会把**当时已过期的事实**（旧版本号/旧结论）写进概要。`,
         `• 调用前自检：本轮关键产物（文件路径、决策、未落盘的结论）先落盘或写进正文，再调用。`,
-        `• 顺带换档（可选，缓存最优时机）：压缩会重置前缀缓存，换档也会使缓存失效——`
-          + `**同一条消息里顺带调用 set_reasoning_effort 换档，缓存重建只付一次**。不需要则忽略本条。`,
+        /* R82（F5）：换档工具在 `effortEnabled=false`（**默认**）时已被 retractTool 撤掉 ⇒
+         * 卡片不能再教模型调它（这与 m2 自述的「绝不出现工具已隐藏、文本还在教你调用」铁律冲突）。
+         * R82（F5b）：工具名不再硬编码，由 m2 注入 effort 域的 TOOL_NAME（R71 纪律）。 */
+        (allowSwitchTalk === false ? null
+          : `• 顺带换档（可选，缓存最优时机）：压缩会重置前缀缓存，换档也会使缓存失效——`
+            + `**同一条消息里顺带调用 ${switchToolName || 'set_reasoning_effort'} 换档，缓存重建只付一次**。不需要则忽略本条。`),
       ].filter(Boolean).join('\n');
     } catch {
       return null;

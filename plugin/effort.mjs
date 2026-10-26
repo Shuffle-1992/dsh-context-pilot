@@ -536,7 +536,9 @@ export function createEffort(deps) {
       }
       /* 幂等：与期望档位相同 ⇒ 直接成功（不消耗冷却） */
       if (bySid.get(sid)?.want === want) {
-        bumpSkip('sameValue', sid);
+        /* R82（F7）：这是**成功**（applied:'already'），不能按"未生效"记 lastSkip
+         * （否则 chip tooltip 会显示「最近一次未生效：与当前档位相同」）。只记全局计数。 */
+        bumpSkip('sameValue');
         /* R15：回读 + 自检契约（同 accepted 分支，理由见那里）。 */
         return {
           ok: true,
@@ -607,7 +609,10 @@ export function createEffort(deps) {
         + '**按任务选档**：复杂设计/疑难排查/长链规划 ⇒ 升档；机械批量改动/简单查询 ⇒ 降档；'
         + '**以任务一次做对为先**（省额度只是降档的附带结果，不是目标）。'
         + '**任务阶段变化时重新判断一次**（读代码查因 → 动手改多文件 → 写文档…）；长任务按实际需求可以切多次，'
-        + '唯一硬约束是换档冷却（当前 ' + cooldownSec() + ' 秒，面板可配）。切换后下一步的用量行后缀会显示新档位，可据此自检。'
+        /* R82（F3）：description 在 `registerTool()` 时**冻结**（`if (toolRegistered) return true`），
+         * 面板改冷却不会重注册 ⇒ 写活秒数反而变成"写死了注册那一刻的值"（与 R78 修的固定 16% 同型）。
+         * 故描述里**不写秒数**，只指向真实来源（面板 + 被拒时返回的剩余秒数）。 */
+        + '唯一硬约束是换档冷却（时长可在面板配置；被拒时会返回剩余秒数）。切换后下一步的用量行后缀会显示新档位，可据此自检。'
         + '**换档最佳时机提示（R16.8）**：换档会使前缀缓存失效——若刚压缩过上下文（缓存已被重置），'
         + '此时换档只付一次重建成本 ⇒ 压缩的同一条消息里顺带换档是最优时机（压缩自检回执里也会提醒）。',
       parameters: {
@@ -1040,18 +1045,20 @@ export function createEffort(deps) {
       const effortsList = Array.isArray(eff.efforts) ? eff.efforts : null;
       const atTop = effortsList && effortsList.length > 1 && idxOf(effortsList, eff.current) === effortsList.length - 1;
       const atBottom = effortsList && effortsList.length > 0 && idxOf(effortsList, eff.current) === 0;
+      /* R82（F4，Qwen 交叉审查实测）：原先把 `s.nudgeAtTurn = turn` 写在守卫**之后**——
+       * ① 到顶时先记了提醒位再 return null ⇒ 白烧 4 轮提醒额度；
+       * ② `return null` 直接吃掉整条分支 ⇒ 同句里本可给、且真实可行的**降档**提示被吞掉
+       *    （实测「重构…直接改名」在 max 档下返回 null）。现改为**先按方向过滤再命中**。 */
       if (gap >= NUDGE_MIN_GAP && text) {
-        const up = WANT_DEEP_RE.exec(text);
+        const up = atTop ? null : WANT_DEEP_RE.exec(text);
         if (up) {
           s.nudgeAtTurn = turn;
-          if (atTop) return null; // 已是最高档 ⇒ 无可升，别制造无效动作
           return '【换档提示】用户本轮要求深入（命中「' + up[1] + '」）——可考虑**升档**'
             + '（**任务一次做对优先**：档位不足导致的返工，比一次换档的缓存损失贵得多）' + tail;
         }
-        const down = WANT_FAST_RE.exec(text);
+        const down = atBottom ? null : WANT_FAST_RE.exec(text);
         if (down) {
           s.nudgeAtTurn = turn;
-          if (atBottom) return null; // 已是最低档 ⇒ 无可降
           return '【换档提示】用户本轮要求快速／只需机械改动（命中「' + down[1] + '」）——可考虑**降档**'
             + '（**适配工作量**，省额度只是附带结果）' + tail;
         }

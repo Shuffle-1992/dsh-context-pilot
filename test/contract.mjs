@@ -1079,7 +1079,10 @@ const ct = read('compact-tool.mjs');
 /* R16.8（用户提出的时机逻辑）三源对账：压缩重置前缀缓存 + 换档使缓存失效 ⇒
  * 同轮顺带换档只付一次重建成本。回执侧断言在 m2src 处；此处对 compact/effort 两源。 */
 ok('R16.8 时机教学（compact 侧）：决策卡与 description 都含「顺带换档只付一次缓存重建」',
-  /同一条消息里顺带调用 set_reasoning_effort 换档，缓存重建只付一次/.test(ct),
+  /* R82（F5b）：工具名改为注入（`switchToolName || 'set_reasoning_effort'`）⇒ 断言形状跟随，
+   * 同时要求保留默认回退（m2 未注入时仍能教对工具名）。 */
+  /同一条消息里顺带调用[\s\S]{0,60}换档，缓存重建只付一次/.test(ct)
+  && /switchToolName \|\| 'set_reasoning_effort'/.test(ct),
   '决策卡缺位 ⇒ Agent 压缩时不知道可以同轮换档（错过缓存最优时机）');
 ok('R16.8 时机教学（effort 侧）：换档工具 description 也写明该时机',
   /顺带换档是最优时机/.test(effort) && /只付一次重建成本/.test(effort),
@@ -5242,9 +5245,13 @@ ok('R75（S4）：client 只剩**一份** unwrapEnv，面板复用模块级实�
   /* ① 冷却时长必须**读活值**（原先教学写死"默认 30 秒"，而配置可改 —— 与 R78 的「固定 16%」同型） */
   const brief79 = api79.renderBrief(effState79) ?? '';
   const desc79 = spec79 && spec79.description ? String(spec79.description) : '';
-  ok('R79 行为级：教学与工具描述里的冷却时长是**活值**（配置 45s ⇒ 文本 45 秒，不再是写死的 30）',
-    /45 秒/.test(brief79) && /45 秒/.test(desc79) && !/30 秒/.test(brief79) && !/30 秒/.test(desc79),
-    `brief 含45=${/45 秒/.test(brief79)} desc 含45=${/45 秒/.test(desc79)}；brief 仍写30=${/30 秒/.test(brief79)}`);
+  /* R82（F3，Qwen 交叉审查）：工具 description 在 registerTool() 时**冻结**，写活秒数反而会变成
+   * "写死注册那一刻的值"（面板改冷却不会重注册）⇒ R82 起 description **不写秒数**，只指向真实来源；
+   * brief 是每次注入现渲染的，仍必须是活值。 */
+  ok('R82 行为级：brief 的冷却时长是活值；description 不再写死秒数（注册期冻结 ⇒ 只会说谎）',
+    /45 秒/.test(brief79) && !/30 秒/.test(brief79)
+    && !/30 秒/.test(desc79) && !/45 秒/.test(desc79) && /时长可在面板配置/.test(desc79),
+    `brief 含45=${/45 秒/.test(brief79)} desc 含45=${/45 秒/.test(desc79)} desc 含30=${/30 秒/.test(desc79)}`);
   /* ② 换档"没成功"的原因必须按会话可见（原先只有全局计数，用户看不到为什么没切） */
   const r79a = await spec79.execute({ effort: 'max' }, { agent: ag79 });
   const r79b = await spec79.execute({ effort: 'low' }, { agent: ag79 });
@@ -5383,6 +5390,92 @@ ok('R75（S4）：client 只剩**一份** unwrapEnv，面板复用模块级实�
   const eff81 = readFileSync(join(PLUGIN, 'effort.mjs'), 'utf8');
   ok('R81 结构级（P3）：nudge 的"到顶/到底"守卫标注了**排序假设**（efforts 强度升序）',
     /按\*\*强度升序\*\*/.test(eff81), '未标注假设 ⇒ 换成乱序 provider 时会静默失效，后人无从判断');
+}
+/* ═══ R82（Qwen3.8-Flash 交叉审查）修复的回归守卫 ═══ */
+{
+  const ctMod82 = await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href);
+  const mk82 = (M3extra = {}) => {
+    let spec = null;
+    const api = ctMod82.createCompactTool({
+      svc: (k) => (k === 'tools' ? { register: (t) => { spec = t; return () => {}; } } : null),
+      tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+      pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+      M3: { ...M3extra }, state: { m3: { compactToolDiag: { calls: 0 } } }, readCfg: () => ({ enabled: true }),
+      getDefineTool: () => (sp) => sp, getRangeApi: rangeStub,
+    });
+    api.ensure();
+    return api;
+  };
+  const api82 = mk82();
+  const base82 = { ratio: 0.57, minRatio: 0.3, criticalRatio: 0.75 };
+  /* F1（P1）：执行侧会 ÷retainFactor；卡片必须按真实口径算，不能再给「一点都不丢」的假承诺 */
+  const f182 = api82.renderCard({ ...base82, usedTokens: 200000, tierName: 'heavy', tierBudget: 240000, tierRatio: 0.24, retainFactor: 1.4 }) ?? '';
+  ok('R82 行为级（F1）：卡片按**真实口径 ×factor** 算损失，不再出现假的「一点都不丢」',
+    /* 数字格式化在测试桩里走内部默认（171k/29k），生产 host 会注入 kfmt（171.4k）——
+     * 故断言只钉**量级与口径标签**，不钉小数位。 */
+    /真实口径 ×1\.40/.test(f182) && /171/.test(f182) && /摘要掉 ~(?:28\.6k|29k)/.test(f182)
+    && !/一点都不丢/.test(f182),
+    `实际：${f182.split(String.fromCharCode(10)).filter((l) => /保留预算|真实口径/.test(l)).join(' ｜ ').slice(0, 240)}`);
+  /* F2（P1）：窗口夹取时不能用 t/r 反推窗口（200k 窗口 + light 档 ⇒ 预算 40k，名义 8%） */
+  const f282 = api82.renderCard({ ...base82, window: 200000, usedTokens: 300000, tierName: 'light', tierBudget: 40000, tierRatio: 0.08, clamped: true }) ?? '';
+  ok('R82 行为级（F2）：夹取时三档预算按**真实窗口 + resolveTier** 现算（40k/40k/48k，不是反推出的 120k）',
+    /留 48k/.test(f282) && /留 40k/.test(f282) && !/留 120k/.test(f282) && /已抬到下限/.test(f282),
+    `实际：${f282.split(String.fromCharCode(10)).filter((l) => /两个方向|当前策略/.test(l)).join(' ｜ ').slice(0, 260)}`);
+  /* F6（P2）：`{window}` 模板变量必须能展开（schema 承诺过它） */
+  /* ⚠️ 模板必须含 `{tool}`：applyTpl 缺它即回退内置（这是 R60 的硬规则，不是 bug）。 */
+  const api82b = mk82({ tplCard: '窗口={window}｜档位线={critical}｜工具={tool}' });
+  const f682 = api82b.renderCard({ ...base82, window: 200000, usedTokens: 300000, tierName: 'heavy', tierBudget: 48000, tierRatio: 0.24 }) ?? '';
+  ok('R82 行为级（F6）：`{window}` 占位符真的展开（schema 承诺的变量不能恒空）',
+    /窗口=200\.0k/.test(f682), `实际：${f682.slice(0, 160)}`);
+  /* F5（P2）：effort 关闭（默认）时卡片不得教模型调已撤掉的换档工具 */
+  const f582 = api82.renderCard({ ...base82, usedTokens: 200000, tierName: 'heavy', tierBudget: 240000, tierRatio: 0.24, allowSwitchTalk: false }) ?? '';
+  ok('R82 行为级（F5）：`allowSwitchTalk:false`（换档工具已撤）⇒ 卡片不再教「顺带调用换档工具」',
+    !/顺带换档/.test(f582) && !/set_reasoning_effort/.test(f582),
+    `实际：${f582.split(String.fromCharCode(10)).filter((l) => /顺带|set_reasoning/.test(l)).join(' ｜ ').slice(0, 200)}`);
+  const m2src82 = readFileSync(join(PLUGIN, 'm2.inject.mjs'), 'utf8');
+  ok('R82 结构级（F5b）：回执的换档提示以**开关**为前提（不再把"功能关闭"当"读档失败"放行）',
+    /const allowSwitchTalk = M3\.effortEnabled === true && \(!effGate \|\| effGate\.canSwitch\);/.test(m2src82),
+    '默认配置下回执仍教调不存在的工具');
+  ok('R82 结构级（F11）：卡片门槛前移到 strategyOf 之前（低占用不再白付锚点走查）',
+    m2src82.indexOf('Number(ratio) < M3.markerMinRatio) return null') > 0
+    && m2src82.indexOf('Number(ratio) < M3.markerMinRatio) return null') < m2src82.indexOf('const strat = strategyOf('),
+    '门槛在渲染函数内部 ⇒ strategyOf（含 surface 走查）在低占用时也每轮执行');
+}
+{
+  /* F4（P2）：到顶时不能吃掉本可给的降档分支 */
+  const eMod82 = await import(pathToFileURL(join(PLUGIN, 'effort.mjs')).href);
+  const api82e = eMod82.createEffort({
+    svc: (k) => (k === 'tools' ? { register: () => () => {} } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { effortSkips: {}, effortDiag: {}, effortSwitches: 0, effortReasserts: 0, effortToolCalls: 0, effortHooks: 0 } },
+    readCfg: () => ({ enabled: true, effortEnabled: true, cooldownMs: 30000 }),
+    getDefineTool: () => (sp) => sp,
+  });
+  api82e.ensure();
+  const ag82 = { id: 'sid-r82', sessionId: 'sid-r82', session: { id: 'sid-r82' } };
+  const n82 = api82e.renderNudge({ ok: true, current: 'max', efforts: ['low', 'high', 'max'] },
+    { agent: ag82, turn: 5, userText: '这个重构很简单，直接改名就行' });
+  ok('R82 行为级（F4）：已到顶 + 深/快词同现 ⇒ 仍给出**降档**提示（不再整条吞掉）',
+    typeof n82 === 'string' && /降档/.test(n82), `实际：${JSON.stringify(n82)}`);
+  /* F7（P3）：同值成功调用不得记成"未生效" */
+  let spec82 = null;
+  const api82f = eMod82.createEffort({
+    svc: (k) => (k === 'tools' ? { register: (t) => { spec82 = t; return () => {}; } }
+      : k === 'llm' ? { resolveModelInfo: async () => ({ reasoning: { efforts: [{ id: 'low' }, { id: 'high' }, { id: 'max' }], defaultEffort: 'high' } }) } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { effortSkips: {}, effortDiag: {}, effortSwitches: 0, effortReasserts: 0, effortToolCalls: 0, effortHooks: 0 } },
+    readCfg: () => ({ enabled: true, effortEnabled: true, cooldownMs: 0 }),
+    getDefineTool: () => (sp) => sp,
+  });
+  api82f.ensure();
+  const ag82b = { id: 'sid-r82b', sessionId: 'sid-r82b', session: { id: 'sid-r82b', requestHeader: () => ({ config: { provider: 'p', model: 'm', reasoningEffort: 'high' } }) } };
+  await spec82.execute({ effort: 'max' }, { agent: ag82b });
+  await spec82.execute({ effort: 'max' }, { agent: ag82b });
+  const hud82 = await api82f.hudPayload(ag82b);
+  ok('R82 行为级（F7）：同值调用是**成功**（applied:already）⇒ 不得记成「最近一次未生效」',
+    hud82?.lastSkip === null, `实际 lastSkip=${JSON.stringify(hud82?.lastSkip)}`);
 }
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));

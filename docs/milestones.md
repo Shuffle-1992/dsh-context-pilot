@@ -4514,3 +4514,41 @@ lastSkip 透传/来源）。**变异**：冷却改回写死 30 / 不记 per-sid 
 成功后不清 lastSkip / tooltip 不过滤 ⇒ **全部 CAUGHT**。
 
 **测试**：974 断言全绿（contract 784 / static 84 / report 54 / boot 22 / client-render 30）。
+### R82 Qoder 交叉审查（Qwen3.8-Flash）落地：卡片口径对齐执行侧（2026-10-26，用户派发）
+
+**背景**：用户用派发台指派 **Qwen3.8-Flash**（xhigh）与 **DeepSeek-Flash**（max）对 R78–R81 做只读交叉审查。
+Qwen 那份已落地（66 轮工具调用、11,397 字符、报 16 条）；DeepSeek 那份仍在跑。
+我逐条回源码验伪后落地 **9 条**（2 P1 + 4 P2 + 3 P3），其余记为已知限制。
+
+#### 证实并修复
+
+| Qwen 编号 | 严重度 | 问题（我验伪结论：**成立**） | 修法 |
+|---|---|---|---|
+| **F1** | **P1** | 卡片用**名义档位预算**算损失，而执行侧在 `resolveTier` 之后还有一步 `÷retainFactor`（`m3.compact.mjs:480-481`）⇒ 名义 240k、实际只留 ~171k，会给出「近端**一点都不丢**」的**假承诺**；同一会话的回执却按真实口径念数 ⇒ 同一数字两处口径相反 | `strategyOf` 注入 `retainFactorOf`；卡片 `execBudget = 锚点 ? anchorBudget : round(tierBudget/factor)`，标签变「保留预算（真实口径 ×f）」；策略行补「执行侧按真实口径 ×f ⇒ 实际约 X」 |
+| **F2** | **P1** | 三档预算是 `win = 预算÷名义比例` 反推出来的；`resolveTier` 夹取后（默认档 + ≤250k 窗口就会抬到 40k 下限）⇒ 反出 **2.5× 假窗口**，「两个方向」的留量/丢量/距线轮数全错（实测卡说 13 轮、真实 5 轮） | m2 把**真实 window** 传进卡片；三档预算改由 `resolveTier(name, window)`（**执行侧同一函数**）现算；夹取时显示**真实占比**并标「已抬到下限」 |
+| F6 | P2 | schema 承诺的模板变量 `{window}` **恒展开为空**（调用方从不传 window） | 与 F2 同一处修：`window` 进 renderCard/renderBrief 入参，`{window}` 现在有值 |
+| F3 | P2 | 换档工具 description 在 `registerTool()` 时**冻结**（`if (toolRegistered) return true`）⇒ 面板改冷却不会重注册，写活秒数反而变成"写死注册那一刻的值"（与 R78 修的固定 16% 同型） | description **不再写秒数**，改为「时长可在面板配置；被拒时返回剩余秒数」；brief 仍为活值（每次注入现渲染） |
+| F4 | P2 | nudge 的"到顶守卫"把 `s.nudgeAtTurn = turn` 写在守卫**之后**、并用 `return null` 吃掉整条分支 ⇒ ①白烧 4 轮提醒额度；②同句里本可给且真实可行的**降档**提示被吞（实测「重构…直接改名」在 max 档返回 null） | 守卫前移：`const up = atTop ? null : WANT_DEEP_RE.exec(text)`，命中任一才写提醒位；深优先语义保留 |
+| F5 | P2 | `effortEnabled` 默认 **false** 时工具已被 `retractTool` 撤掉，但压缩决策卡与自检回执仍教模型「调用 set_reasoning_effort」；回执判据 `!effGate ⇒ 允许提及` 把「功能关闭」与「读档失败」混为一谈（违反 m2 自述铁律） | 回执：`allowSwitchTalk = M3.effortEnabled === true && (!effGate \|\| effGate.canSwitch)`；卡片：新增 `allowSwitchTalk` 入参，false 时整条「顺带换档」省略；工具名改为 `switchToolName \|\| 'set_reasoning_effort'` 注入 |
+| F7 | P3 | 同值调用返回 `ok:true / applied:'already'`（**成功**），却仍按"未生效"记 lastSkip ⇒ chip tooltip 显示「最近一次未生效：与当前档位相同」 | 只记全局计数，不写 per-sid lastSkip |
+| F11 | P3 | `strategyOf`（含锚点 surface 走查）在**卡片门槛之前**执行 ⇒ 低占用（卡不出现）时每轮白付走查 | `renderPolicyCard` 首行按 `ratio < markerMinRatio` 早退 |
+| F12 | P3 | 压缩自检里仍写「进入机械阶段可**降档省额度**」，与 R80 统一后的「降档是适配工作量」口径冲突 | 改为「降档适配工作量（省额度只是附带结果）」 |
+
+#### 未落地（记入已知限制）
+
+F8 `cooldownMs=0` 时文案写「1 秒」而实际无冷却；F9 loss 的 `used` 兜底仍读 `retainTokens/retainRatio`（两套取数，今日等价）；
+F10 `anchorLabelOf` 逐字两份（m2 与 m3）；F13 冗余/死码（`const tb = t` 别名、`skipLabel` 导出无消费者、
+`resolveAnchorBudget` 的 `deltaTokens` 分支不可达）；F14 「≤3000」守卫的样本余量仅 27 字符（最坏配置 3131，已越线）；
+F15 锚点模式下 `used`（表盘口径）与 `anchorBudget`（启发式口径）跨口径相减；F16 锚点失败原样把 `text:not-found` 等内部 token
+写进模型可见文本（回执侧 R23 已改成中文，卡片侧没跟上）。
+
+#### 我这轮自己犯的两个错（被测试/渲染抓到）
+
+1. 新断言写死小数位（`171.4k`），而测试桩的 `kfmt` 走内部默认输出 `171k` ⇒ 断言恒红；已改为只钉量级与口径标签。
+2. 模板断言忘了 `{tool}` 必填（缺则回退内置），导致 `{window}` 测试走的是内置文本 ⇒ 已补 `{tool}`。
+
+**守卫**：contract 新增 8 条（5 行为级：F1 真实口径、F2 夹取现算、F6 `{window}` 展开、F5 门控、F7 同值不算未生效、
+F4 到顶仍给降档；2 结构级：F5b 回执门控、F11 门槛前移）。**变异**：F1 退回名义预算 / F2 退回 t/r / F4 到顶仍命中 /
+F5 回执不看开关 ⇒ **全部 CAUGHT**。
+
+**测试**：982 断言全绿（contract 792 / static 84 / report 54 / boot 22 / client-render 30）。

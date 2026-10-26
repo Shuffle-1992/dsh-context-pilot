@@ -36,7 +36,7 @@
 export function createM2Injection(deps) {
   const {
     state, log, msg, pick, schedule, svc, tryOf, nfmt, summarizeBreakdown, remember,
-    M3, effEnabled, criticalCapOf, measureRatio,
+    M3, effEnabled, criticalCapOf, measureRatio, retainFactorOf,
     /* R75（审查 E1）：m3 的**生效强制线**（含 5–20pp 动态余量）——教学必须与它同源。 */
     effectiveCriticalOf: effectiveCriticalInjected,
     getRangeApi, getCompactToolApi, getEffortApi, getCreateUserMessage, SOURCE_KIND, takeCompactVerify, extractEventText,
@@ -261,9 +261,14 @@ export function createM2Injection(deps) {
     const tierName = (tool && sid) ? (tool.getTier?.(sid) ?? 'standard') : 'standard';
     let tierRatio = null;
     let tierBudget = null;
+    let clamped = false;
     try {
       const t = range?.resolveTier?.(tierName, w);
-      if (t && Number.isFinite(t.budget) && t.budget > 0) { tierBudget = t.budget; tierRatio = Number.isFinite(t.ratio) ? t.ratio : null; }
+      if (t && Number.isFinite(t.budget) && t.budget > 0) {
+        tierBudget = t.budget;
+        tierRatio = Number.isFinite(t.ratio) ? t.ratio : null;
+        clamped = t.clamped === true; // R82（F2）：夹取时比例不再代表真实占比，卡片要据此改写
+      }
     } catch { /* 吞：明细在卡片里退回比例口径 */ }
     if (tierBudget == null) {
       const ratio = range?.RETAIN_RATIO ?? null;
@@ -289,6 +294,10 @@ export function createM2Injection(deps) {
       tierDeclared: tool && sid ? tool.hasTier?.(sid) : undefined,
       tierState: tool && sid ? tool.tierState?.(sid) : undefined,
       anchorLabel, anchorBudget, anchorFail,
+      /* R82（F1/F2/F6）：窗口 / 夹取标记 / 执行侧折算因子 —— 卡片必须按真实执行口径渲染。 */
+      window: Number.isFinite(w) && w > 0 ? w : null,
+      clamped,
+      retainFactor: (() => { try { const f = retainFactorOf?.(sid); return Number.isFinite(f) && f > 1 ? f : 1; } catch { return 1; } })(),
     };
   };
 
@@ -305,10 +314,17 @@ export function createM2Injection(deps) {
       const crit = Number.isFinite(effCrit) ? effCrit : M3.criticalRatio;
       /* R16.15（评审建议 3/8）：把**当前档位名**（含是否已登记）交给卡片——
        * 决策行要求写 `tier 保持 X`，而 X 原先在卡上无处可查（卡只给保留 token 数）。 */
+      /* R82（F11）：卡片在 `ratio < markerMinRatio` 时根本不会渲染（renderCardBuiltin 首行早退），
+       * 而 strategyOf 含锚点预算解析（surface 走查）⇒ 低占用时每轮白付一次走查。先把门槛前移。 */
+      if (!Number.isFinite(Number(ratio)) || Number(ratio) < M3.markerMinRatio) return null;
       /* R78：预算/档位/锚点**全部来自本会话实际策略**（此前固定 16%，与实际执行矛盾）。 */
       const strat = strategyOf(win, trend?.sid ?? null, actx.measure ?? null, actx.session ?? null);
+      const effortApi82 = getEffortApi();
       return api.renderCard({
         ratio, minRatio: M3.markerMinRatio, criticalRatio: crit, ...strat, ...(trend ?? {}),
+        /* R82（F5）：换档工具是否真的在模型清单里（默认关闭 ⇒ 不教）；工具名从 effort 域取。 */
+        allowSwitchTalk: M3.effortEnabled === true,
+        switchToolName: effortApi82?.TOOL_NAME,
       });
     } catch (e) { warnTeachOnce(`决策卡渲染异常：${msg(e)}`); return null; }
   };
@@ -477,7 +493,7 @@ export function createM2Injection(deps) {
          * 缓存重建只付一次——这是换档的**最佳时机**（提升给更难的任务 / 降低省额度）。 */
         const switchHint = allowSwitch
           ? `**压缩已重置前缀缓存——这正是换档的最佳时机**（换档同样会使缓存失效，现在换只付一次重建成本）：`
-            + `若接下来的任务更难可顺带升档、进入机械阶段可降档省额度——调用 set_reasoning_effort 即可（可选，不需要则忽略本句）。`
+            + `若接下来的任务更难可顺带升档、进入机械阶段可**降档适配工作量**（省额度只是附带结果）——调用 set_reasoning_effort 即可（可选，不需要则忽略本句）。`
           : '';
         return `【压缩自检】你上次请求的压缩**已执行**${head}：${k}${after ? `，${after}` : ''}（保留策略 ${v.rangeSource ?? '?'}，${v.ms ?? '?'}ms）。`
           + switchHint;
@@ -619,7 +635,9 @@ export function createM2Injection(deps) {
       /* R18：判据**算一次**，供后缀/教学/回执共用 —— 保证同一轮内「工具可见性」与「文本」同源，
        * 绝不出现「工具已隐藏、文本却还在教你调用它」。判据不可用（无 eff）⇒ 保守允许提及。 */
       const effGate = eff ? (effortApi?.canSwitch?.(eff) ?? null) : null;
-      const allowSwitchTalk = !effGate || effGate.canSwitch;
+      /* R82（F5）：原先 `!effGate ⇒ true` 把「功能开关关闭」与「读档失败」混为一谈 ⇒
+       * effortEnabled=false（默认）时回执仍教模型调已撤掉的工具。判据必须含开关本身。 */
+      const allowSwitchTalk = M3.effortEnabled === true && (!effGate || effGate.canSwitch);
       const baseText = effSuffix ? `${r.text} ｜ ${effSuffix}` : r.text;
       if (effSuffix) state.m2.effortSuffixes = (state.m2.effortSuffixes ?? 0) + 1;
       /* R16.12：换档提醒——**只在真有信号时出现**（用户意图关键词 / 本会话从未换档），
