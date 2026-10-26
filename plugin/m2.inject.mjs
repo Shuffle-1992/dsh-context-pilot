@@ -416,7 +416,24 @@ export function createM2Injection(deps) {
    * R16：带档位与保留预算 ⇒ 模型能确认「自己选的档位真的生效了」。
    * R18：`allowSwitch=false`（本模型无可切档）时**去掉换档那两句**——工具已被隐藏，
    * 再劝它调用就是自相矛盾（这是四处换档文本里最容易漏的一处：它在 m2 而不在 effort 域）。 */
-  const renderCompactReceipt = (v, allowSwitch = true) => {
+  /* R83（F5-b，Kimi 复核）：换档教学门控**单点化**——原先 3 处各算一套，其中两处（非首步初值 true、
+   * 量测失败路径默认 true）会绕过开关判据。
+   * 两个条件都必需：`M3.effortEnabled`（功能开关，决定工具是否注册）、`canSwitch`（本模型是否有多档）。
+   * 判据不可用（read 抛错）⇒ 若开关是开的就仍允许（工具确实在清单里）；开关关 ⇒ 一律不提。 */
+  const effortTalkAllowed = async (agent) => {
+    try {
+      if (M3.effortEnabled !== true) return false;
+      const api = getEffortApi();
+      if (!api?.canSwitch) return false;
+      const g = api.canSwitch(await api.read(agent));
+      return !g || g.canSwitch === true;
+    } catch { return M3.effortEnabled === true; }
+  };
+
+  /* R83（F5-b，Kimi 复核）：默认值由 true 改为 **false**——「没说」不等于「可以提换档」。
+   * 原先非首步（allowMid 初值 true）与量测失败路径（不传第二参）两条旁路会绕过门控，
+   * 在 effortEnabled=false 时仍教模型调已撤掉的工具。所有调用点现在都显式传值。 */
+  const renderCompactReceipt = (v, allowSwitch = false) => {
     try {
       if (!v) return null;
       const parts = [];
@@ -527,14 +544,8 @@ export function createM2Injection(deps) {
          * ⇒ 不会把 tool_use 与它的 tool_result 分开（那才是 `INVALID_REQUEST` 的成因）。
          * 回执一次性 ⇒ 最多多注入一步，不会刷屏。 */
         /* R18：中步回执同样要按判据门控（否则单档模型会被劝去调用一个**已隐藏**的工具）。 */
-        let allowMid = true;
-        try {
-          const apiMid = getEffortApi();
-          if (M3.effortEnabled === true && apiMid?.canSwitch) {
-            const gMid = apiMid.canSwitch(await apiMid.read(agent));
-            allowMid = !gMid || gMid.canSwitch;
-          }
-        } catch { /* 判据不可用 ⇒ 保守允许提及（宁多一句话，也不误删教学） */ }
+        /* R83（F5-b）：不再用「初值 true + 内部改判」的写法（漏掉开关本身），改共用同一门控函数。 */
+        const allowMid = await effortTalkAllowed(agent);
         /* R71（R72 补正：真 GLM-5.3 审查 H3）——**顺序错了**：工厂判定必须放在
          * `takeCompactReceipt` **之前**。原因：`takeCompactReceipt` 取出时立刻把该条标 `read=true`
          * （一次性回执），之后才 skip 就永远取不回来了 ⇒ 仍是「回执被吃掉却永不送达」。
@@ -582,7 +593,8 @@ export function createM2Injection(deps) {
         /* R15：量测失败**不再一律静默跳过**——若手里有一条待读的压缩自检回执，就只注入回执。
          * 理由（真机教训）：量测本身依赖 M3 域；M3 域挂掉时「压缩没执行」这条最要紧的信息
          * 会跟着一起消失（2026-10-08 就是这么静默了两版）。宁可这一条没有用量行，也不能没有它。 */
-        const receiptOnly = renderCompactReceipt(takeCompactReceipt(sidEarly));
+        /* R83（F5-b）：量测失败路径也要走门控（同一判据）。 */
+        const receiptOnly = renderCompactReceipt(takeCompactReceipt(sidEarly), await effortTalkAllowed(agent));
         if (receiptOnly) {
           const message = createUserMessage({
             content: [{ type: 'text', text: receiptOnly }],
@@ -623,7 +635,9 @@ export function createM2Injection(deps) {
       /* R16.14：先用**实测的每轮增量**算趋势，再渲染卡片（评审建议 2：把预测题变算术题）。
        * R27（用户口径）：卡**照旧每轮一张**——它是「每轮开头落一次决策」的提醒位；
        * 要改的是**决策行的作用域**（每轮开头一次 + 中途变更再一次），不是卡的频率（见卡内文案）。 */
-      const card = renderPolicyCard(r.ratio, effCrit, r.window, trendOf(sid, r.ratio, r.window, effCrit), { session: agent.session, measure: r.measure }); // M3.5 通道2：政策卡（相关占用以上才出现）
+      /* R83（F5-a，Kimi 复核）：卡片原先在 `effGate` 之前渲染 ⇒ 只拿到 `effortEnabled`，
+       * 单档模型（canSwitch=false，工具已被隐藏）仍会收到「顺带换档」教学。
+       * 现下移到 `allowSwitchTalk` 计算之后渲染，并传同一判据。 */
       /* 智能思考：**独立门控**（effortEnabled），与压缩的 markerMinRatio 完全解耦——
        * 用户明确要求「全程允许」：低占用也必须能注入/换档（压缩的卡在低占用时是不注入的）。 */
       const effortApi = getEffortApi();
@@ -638,6 +652,10 @@ export function createM2Injection(deps) {
       /* R82（F5）：原先 `!effGate ⇒ true` 把「功能开关关闭」与「读档失败」混为一谈 ⇒
        * effortEnabled=false（默认）时回执仍教模型调已撤掉的工具。判据必须含开关本身。 */
       const allowSwitchTalk = M3.effortEnabled === true && (!effGate || effGate.canSwitch);
+      /* R83（F5-a）：卡片渲染下移到这里——判据已就绪，卡片与工具可见性同源。 */
+      const card = renderPolicyCard(r.ratio, effCrit, r.window, trendOf(sid, r.ratio, r.window, effCrit), {
+        session: agent.session, measure: r.measure, allowSwitchTalk,
+      });
       const baseText = effSuffix ? `${r.text} ｜ ${effSuffix}` : r.text;
       if (effSuffix) state.m2.effortSuffixes = (state.m2.effortSuffixes ?? 0) + 1;
       /* R16.12：换档提醒——**只在真有信号时出现**（用户意图关键词 / 本会话从未换档），

@@ -680,17 +680,21 @@ export function createCompactTool(deps) {
        * ⇒ 锚点 40k、档位 240k、占用 570k 时，卡上说"会摘要掉 ~330k"，实际会摘要 ~530k
        * —— **低估损失 200k，直接误导"现在压划不划算"的决策**。
        * 现按"此刻真正会执行的策略"取预算：锚点已解析 ⇒ 用锚点预算；否则档位预算。 */
-      /* R82（F1）：执行侧在 resolveTier 之后还有一步 `÷retainFactor`（m3.compact.mjs:480-481
-       * tierBudgetHeur = scaleRetainBudget(tierBudget, factor)），卡片原先只对齐到 resolveTier
-       * ⇒ 名义 240k 而实际只留 ~171k，会给出「近端一点都不丢」的**假承诺**。
-       * 现按真实执行口径算；factor≈1 时不显示（避免 ×1.00 噪声）。 */
-      const factor82 = Number(retainFactor) > 1.05 ? Number(retainFactor) : 1;
-      const realTierBudget = factor82 > 1 ? Math.round(t / factor82) : t;
+      /* ═══ R83（Kimi 复核纠正 R82-F1：**我上一版把单位搞反了**）═══
+       * 源码事实（`m3.compact.mjs:475-478`）：
+       *   · `tierBudget` 是**档位承诺（真实口径）**——回执/报告报的就是它；
+       *   · 交给范围选择的是 `tierBudgetHeur = tierBudget / factor`（**启发式预算**）。
+       * 而 `factor = 表盘真实 used ÷ 启发式可见量`（session-facts:72）⇒ 启发式 = 真实 / factor。
+       * 所以「保留承诺 240k（真实）」与「选择预算 156k（启发式）」是**两种单位**：
+       *   · `used`（表盘真实）与 `tierBudget`（真实承诺）同单位 ⇒ 可以直接比较；
+       *   · `used` 减 `t/factor`（启发式）是**跨单位相减**，会高估损失（R82 的错误修法）。
+       * 现回退为用 `t` 比，并把 factor 仅作**口径标注**（与回执一致）。
+       * 锚点预算不折算（位置承诺）——这一点 R82 判断正确，保留。 */
+      const factor83 = Number(retainFactor) > 1.05 ? Number(retainFactor) : 1;
+      const heurTierBudget = factor83 > 1 ? Math.round(t / factor83) : t; // 仅用于标注，不与 used 相减
       const anchorB81 = Number(anchorBudget);
-      const execBudget = Number.isFinite(anchorB81) && anchorB81 > 0 ? anchorB81 : realTierBudget;
-      const execLabel = Number.isFinite(anchorB81) && anchorB81 > 0
-        ? '锚点预计保留预算'
-        : (factor82 > 1 ? `保留预算（真实口径 ×${factor82.toFixed(2)}）` : '本档位保留预算');
+      const execBudget = Number.isFinite(anchorB81) && anchorB81 > 0 ? anchorB81 : t;
+      const execLabel = Number.isFinite(anchorB81) && anchorB81 > 0 ? '锚点预计保留预算' : '本档位保留预算';
       /* R16：档位行按**当前窗口**折算三档的近似保留量；拿不到时给比例不给 token 数。
        * R19：① 展示用中文说法；② 预算按**真实窗口**折算（win = 当前档位预算 ÷ 当前档位比例），
        * 不再用 0.5×/1.5× 的倍数魔法——那只是「8/16/24 恰好成倍数」时的巧合，常量一改就错。 */
@@ -777,7 +781,8 @@ export function createCompactTool(deps) {
           + (anchorFail ? `；锚点本次未能定位（${String(anchorFail).slice(0, 40)}）` : '')
           + `。锚点未命中会自动回退到**${textOf(cur)}**${tbTxt}。`
           : `**当前策略：档位 ${textOf(cur)}**${tbTxt}${tierStateTxt}——这是**近端保留预算**（不是压后总占用）`
-            + (factor82 > 1 ? `；执行侧按真实口径 ×${factor82.toFixed(2)} 折算 ⇒ 实际约 ${kfmt(realTierBudget)} token` : '')
+            /* R83：标注口径（真实承诺不变；换算成启发式的选择预算与回执同源），不与 used 相减。 */
+            + (factor83 > 1 ? `（真实口径；交给范围选择的启发式预算 ≈${kfmt(heurTierBudget)} token）` : '')
             + '。');
       /* R20（用户要求「卡片对称化」）：**多留与少留两个方向都变数字**。
        * 原实现只在 used > 当前预算 时给一句「若先声明浅压24% 少丢多少」——**只量化了多留的好处**，

@@ -714,7 +714,8 @@ const m3src14 = read('m3.compact.mjs'); // ⚠️ m3src 在本文件稍后声明
 ok('R16.14 接线：趋势数据（增量/触线轮数）由 m2 现算并注入卡片；m3 标注「系统代压」',
   /const trendOf = \(sid, ratio, win, crit\) => \{/.test(m2src)
     /* R78：renderPolicyCard 多接一个上下文（session/measure），用于按会话实际策略派生预算。 */
-    && /renderPolicyCard\(r\.ratio, effCrit, r\.window, trendOf\(sid, r\.ratio, r\.window, effCrit\), \{ session: agent\.session/.test(m2src)
+    /* R83：卡片渲染下移到换档判据之后（F5-a），调用变多行 ⇒ 断言容忍参数换行。 */
+    && /renderPolicyCard\(r\.ratio, effCrit, r\.window, trendOf\(sid, r\.ratio, r\.window, effCrit\), \{[\s\S]{0,120}session: agent\.session/.test(m2src)
     && /trendHistory\.set\(sid, rec\)/.test(m2src) && /TREND_SAMPLES/.test(m2src)
     && /系统代压（本会话未申报档位/.test(m3src14)
     && /getCompactTool\(\)\?\.hasTier\?\.\(sidE\)/.test(m3src14),
@@ -1631,7 +1632,7 @@ ok('决策卡/一次性说明拿到的是**生效**强制线（不是配置值�
   /* R75（E1）：教学线不再自己算，改用注入的 effectiveCriticalOf（含动态余量，与 m3 实际触发同源）。 */
   /const effCrit = effectiveCriticalOf\(agent\);/.test(m2src)
   && /effectiveCriticalOf: (?:effectiveCriticalInjected|\(agent\) =>)/.test(m2src + host)
-  && /renderPolicyCard\(r\.ratio, effCrit, r\.window, trendOf\(sid, r\.ratio, r\.window, effCrit\), \{ session/.test(m2src) && /renderBrief\(effCrit, r\.window\)/.test(m2src),
+  && /renderPolicyCard\(r\.ratio, effCrit, r\.window, trendOf\(sid, r\.ratio, r\.window, effCrit\), \{[\s\S]{0,120}session/.test(m2src) && /renderBrief\(effCrit, r\.window\)/.test(m2src),
   '教学仍用配置值 ⇒ 教一个不会触发的数字（与门控不同源）');
 ok('两个出口都把 effCrit 落进模块参数（不是各自再读 M3.criticalRatio）',
   /* 必须数**两处**（renderPolicyCard 与 renderBrief 各一）——只匹配到一处时，
@@ -1738,7 +1739,9 @@ const injectBody = (() => {
   /* ⚠️ 2026-10-08：调用点由 `renderPolicyCard(r.ratio)` 变为 `renderPolicyCard(r.ratio, effCrit)`
    * （决策卡/说明必须教**生效强制线**而非配置值）⇒ 正则放宽到参数列表任意内容。
    * R12：注入主体已搬进 plugin/m2.inject.mjs 的 `buildInjection` ⇒ 从模块取切片。 */
-  const m = /const card = renderPolicyCard\(r\.ratio[^;]*\);([\s\S]*?)return \{ message, text: fullText/.exec(m2src);
+  /* R83：卡片渲染已**下移**到换档判据之后（F5-a）⇒ 原先以 `const card =` 为切片起点的做法会漏掉
+   * effort 注入段（renderSuffix/renderBrief）。改以「智能思考：独立门控」注释为起点。 */
+  const m = /\/\* 智能思考：\*\*独立门控\*\*([\s\S]*?)return \{ message, text: fullText/.exec(m2src);
   return m ? m[1] : '';
 })();
 ok('解析出 M2 注入主体（m2.inject.mjs buildInjection）', injectBody.length > 0, '未匹配到注入主体（改名了？）');
@@ -2759,9 +2762,13 @@ console.log('\n== 6.23 R18：单档静默 + 工具可见性 + 开关撤回 ==');
   ok('R18 静态：三个文本出口全部接判据（后缀 / 教学 / 提醒）', gateUses >= 3,
     `实际命中 ${gateUses} 处 —— 少一处就会出现「工具没了、文本还在教你调用」的自相矛盾`);
   ok('R18 静态：压缩自检回执里的换档提示也接判据（最易漏的一处，在 m2 不在 effort 域）',
-    /const renderCompactReceipt = \(v, allowSwitch = true\) => \{/.test(m2src)
+    /* R83（F5-b）：默认值改为 **false**（"没说"≠"可以提"），并把三条回执路径统一到单点门控。 */
+    /const renderCompactReceipt = \(v, allowSwitch = false\) => \{/.test(m2src)
     && /const switchHint = allowSwitch/.test(m2src)
     && /renderCompactReceipt\(takeCompactReceipt\(sidEarly\), allowSwitchTalk\)/.test(m2src)
+    && /const effortTalkAllowed = async \(agent\) => \{/.test(m2src)
+    && /renderCompactReceipt\(takeCompactReceipt\(sidEarly\), await effortTalkAllowed\(agent\)\)/.test(m2src)
+    && /const allowMid = await effortTalkAllowed\(agent\);/.test(m2src)
     && /const effGate = eff \? \(effortApi\?\.canSwitch\?\.\(eff\) \?\? null\) : null;/.test(m2src),
     '回执仍在劝模型调用一个已隐藏的工具');
   ok('R18 静态：工具注册持有**可撤销句柄**，开关关闭时撤回',
@@ -5410,11 +5417,13 @@ ok('R75（S4）：client 只剩**一份** unwrapEnv，面板复用模块级实�
   const base82 = { ratio: 0.57, minRatio: 0.3, criticalRatio: 0.75 };
   /* F1（P1）：执行侧会 ÷retainFactor；卡片必须按真实口径算，不能再给「一点都不丢」的假承诺 */
   const f182 = api82.renderCard({ ...base82, usedTokens: 200000, tierName: 'heavy', tierBudget: 240000, tierRatio: 0.24, retainFactor: 1.4 }) ?? '';
-  ok('R82 行为级（F1）：卡片按**真实口径 ×factor** 算损失，不再出现假的「一点都不丢」',
-    /* 数字格式化在测试桩里走内部默认（171k/29k），生产 host 会注入 kfmt（171.4k）——
-     * 故断言只钉**量级与口径标签**，不钉小数位。 */
-    /真实口径 ×1\.40/.test(f182) && /171/.test(f182) && /摘要掉 ~(?:28\.6k|29k)/.test(f182)
-    && !/一点都不丢/.test(f182),
+  /* ═══ R83（Kimi 复核纠正）：R82-F1 的修法**把单位搞反了** ═══
+   * `tierBudget` 是**档位承诺（真实口径）**，`tierBudget/factor` 只是交给范围选择的**启发式预算**
+   * （m3:475-478）；`factor = 表盘真实 ÷ 启发式` ⇒ 二者是**两种单位**，不能相减。
+   * 故 used(200k) < tier(240k) 时「近端一点都不丢」是**正确结论**，必须保留。 */
+  ok('R83 行为级（F1 纠正）：`used`(真实) 与 `tierBudget`(真实承诺) 同单位比较 ⇒ 200k<240k 必须判「不丢」',
+    /一点都不丢/.test(f182) && !/摘要掉/.test(f182)
+    && /启发式预算 ≈171/.test(f182),
     `实际：${f182.split(String.fromCharCode(10)).filter((l) => /保留预算|真实口径/.test(l)).join(' ｜ ').slice(0, 240)}`);
   /* F2（P1）：窗口夹取时不能用 t/r 反推窗口（200k 窗口 + light 档 ⇒ 预算 40k，名义 8%） */
   const f282 = api82.renderCard({ ...base82, window: 200000, usedTokens: 300000, tierName: 'light', tierBudget: 40000, tierRatio: 0.08, clamped: true }) ?? '';
@@ -5476,6 +5485,46 @@ ok('R75（S4）：client 只剩**一份** unwrapEnv，面板复用模块级实�
   const hud82 = await api82f.hudPayload(ag82b);
   ok('R82 行为级（F7）：同值调用是**成功**（applied:already）⇒ 不得记成「最近一次未生效」',
     hud82?.lastSkip === null, `实际 lastSkip=${JSON.stringify(hud82?.lastSkip)}`);
+}
+/* ═══ R83（Kimi-K3.1-Pro 复核）守卫：卡片门控顺序 + 同值成功清旧原因 ═══ */
+{
+  const m2src83 = readFileSync(join(PLUGIN, 'm2.inject.mjs'), 'utf8');
+  const iGate = m2src83.indexOf('const allowSwitchTalk = M3.effortEnabled === true && (!effGate || effGate.canSwitch);');
+  const iCard = m2src83.indexOf('const card = renderPolicyCard(');
+  ok('R83 结构级（F5-a）：卡片渲染在换档判据**之后**，并传入同一 `allowSwitchTalk`（单档模型不再被教）',
+    iGate > 0 && iCard > iGate && /allowSwitchTalk,/.test(m2src83.slice(iCard, iCard + 400)),
+    `iGate=${iGate} iCard=${iCard}（卡片必须在判据之后渲染，且带上判据）`);
+  ok('R83 结构级（F5-b）：回执门控**单点化**（三条路径共用 effortTalkAllowed，默认值 false）',
+    /const renderCompactReceipt = \(v, allowSwitch = false\) => \{/.test(m2src83)
+    && (m2src83.match(/effortTalkAllowed\(agent\)/g) ?? []).length >= 2,
+    '旁路仍可能默认允许提及已撤掉的工具');
+}
+{
+  /* F7（Kimi 补正）：三步序列 —— 接受 max → 改 low 被冷却拒 → 再调 max 返回 already
+   * ⇒ 最后一步**已成功**，lastSkip 必须为 null（否则 tooltip 一直显示"冷却未生效"）。 */
+  const eMod83 = await import(pathToFileURL(join(PLUGIN, 'effort.mjs')).href);
+  let spec83 = null;
+  const api83 = eMod83.createEffort({
+    svc: (k) => (k === 'tools' ? { register: (t) => { spec83 = t; return () => {}; } }
+      : k === 'llm' ? { resolveModelInfo: async () => ({ reasoning: { efforts: [{ id: 'low' }, { id: 'high' }, { id: 'max' }], defaultEffort: 'high' } }) }
+        : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { effortSkips: {}, effortDiag: {}, effortSwitches: 0, effortReasserts: 0, effortToolCalls: 0, effortHooks: 0 } },
+    readCfg: () => ({ enabled: true, effortEnabled: true, cooldownMs: 30000 }),
+    getDefineTool: () => (sp) => sp,
+  });
+  api83.ensure();
+  const ag83 = { id: 'sid-r83', sessionId: 'sid-r83', session: { id: 'sid-r83', requestHeader: () => ({ config: { provider: 'p', model: 'm', reasoningEffort: 'high' } }) } };
+  const a1 = await spec83.execute({ effort: 'max' }, { agent: ag83 });
+  const a2 = await spec83.execute({ effort: 'low' }, { agent: ag83 });   // 冷却拒绝
+  const hud2 = await api83.hudPayload(ag83);
+  const a3 = await spec83.execute({ effort: 'max' }, { agent: ag83 });   // already（成功）
+  const hud3 = await api83.hudPayload(ag83);
+  ok('R83 行为级（F7）：三步序列（接受→冷却拒→同值 already）后 lastSkip 必须清空',
+    a1?.ok === true && a2?.ok === false && hud2?.lastSkip?.kind === 'cooldown'
+    && a3?.ok === true && hud3?.lastSkip === null,
+    `ok=[${a1?.ok},${a2?.ok},${a3?.ok}] lastSkip2=${JSON.stringify(hud2?.lastSkip)} lastSkip3=${JSON.stringify(hud3?.lastSkip)}`);
 }
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));

@@ -536,9 +536,11 @@ export function createEffort(deps) {
       }
       /* 幂等：与期望档位相同 ⇒ 直接成功（不消耗冷却） */
       if (bySid.get(sid)?.want === want) {
-        /* R82（F7）：这是**成功**（applied:'already'），不能按"未生效"记 lastSkip
-         * （否则 chip tooltip 会显示「最近一次未生效：与当前档位相同」）。只记全局计数。 */
+        /* R82（F7）：这是**成功**（applied:'already'），不能按"未生效"记 lastSkip。只记全局计数。
+         * R83（Kimi 复核）：还要**清掉旧的** lastSkip——否则「接受 max → 改 low 被冷却拒 → 再调 max
+         * 返回 already」这条序列里，最后一步已成功，tooltip 仍显示"冷却未生效"。 */
         bumpSkip('sameValue');
+        try { skipLastBySid.delete(String(sid ?? '')); } catch { /* 吞 */ }
         /* R15：回读 + 自检契约（同 accepted 分支，理由见那里）。 */
         return {
           ok: true,
