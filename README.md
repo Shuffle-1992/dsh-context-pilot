@@ -52,10 +52,11 @@ profile `package.json` 两处要改（以本机 `desktop` profile 为例）：
 
 **当前版本 `v0.1.8`** · 逐版本历史与实证记录见 [`docs/milestones.md`](docs/milestones.md)。
 
-### 最近更新（v0.1.6 → v0.1.76）
+### 最近更新（v0.1.6 → v0.1.77）
 
 | 版本 | 更新 | 为什么值得知道 |
 | --- | --- | --- |
+| **v0.1.77** | **R84 遗留项：F1-附 标注对齐 + N1 chip 解耦** | F1-附：卡片 factor 标注阈值改为**按 2 位小数**判定（对齐执行侧"凡 >1 都折算"，且不产生 ×1.00 噪声），标注补写 `×f`（与回执同格式）。N1：chip 把**路由行与档位行解耦**——路由取 `pending || lastUsed`（本轮会用），档位取 host `currentLabel`（真实生效），隐藏条件由 `!effort` 改 `!tierLabel` ⇒ "只换模型"时不再混旧模型/整块消失。N2 分两级（面板可见 → wire 通知）待安排。**988 断言** |
 | **v0.1.76** | **R83 双模型交叉审查：冲突裁定 + 4 项修复（含回退我上轮的错误修法）** | Qwen3.8-Flash（16 条）与 Kimi-K3.1-Pro（7 条）对 F1 结论相反；回源码裁定 **Kimi 正确**——`tierBudget` 是真实口径承诺、`t/factor` 只是启发式选择预算，**跨单位相减会高估损失** ⇒ **回退 R82-F1**（factor 仅作标注），断言反转。另修：F5-a 卡片渲染下移到换档判据之后（单档模型不再被教）；F5-b 回执门控单点化 + 默认值 true→false（三条路径含量测失败）；F7 同值成功要清旧 lastSkip。DeepSeek-Flash 两次排队超时（零输出），由 Kimi 补位。**985 断言** |
 | **v0.1.75** | **R82 Qoder（Qwen3.8-Flash）交叉审查落地 9 项** | **F1(P1)** 卡片用名义预算算损失而执行侧还 ÷retainFactor ⇒ 假的「一点都不丢」；改为真实口径并按 ×f 标注。**F2(P1)** 三档预算由 `预算÷比例` 反推窗口（夹取后 2.5× 假窗口、轮数差 2.6×）⇒ 传真实 window + `resolveTier` 现算 + 夹取显示真实占比。F6 `{window}` 恒空；F3 description 冷却秒数注册期冻结；F4 nudge 到顶吞掉降档分支；F5 默认关闭仍教调已撤掉工具；F7 同值成功被记"未生效"；F11 门槛前移省走查；F12 口径统一。**982 断言** |
 | **v0.1.74** | **R81 本轮修改的全面 Review（6 项修复）** | 自查 R78/R79/R80：**P1** 锚点模式下 loss 行仍按档位预算算（锚点 40k vs 档位 240k ⇒ 低估损失 200k、误导"现在压划不划算"）⇒ 改按"真正会执行的策略"取预算；P2：锚点失败措辞"上次"→"本次"、锚点模式「两个方向」标注"若改按档位"、chip tooltip 空行（filter Boolean）、换档成功后清 lastSkip；P3：删死变量。另记录 5 条保留风险（锚点预算每轮现算、nudge 排序假设、关键词误报、可选集未知时不否决、两档模型静默）。**974 断言** |
@@ -377,7 +378,7 @@ Agent 自改档不应改掉新会话的默认档。
 **已完成**：M1–M5（用量读取 / 每轮注入 / 会话自说明 / HUD 弹窗 / 历史持久化）、R1–R21
 （智能思考 + 换档工具、压缩改工具触发、保留范围自算、全面审查加固、**压缩档位三选一**、
 工具后自检回执、回执按会话隔离、**用户手动改档的轮首知情**、**单档模型零注入 + 工具静默**）。**9 个域模块 + core**，`host.impl.mjs` **1836 → 518 行**。
-**测试**：contract 795 + static 84 + report 54 + boot 22 + client-render 30 = **985 断言**全绿；关键回归均有变异验证。
+**测试**：contract 798 + static 84 + report 54 + boot 22 + client-render 30 = **988 断言**全绿；关键回归均有变异验证。
 逐里程碑台账（含踩坑与实测数值）：[`docs/milestones.md`](docs/milestones.md)；
 早期进度历史存档：[`docs/status-archive.md`](docs/status-archive.md)。
 
@@ -399,7 +400,7 @@ npm run test:report   # 只跑报告形状
 | `report.mjs` | 54 | 产出侧字段契约；`republishFromReport`（原 `bfOnce`）回填链依赖；C3② 关键事件必须走 full 档（含**满环优先淘汰 slim**，防 FULL 取证被高频事件挤出）；**getHud 作用域与 criticalCap 实参契约**；**调查结论留档**（探针退役后结论不得丢）；真实报告结构自洽（**无嵌套条件断言** ⇒ 断言数不得随数据漂移）；`hud-acts.json` 去重；dump 工具可跑 | 报告形状无声破坏（踩过 2 次：顶层读 m3/m5、脚本读已删字段）；**证据静默丢失**（120 条全 slim、FULL 被挤光而断言全绿） |
 | `boot.mjs` | 21 | **宿主启动冒烟**：真跑 `apply(ctx, {}, {pluginDir, reportPath})`（桩 ctx）→ HUD 面注册 → **真调 `getHud(null)` 必须 `ok:true`** → `criticalCap`/occupancy/`effortEnabled` 三线 → 四个监听器 → **真调 pre-step handler**（abort 与 step=1 两次）→ **M2 注入路径留下记账**（`m2.skips` 有键或 injections>0）→ 有历史时 `m5.lastPublish==='ok'` → 报告落盘。副作用边界：报告写临时目录、`hud-acts.json` 只读不写 | **接线不可达**（R11 真事故：接线块被嵌进 `schedule()` 函数体、语法合法、423 条源断言全绿，**压缩与弹窗全链路静默失效**）——`node --check` 与源断言都看不见「代码在不在正确的函数里」 |
 
-合计 **985 条断言**（四套：contract / static / report / **boot**）。
+合计 **988 条断言**（四套：contract / static / report / **boot**）。
 
 **已验证有效**：注入 3 个人为 bug（`m3-act` 误入精简档 / client face 改名 / host 引用 client.js），
 三套件全部抓到且定位精准。**新增断言均实测验证过「对回归确实失败」**（两边都通过的测试等于没测）：

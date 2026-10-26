@@ -902,8 +902,16 @@ window.__ModuleLoader__.load({
 			/* R79：pending 存在但**没带档位**（只换模型/选「默认」）时，原先 effort 被判空 ⇒
 			 * **整个 chip 消失**，即使 lastUsed 有值。现按「带档位的 pending → lastUsed → 任意 pending」回退。 */
 			const pendingSel = sel && sel.pending && sel.pending.reasoningEffort ? sel.pending : null;
-			const shown = pendingSel || (sel && sel.lastUsed) || (sel && sel.pending) || null;
-			const effort = shown && shown.reasoningEffort ? String(shown.reasoningEffort) : null;
+			/* ═══ R84（N1，Kimi 复核）：路由行与档位行**解耦** ═══
+			 * 原实现 `shown = pendingSel || lastUsed`：当「只换模型、pending 不带档位」时，
+			 * `shown` 会落到**旧模型**的 lastUsed ⇒ tooltip 出现「旧 provider/model + 新档位」混行。
+			 * 现分开取：
+			 *   · routeSel —— 本轮**会用的**路由（pending 优先，否则 lastUsed）⇒ 模型行；
+			 *   · effort  —— 仅作档位兜底；真正的档位显示优先用 host 的 currentLabel
+			 *                （host 侧 read() 已是 pending 优先的真实生效值，见 R17 结论⑪）。 */
+			const routeSel = (sel && sel.pending) || (sel && sel.lastUsed) || null;
+			const effortObj = pendingSel || (sel && sel.lastUsed) || null;
+			const effort = effortObj && effortObj.reasoningEffort ? String(effortObj.reasoningEffort) : null;
 			const pendingNow = !!pendingSel;
 			/* ① host 侧信息（开关状态 + 换档冷却）：挂载时问一次；**投影变化时再问一次**
 			 * （换档必然改变投影 ⇒ 天然触发重问，拿到新的 cooldownUntil）。
@@ -977,7 +985,10 @@ window.__ModuleLoader__.load({
 					if (cs.fontSize) node.style.fontSize = cs.fontSize;
 				} catch { /* 忽略 */ }
 			}, [effort]);
-			if (!hostInfo || !hostInfo.on || !effort) return null;
+			/* R84（N1）：档位显示优先 host 的 currentLabel（真实生效口径）——
+			 * 这样「只换模型、pending 无档位」时 chip 仍能显示档位，而不是整块消失。 */
+			const tierLabel = (hostInfo && hostInfo.currentLabel) || effort;
+			if (!hostInfo || !hostInfo.on || !tierLabel) return null;
 			/* 显示形态（2026-10-08 用户要求重做）：
 			 * ① **删除内联的档位值与冷却秒数**（原「智能思考档位 low · 冷却 23s」）——
 			 *    这两项不再占位，全部移入 title 提示（信息不丢，只是不抢视觉）。
@@ -1014,8 +1025,8 @@ window.__ModuleLoader__.load({
 			 * React 更新 title attribute ⇒ 浏览器重置原生 tooltip（用户悬停时弹窗每秒闪）。
 			 * ✔ title 只放**稳定内容**；剩余秒数本就有火花显色动画承担（进度即信息），不再进 title。 */
 			const tip = [
-				`模型：${shown.provider}/${shown.model}`,
-				`当前档位：${(hostInfo && hostInfo.currentLabel) || effort}`
+				`模型：${(routeSel && routeSel.provider) || "?"}/${(routeSel && routeSel.model) || "?"}`,
+				`当前档位：${tierLabel}`
 					+ (hostInfo && hostInfo.pendingChanged
 						? "（**用户刚改，本步骤即生效**——不是「保持」）"
 						: (pendingNow ? "（已选，下一步生效）" : "")),

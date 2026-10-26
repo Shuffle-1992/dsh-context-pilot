@@ -278,8 +278,11 @@ ok('chip 注册到 conversation.input.right（模型选择器左侧）',
 ok('chip 注册 id 独立（不与官方条目撞车）', /id:\s*"context-pilot-effort"/.test(client),
   '未用自有 id ⇒ 可能替换官方条目');
 ok('chip 仅在 effortEnabled 开启时显示',
-  /if \(!hostInfo \|\| !hostInfo\.on \|\| !effort\) return null;/.test(client),
-  '缺少显示条件 ⇒ 开关关闭时仍显示');
+  /* R84（N1）：隐藏条件从 `!effort` 改为 `!tierLabel`——档位优先取 host 的 currentLabel，
+   * 这样「只换模型、pending 无档位」时 chip 不会整块消失。 */
+  /const tierLabel = \(hostInfo && hostInfo\.currentLabel\) \|\| effort;/.test(client)
+  && /if \(!hostInfo \|\| !hostInfo\.on \|\| !tierLabel\) return null;/.test(client),
+  '缺少显示条件 ⇒ 开关关闭时仍显示；或档位只认 effort ⇒ 只换模型时 chip 消失');
 /* R3-S9：host 显式返回 effortEnabled 布尔 —— 开关状态与档位数据**分离**。
  * 原先 chip 靠 `effort.ok` 推断开关，而 `effort.ok=false` 既可能是「开关关闭」
  * 也可能是「读档失败」，两种语义混在一个字段里。 */
@@ -5525,6 +5528,32 @@ ok('R75（S4）：client 只剩**一份** unwrapEnv，面板复用模块级实�
     a1?.ok === true && a2?.ok === false && hud2?.lastSkip?.kind === 'cooldown'
     && a3?.ok === true && hud3?.lastSkip === null,
     `ok=[${a1?.ok},${a2?.ok},${a3?.ok}] lastSkip2=${JSON.stringify(hud2?.lastSkip)} lastSkip3=${JSON.stringify(hud3?.lastSkip)}`);
+}
+/* ═══ R84（Kimi 复核剩余项）：F1-附 标注阈值 + N1 路由/档位解耦 ═══ */
+{
+  const ctMod84 = await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href);
+  const api84 = ctMod84.createCompactTool({
+    svc: (k) => (k === 'tools' ? { register: () => {} } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { compactToolDiag: { calls: 0 } } }, readCfg: () => ({ enabled: true }),
+    getDefineTool: () => (sp) => sp, getRangeApi: rangeStub,
+  });
+  api84.ensure();
+  const cardOf = (factor) => api84.renderCard({ ratio: 0.57, minRatio: 0.3, criticalRatio: 0.75, usedTokens: 200000,
+    tierName: 'heavy', tierBudget: 240000, tierRatio: 0.24, retainFactor: factor }) ?? '';
+  ok('R84 行为级（F1-附）：factor=1.04（执行侧会折算）⇒ 卡片必须标注口径（不再因 1.05 阈值沉默）',
+    /×1\.04/.test(cardOf(1.04)) && /启发式预算/.test(cardOf(1.04)),
+    `实际：${cardOf(1.04).split(String.fromCharCode(10)).filter((l) => /启发式|当前策略/.test(l)).join(' ｜ ').slice(0, 200)}`);
+  ok('R84 行为级（F1-附）：factor=1（未折算）⇒ 不出现标注噪声',
+    !/启发式预算/.test(cardOf(1)),
+    `实际：${cardOf(1).slice(0, 160)}`);
+  const client84 = readFileSync(join(PLUGIN, 'client.js'), 'utf8');
+  ok('R84 结构级（N1）：chip 路由行取「本轮会用的路由」，档位行取 host currentLabel（两者解耦）',
+    /const routeSel = \(sel && sel\.pending\) \|\| \(sel && sel\.lastUsed\) \|\| null;/.test(client84)
+    && /模型：\$\{\(routeSel && routeSel\.provider\)/.test(client84)
+    && /const tierLabel = \(hostInfo && hostInfo\.currentLabel\) \|\| effort;/.test(client84),
+    '路由与档位仍绑在同一对象 ⇒ 「只换模型」时 tooltip 混旧模型');
 }
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));

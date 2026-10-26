@@ -4600,3 +4600,33 @@ F5 回执不看开关 ⇒ **全部 CAUGHT**。
 **变异**：F1 退回跨单位相减 / F5-a 卡片不接门控 / F5-b 回执默认放行 / F7 不清旧原因 ⇒ **全部 CAUGHT**。
 
 **测试**：985 断言全绿（contract 795 / static 84 / report 54 / boot 22 / client-render 30）。
+### R84 遗留三项的安排与落地（2026-10-26，用户问「未做的3个怎么安排」）
+
+**安排原则**：先做「零风险且能立刻收敛口径」的，再做「需真机观察才能定方案」的，最后做「需要改链路」的。
+**依赖证据**：本轮先核实了两个事实，避免拍脑袋：
+① `modelSelection` 投影形状——我方 `effort.routeOf` 已在用：`pending` 可存在但**不带档位**，`lastUsed` 是**上一次请求**的完整对象；
+② **没有 HUD 推送到 client 的通道**（只有 `settingsScope.subscribe` 与设置变更通知）⇒ chip 的"实时失败原因"不是小改。
+
+| 项 | 安排 | 状态 |
+|---|---|---|
+| **F1-附**（factor 1.01–1.05 标注阈值与执行侧不一致） | 今天做：标注判定改为**按 2 位小数**（与 factor 落盘精度 `toFixed(2)` 同源）⇒ 对齐执行侧「凡 >1 都折算」，又不产生 `×1.00` 噪声；标注同时写出 `×f` 本身（与回执同格式） | ✅ 本文 |
+| **N1**（只换模型时 chip 可能混行/消失） | 今天做：**路由行与档位行解耦**——路由取 `pending || lastUsed`（本轮会用），档位取 host `currentLabel`（pending 优先的真实生效值）；隐藏条件由 `!effort` 改为 `!tierLabel` | ✅ 本文 |
+| **N2**（`lastSkip` 更新不触发 chip 拉取 ⇒ 失败原因可能长期不可见） | **分两级**：A 先做「面板可见」（面板打开/刷新即拉 HUD，无需新通道，约 1h，低风险）；B 若确需 chip 实时，再新增 wire 通知（约 2–3h，中风险，要改 client+wire 两侧） | ⏳ 待安排 |
+
+#### 本轮落地细节
+
+1. **F1-附**：`compact-tool` 的 factor 判定 `>1.05` → 先 `Math.round(f*100)/100` 再 `>1`；
+   标注文案补上 `×${factor.toFixed(2)}`。断言：`factor=1.04` 必须出现「×1.04」与「启发式预算」；`factor=1` 不得出现标注噪声。
+2. **N1**：client chip 拆成 `routeSel`（模型行）/ `effortObj`（档位兜底）/ `tierLabel = host.currentLabel || effort`（显示与隐藏判据）。
+   断言：`routeSel` 结构、模型行取 `routeSel.provider`、`tierLabel` 三处同时在位。
+
+#### 剩余积压（不在"三项"里，但同一批审查的产物）
+
+R82 时记为已知限制的 7 条 P3（F8 `cooldownMs=0` 文案、F9 `used` 兜底两套取数、F10 `anchorLabelOf` 两份、
+F13 死码/无消费者导出、F14 ≤3000 守卫样本余量、F15 跨口径相减标注、F16 锚点失败内部 token 中文映射）。
+建议打包成**一次「清理版」**（约 2h，低风险，全部是文案/死码/断言样本，不碰执行路径）。
+
+**守卫**：contract 新增 3 条（F1-附 两条行为级 + N1 一条结构级）+ 1 条形状更新。
+**变异**：F1-附 阈值退回 1.05 / N1 路由退回合并对象 ⇒ **全部 CAUGHT**。
+
+**测试**：988 断言全绿（contract 798 / static 84 / report 54 / boot 22 / client-render 30）。

@@ -690,7 +690,12 @@ export function createCompactTool(deps) {
        *   · `used` 减 `t/factor`（启发式）是**跨单位相减**，会高估损失（R82 的错误修法）。
        * 现回退为用 `t` 比，并把 factor 仅作**口径标注**（与回执一致）。
        * 锚点预算不折算（位置承诺）——这一点 R82 判断正确，保留。 */
-      const factor83 = Number(retainFactor) > 1.05 ? Number(retainFactor) : 1;
+      /* R84（F1-附，Kimi 复核）：执行侧 `scaleRetainBudget` 对**任何 >1** 的 factor 都折算，
+       * 而卡片标注只在 >1.05 显示 ⇒ 1.01–1.05 区间会出现「执行折算了、卡片不说」。
+       * 现按 **2 位小数**判定（与 factor 落盘精度 `toFixed(2)` 同源），既对齐执行侧又不产生 ×1.00 噪声。 */
+      const fRaw84 = Number(retainFactor);
+      const f84 = Number.isFinite(fRaw84) ? Math.round(fRaw84 * 100) / 100 : 1;
+      const factor83 = f84 > 1 ? f84 : 1;
       const heurTierBudget = factor83 > 1 ? Math.round(t / factor83) : t; // 仅用于标注，不与 used 相减
       const anchorB81 = Number(anchorBudget);
       const execBudget = Number.isFinite(anchorB81) && anchorB81 > 0 ? anchorB81 : t;
@@ -782,7 +787,7 @@ export function createCompactTool(deps) {
           + `。锚点未命中会自动回退到**${textOf(cur)}**${tbTxt}。`
           : `**当前策略：档位 ${textOf(cur)}**${tbTxt}${tierStateTxt}——这是**近端保留预算**（不是压后总占用）`
             /* R83：标注口径（真实承诺不变；换算成启发式的选择预算与回执同源），不与 used 相减。 */
-            + (factor83 > 1 ? `（真实口径；交给范围选择的启发式预算 ≈${kfmt(heurTierBudget)} token）` : '')
+            + (factor83 > 1 ? `（真实口径 ×${factor83.toFixed(2)}；交给范围选择的启发式预算 ≈${kfmt(heurTierBudget)} token）` : '')
             + '。');
       /* R20（用户要求「卡片对称化」）：**多留与少留两个方向都变数字**。
        * 原实现只在 used > 当前预算 时给一句「若先声明浅压24% 少丢多少」——**只量化了多留的好处**，
