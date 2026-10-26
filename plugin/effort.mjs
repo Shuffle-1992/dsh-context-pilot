@@ -563,6 +563,9 @@ export function createEffort(deps) {
       st.want = want;
       st.wantAt = Date.now();
       st.acceptFrom = eff.current ?? null; // R73（C4）：记下接受时刻的当前档位（让位判据的基线之一）
+      /* R81（自查）：换档**已成功**后必须清掉该会话的"最近一次未生效"记录——
+       * 否则 tooltip 会在成功之后仍显示上一次失败原因（用户会以为这次也没成）。 */
+      try { skipLastBySid.delete(String(sid ?? '')); } catch { /* 吞 */ }
       /* R15.1（用户实测反馈：「切换到 Max 时 chip 没有进入冷却状态」）：
        * **冷却锚点必须落在「接受时刻」**，而不是 apply 时刻。
        * 实测时序：工具接受（05:02:08.696）→ 插件在**下一次请求**时 apply（.719）→ 客户端投影随之变化
@@ -1031,6 +1034,8 @@ export function createEffort(deps) {
       /* ①② 用户意图（间隔 NUDGE_MIN_GAP 轮，防每轮重复）。 */
       /* R80（"应换则换"的精度）：已经在最高档时提示"可升档"、已在最低档时提示"可降档"都是
        * **无效建议**（模型照做只会被拒绝或原地不动）⇒ 无空间就不提示。 */
+      /* ⚠️ 假设：`resolveModelInfo().reasoning.efforts` 按**强度升序**（实测 low→high→max）。
+       * 若某 provider 返回乱序，这两个守卫会失效（只影响"多余的提示"，不影响换档本身）。 */
       const idxOf = (list, v) => (Array.isArray(list) ? list.indexOf(v) : -1);
       const effortsList = Array.isArray(eff.efforts) ? eff.efforts : null;
       const atTop = effortsList && effortsList.length > 1 && idxOf(effortsList, eff.current) === effortsList.length - 1;

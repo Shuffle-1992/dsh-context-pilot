@@ -670,6 +670,14 @@ export function createCompactTool(deps) {
       const tr0 = Number(tierRatio ?? retainRatio);
       const r = Number.isFinite(tr0) && tr0 > 0 ? tr0 : Number(retainRatio);
       const t = Number.isFinite(tb0) && tb0 > 0 ? tb0 : Number(retainTokens);
+      /* ═══ R81（本轮全面自查发现的真缺陷）═══
+       * 锚点模式下**实际保留**是锚点预算（40k 级，不折算），而损失行原先用**档位预算** t
+       * ⇒ 锚点 40k、档位 240k、占用 570k 时，卡上说"会摘要掉 ~330k"，实际会摘要 ~530k
+       * —— **低估损失 200k，直接误导"现在压划不划算"的决策**。
+       * 现按"此刻真正会执行的策略"取预算：锚点已解析 ⇒ 用锚点预算；否则档位预算。 */
+      const anchorB81 = Number(anchorBudget);
+      const execBudget = Number.isFinite(anchorB81) && anchorB81 > 0 ? anchorB81 : t;
+      const execLabel = Number.isFinite(anchorB81) && anchorB81 > 0 ? '锚点预计保留预算' : '本档位保留预算';
       /* R16：档位行按**当前窗口**折算三档的近似保留量；拿不到时给比例不给 token 数。
        * R19：① 展示用中文说法；② 预算按**真实窗口**折算（win = 当前档位预算 ÷ 当前档位比例），
        * 不再用 0.5×/1.5× 的倍数魔法——那只是「8/16/24 恰好成倍数」时的巧合，常量一改就错。 */
@@ -686,19 +694,17 @@ export function createCompactTool(deps) {
       const tierLine = `**${textOf('light')}**（最省：边界清晰、旧资料可从文件重读）；`
         + `**${textOf('standard')}**（默认：边界拿不准）；`
         + `**${textOf('heavy')}**（保留最多原始细节：跨文件联调/复杂排错，证据不能过早只剩摘要）。`;
-      const keep = Number.isFinite(r) && r > 0 && Number.isFinite(t) && t > 0
-        ? `近端约 ${kfmt(t)} token 原样保留（窗口 × ${Math.round(r * 100)}%），更早的转摘要；未超预算则什么都不压`
-        : '近端内容原样保留，更早的转摘要；未超预算则什么都不压';
+      /* R81（review）：原 `keep` 变量已无消费者（R78 删掉「现行生效」句后遗留）⇒ 删除，避免死代码。 */
       /* R16.14（评审建议 6）：把「压了会丢什么」变成**数字**，而不是让模型猜。
        * 判据：当前上下文总量 ≈ ratio × window；与当前档位的保留预算比较。 */
       const used = Number.isFinite(Number(usedTokens)) && Number(usedTokens) > 0
         ? Number(usedTokens)
         : (Number.isFinite(Number(ratio)) ? Math.round(Number(ratio) * (Number(retainTokens) / (Number(retainRatio) || 0.16))) : null);
       let loss = '';
-      if (used != null && Number.isFinite(t) && t > 0) {
-        loss = used <= t
-          ? `**当前上下文 ≈${kfmt(used)} token ≤ 本档位保留预算 ${kfmt(t)} ⇒ 现在压，近端一点都不丢**（只会把更早的转摘要）。`
-          : `**当前上下文 ≈${kfmt(used)} token > 本档位保留预算 ${kfmt(t)} ⇒ 现在压会摘要掉 ~${kfmt(used - t)} token 近端内容**。`;
+      if (used != null && Number.isFinite(execBudget) && execBudget > 0) {
+        loss = used <= execBudget
+          ? `**当前上下文 ≈${kfmt(used)} token ≤ ${execLabel} ${kfmt(execBudget)} ⇒ 现在压，近端一点都不丢**（只会把更早的转摘要）。`
+          : `**当前上下文 ≈${kfmt(used)} token > ${execLabel} ${kfmt(execBudget)} ⇒ 现在压会摘要掉 ~${kfmt(used - execBudget)} token 近端内容**。`;
       }
       /* R16.14（评审建议 2）：把「若预计会推高」从预测题变成算术题（用实测的每轮增量）。 */
       const delta = Number(deltaTokens);
@@ -739,7 +745,8 @@ export function createCompactTool(deps) {
           + (Number.isFinite(Number(anchorBudget)) && Number(anchorBudget) > 0
             ? `，预计保留 ≈${kfmt(Number(anchorBudget))} token（锚点预算不折算）`
             : '，预算在压缩时按实际边界解析（不折算）')
-          + (anchorFail ? `；上次解析失败（${String(anchorFail).slice(0, 40)}）` : '')
+          /* R81：这是**本次**解析的结果（卡片每轮现算），不是"上次"——措辞如实。 */
+          + (anchorFail ? `；锚点本次未能定位（${String(anchorFail).slice(0, 40)}）` : '')
           + `。锚点未命中会自动回退到**${textOf(cur)}**${tbTxt}。`
           : `**当前策略：档位 ${textOf(cur)}**${tbTxt}${tierStateTxt}——这是**近端保留预算**（不是压后总占用）。`);
       /* R20（用户要求「卡片对称化」）：**多留与少留两个方向都变数字**。
@@ -764,7 +771,8 @@ export function createCompactTool(deps) {
             + (a ? `、压后占用 ≈${(a.pctAfter * 100).toFixed(0)}%${a.turns != null ? `（距 ${crit} ≈${a.turns} 轮）` : ''}` : '')
             + (tail ? `，${tail}` : '');
         };
-        return `**两个方向（选一个）**：${seg(textOf('heavy'), bHeavy, '近端保真最好')}；`
+        /* R81：锚点模式下这两个方向是"若改按档位"的对比，必须标明，否则会被读成当前计划。 */
+        return `${anchorLabel ? '**两个方向（若改按档位）**' : '**两个方向（选一个）**'}：${seg(textOf('heavy'), bHeavy, '近端保真最好')}；`
           + `${seg(textOf('light'), bLight, `余量最大，但近端只剩 ${kfmt(bLight)}`)}。`
           + `多留 ⇒ 压后高、下次压缩更早；少留 ⇒ 余量大、摘要更早。`;
       })() : '';

@@ -5199,7 +5199,8 @@ ok('R75（S4）：client 只剩**一份** unwrapEnv，面板复用模块级实�
   const anchorFail78 = api78.renderCard({ ...base78, tierName: 'heavy', tierBudget: 240000, tierRatio: 0.24,
     anchorLabel: '从最近第 1 条你的消息起', anchorFail: 'text:not-found' }) ?? '';
   ok('R78 行为级（§5.2）：锚点解析失败必须**明示**（并说明会回退档位），不能装作无事',
-    /上次解析失败（text:not-found）/.test(anchorFail78) && /锚点未命中会自动回退/.test(anchorFail78),
+    /* R81：措辞改为「锚点本次未能定位」（卡片每轮现算，不是"上次"）。 */
+    /锚点本次未能定位（text:not-found）/.test(anchorFail78) && /锚点未命中会自动回退/.test(anchorFail78),
     `实际：${anchorFail78.slice(0, 220)}`);
   /* ③ §4.1 去偏向：档位描述改为中性判据（不再把浅压写成"多文件联调/长推理链"专属） */
   ok('R78 行为级（§4.1）：档位描述改为**信息需求**判据（去掉"近端细节不再需要"这类单向措辞）',
@@ -5326,6 +5327,62 @@ ok('R75（S4）：client 只剩**一份** unwrapEnv，面板复用模块级实�
   const nMigrate = api80.renderNudge(mkEff('high', trio), { agent: ag80('sid-mig'), turn: 5, userText: '把这个模块迁移到新接口' });
   ok('R80 行为级：任务类型词（如"迁移"）也能触发换档评估（原先只认语气词）',
     typeof nMigrate === 'string' && /升档/.test(nMigrate), `实际：${JSON.stringify(nMigrate)}`);
+}
+/* ═══ R81：本轮（换档 + 压缩）全面 review 的回归守卫 ═══ */
+{
+  const ctMod81 = await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href);
+  const api81 = ctMod81.createCompactTool({
+    svc: (k) => (k === 'tools' ? { register: () => {} } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { compactToolDiag: { calls: 0 } } }, readCfg: () => ({ enabled: true }),
+    getDefineTool: () => (sp) => sp, getRangeApi: rangeStub,
+  });
+  api81.ensure();
+  const base81 = { ratio: 0.57, minRatio: 0.3, criticalRatio: 0.75, usedTokens: 570000 };
+  /* 自查发现的核心缺陷：锚点模式下损失行用**档位预算** ⇒ 低估损失 200k、误导"现在压划不划算" */
+  const anchorLoss81 = api81.renderCard({ ...base81, tierName: 'heavy', tierBudget: 240000, tierRatio: 0.24,
+    anchorLabel: '按文本「独立模块调查」定位', anchorBudget: 40000 }) ?? '';
+  ok('R81 行为级（P1）：锚点模式下 loss 行必须用**锚点预算**（40k），不能拿档位预算 240k 冒充',
+    /锚点预计保留预算 40k/.test(anchorLoss81) && /摘要掉 ~530k/.test(anchorLoss81)
+    && !/本档位保留预算 240k/.test(anchorLoss81),
+    `实际：${anchorLoss81.split(String.fromCharCode(10)).filter((l) => /保留预算/.test(l)).join(' ｜ ').slice(0, 240)}`);
+  ok('R81 行为级（P2）：锚点模式下「两个方向」必须标注"若改按档位"（否则被读成当前计划）',
+    /两个方向（若改按档位）/.test(anchorLoss81), `实际：${anchorLoss81.slice(0, 160)}`);
+}
+{
+  /* 换档成功后必须清掉该会话的"最近一次未生效"（否则 tooltip 会拿旧失败原因误导） */
+  const eMod81 = await import(pathToFileURL(join(PLUGIN, 'effort.mjs')).href);
+  let spec81 = null;
+  const api81e = eMod81.createEffort({
+    /* R81：必须给 llm 桩，否则 read() 拿不到可选集 ⇒ checkEffort 按设计**不否决**（放行任意档位），
+     * 被测的"非法档"就不非法了（我的第一版测试正是这么写错的，被 run 抓出）。 */
+    svc: (k) => (k === 'tools' ? { register: (t) => { spec81 = t; return () => {}; } }
+      : k === 'llm' ? { resolveModelInfo: async () => ({ reasoning: { efforts: [{ id: 'low' }, { id: 'high' }, { id: 'max' }], defaultEffort: 'high' } }) }
+        : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { effortSkips: {}, effortDiag: {}, effortSwitches: 0, effortReasserts: 0, effortToolCalls: 0, effortHooks: 0 } },
+    readCfg: () => ({ enabled: true, effortEnabled: true, cooldownMs: 30000 }),
+    getDefineTool: () => (sp) => sp,
+  });
+  api81e.ensure();
+  const ag81 = { id: 'sid-r81', sessionId: 'sid-r81', session: { id: 'sid-r81', requestHeader: () => ({ config: { provider: 'p', model: 'm', reasoningEffort: 'high' } }) } };
+  const rBad81 = await spec81.execute({ effort: '不存在的档' }, { agent: ag81 });
+  const hudBad81 = await api81e.hudPayload(ag81);
+  const rGood81 = await spec81.execute({ effort: 'max' }, { agent: ag81 });
+  const hudGood81 = await api81e.hudPayload(ag81);
+  ok('R81 行为级（P2）：失败原因可见，但**换档成功后必须清空**（不留旧原因误导）',
+    hudBad81?.lastSkip?.kind != null && rGood81?.ok === true && hudGood81?.lastSkip === null,
+    `bad=${JSON.stringify(hudBad81?.lastSkip)} good=${JSON.stringify(hudGood81?.lastSkip)} rGood=${JSON.stringify(rGood81)}`);
+}
+{
+  const client81 = readFileSync(join(PLUGIN, 'client.js'), 'utf8');
+  ok('R81 结构级（P2）：chip tooltip 的 lastSkip 缺失时不得 join 出空行',
+    /\]\.filter\(Boolean\)\.join\("\\n"\);/.test(client81), '未过滤 null ⇒ tooltip 中间出现空行');
+  const eff81 = readFileSync(join(PLUGIN, 'effort.mjs'), 'utf8');
+  ok('R81 结构级（P3）：nudge 的"到顶/到底"守卫标注了**排序假设**（efforts 强度升序）',
+    /按\*\*强度升序\*\*/.test(eff81), '未标注假设 ⇒ 换成乱序 provider 时会静默失效，后人无从判断');
 }
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));

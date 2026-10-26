@@ -1026,7 +1026,7 @@ window.__ModuleLoader__.load({
 				ls ? `最近切换：${ls.from} → ${ls.to}（${ls.at}）` : "最近切换：本会话还没有",
 				`会话切换次数：${(hostInfo && hostInfo.switchCount) || 0} 次`,
 				"Agent 可调用 set_reasoning_effort 工具自主换档（本次任务内立即生效）",
-			].join("\n");
+			].filter(Boolean).join("\n"); // R81：lastSkip 缺失时是 null ⇒ 不 join 出空行
 			/* 小尺寸态专用图标（R16.5f 定稿）：**思考火花（四角星 + 小星点），无外框**。
 			 * 语义（用户指出）：这是**智能思考**的 chip，图标必须是思考语义（火花/星芒），
 			 * 不能沿用插件图标的压缩层叠（那是压缩域的语义）。
