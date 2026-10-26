@@ -1,0 +1,33 @@
+{
+  "arm": "16%",
+  "answers": {
+    "Q01": "v0.2.1-compat.9",
+    "Q02": "不知道",
+    "Q03": "不知道",
+    "Q04": "7",
+    "Q05": "13",
+    "Q06": "qps_guard_3017",
+    "Q07": "ERR_KEEP_RANGE_DRIFT",
+    "Q08": "budget_floor_2860",
+    "Q09": "v0.2.1-compat.9",
+    "Q10": "不知道",
+    "Q11": "hud_refresh_900ms",
+    "Q12": "冲突裁定=Kimi-GPT5",
+    "V01": "const keepFromIdx = nodes.length;",
+    "V02": "npm run test:contract -- --only=R16.15",
+    "V03": "at resolveTier (plugin/compact-range.mjs:158:7)",
+    "V04": "ERR_INVALID_ARG_TYPE: \"retainTokens\" must be > 0",
+    "V05": "DCP_EFFORT_COOLDOWN_MS=30000",
+    "V06": "plugin/m3.compact.mjs:481",
+    "V07": "/^anchor:(text|recent-user):/",
+    "V08": "{\"tier\":\"heavy\",\"ratio\":0.24,\"budget\":240000}",
+    "V09": "a3f9c21",
+    "V10": "/api/hud?sid=s-9a611857&fields=effort,usage",
+    "V11": "if (s?.switchedAt && since < cap) {",
+    "V12": "Math.min(MIN_RETAIN_TOKENS, Math.floor(window * MAX_RETAIN_RATIO))",
+    "C01": "不知道",
+    "C02": "没发过；CHANGELOG 无该版本记录",
+    "C03": "不知道",
+    "C04": "不知道"
+  }
+}

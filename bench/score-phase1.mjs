@@ -34,7 +34,7 @@ const norm = (s) => String(s ?? '')
   .replace(/[\s\u3000]+/g, '')
   .replace(/[“”"'`‘’「」『』（）()【】\[\]，。、；：！？!?,.;:]/g, '')
   .toLowerCase();
-const DONT_KNOW = ['不知道', '不清楚', '不确定', '未提及', '未提到', '没有提到', '没有见过', '无法确定', '没写', '不存在'];
+const DONT_KNOW = ['不知道', '不清楚', '不确定', '未提及', '未提到', '没有提到', '没有见过', '没有发过', '没发过', '未发过', '没有', '无法确定', '没写', '不存在'];
 
 function judgeFactual(expect, got) {
   const e = norm(expect);
