@@ -4244,7 +4244,7 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
   ok('R48 冒烟提醒：HUD 远端面用 typert 的 `typertRemote` 绑定 + `remote-methods` 标记（0.2.1 改过该区域）',
     /@deepseek-ai\/dsh-typert-protocol\/remote-methods/.test(wire48) && /typertRemote/.test(wire48)
     && /ctx\.provide\(/.test(readFileSync(join(PLUGIN, 'host.impl.mjs'), 'utf8')),
-    '升级 DSH 后先看 HUD 是否仍有数据（DSH-0.2.1-COMPAT-REVIEW.md §六-4 / §7.6）');
+    '升级 DSH 后先看 HUD 是否仍有数据（docs/DSH-0.2.1-COMPAT-REVIEW.md §六-4 / §7.6）');
 }
 
 /* ═══ 6.42 R49：用 0.2.1-rc.2 的新能力做**正向优化**（锁避让 + 按模型的官方阈值）═══

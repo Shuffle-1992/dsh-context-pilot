@@ -112,8 +112,8 @@
 - **HUD v2 实证（13:3x，用户截图）**：主行「最近压缩 12:26 · 标记 · 省 91.5K」✓、悬停列表+指纹（gen=新实例 muw8q34m、sid=本会话前 13 位）✓、会话过滤 ✓、信封拆包 ✓。悬停仅 1 条 = 报告 120 条环形缓冲已剪掉 11:33/11:57 的 m3-act（预期；可选 hud-acts.json 持久化未排期）。
 - **遗留清账**：~~markerMinRatio 改回 0.2~~ → **用户 13:3x 面板改为 0.15，后续按 0.15 走**；通道 A AbortSignal 补参（低优先）。
 
-### 只读审查（review-findings.md，23 条）—— ✅ 批次 1/2/3 全部落地（2026-10-06 14:1x–14:3x，单次 toggle 热换）
-- **依据**：`review-brief.md`（任务书 + §2 铁约束）→ `review-findings.md`（外部审查员，23 条：A7 / B6 / C6 / D3 + C1 附注）。全条已对照 §4 已知档案去重（无重复项）。
+### 只读审查（docs/review-findings.md，23 条）—— ✅ 批次 1/2/3 全部落地（2026-10-06 14:1x–14:3x，单次 toggle 热换）
+- **依据**：`docs/review-brief.md`（任务书 + §2 铁约束）→ `docs/review-findings.md`（外部审查员，23 条：A7 / B6 / C6 / D3 + C1 附注）。全条已对照 §4 已知档案去重（无重复项）。
 - **部署**：host.impl.mjs 21 处 + client.js 10 处，改完 `node --check` 双通过 → 单次 `set_plugin include:dsh-context-pilot` false→true 热换（entry/wire/protocol 未动，无需重启 DSH）；client.js 侧待用户刷新页面生效。
 - **批次 1（机械执行，零行为变更）**：
   - **B3** 死代码退役：`publishHud` 的 `_hudRetry` 过滤删（configEditor 通道残留）、`state.m3.keywordHits` 恒 0 字段删、`state.m3.dryRun` 静态镜像删（双轨失真，真值看 `m3.eff.dryRun`）、`pendingBySid.resumes` 写入删（从未读取）。**报告形状变化**：新条目不含 `m3.keywordHits`/`m3.dryRun`（历史条目原样保留，dump 脚本不受影响）。
@@ -3409,7 +3409,7 @@ R46 把函数体写长后它就误报（把共享函数自己的模板当成了�
 ### R48 DSH 0.2.1 升级兼容（2026-10-17，只做兼容、不加功能）
 
 **背景**：用户要求「**只做针对新版兼容性相关的优化**，确保更新 DSH 后插件正常运行」，升级后再做后续优化。
-复核结论见 `DSH-0.2.1-COMPAT-REVIEW.md`（含 §七 独立复核）：**0 项破坏性冲突**。
+复核结论见 `docs/DSH-0.2.1-COMPAT-REVIEW.md`（含 §七 独立复核）：**0 项破坏性冲突**。
 
 **逐包 diff（npm 0.2.1-rc.1 vs 安装版 0.2.0-rc.2）**：
 

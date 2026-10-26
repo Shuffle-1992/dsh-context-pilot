@@ -12,7 +12,7 @@
 4. **弹窗 DOM 注入的脆弱性**：弹窗是宿主内部组件、无官方插槽，靠 aria 属性定位，
    DSH 升级可能失效——失效只是开关/HUD 行不见了，注入与压缩功能不受影响。
 5. **热换语义**：`ctx.effect(execute)` 的 `execute` **立即执行=setup，返回值才是卸载器**
-   （曾因此误用导致心跳从未运行 + 卸载零清理，见 [`docs/milestones.md`](docs/milestones.md)）。
+   （曾因此误用导致心跳从未运行 + 卸载零清理，见 [`docs/milestones.md`](milestones.md)）。
 6. **client 协议变更需重启**：`wire.host.mjs` 的 face 声明与 TYPERT 走包 exports，
    改协议（增删参数）必须重启 DSH 一次。
 

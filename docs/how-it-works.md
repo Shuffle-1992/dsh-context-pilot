@@ -51,7 +51,7 @@
 | **强制线恒低于引擎 5pp** | 生效值 = `min(配置, 引擎阈值 − 5pp)`（内置 80% ⇒ **75%**） | 两线相等时谁先命中取决于各自测量时机，插件可能「什么都没做、占用却降了」⇒ HUD 记录失真 |
 | **全程留痕** | 报告记录 `rangeProbe`（保留预算/起止/影子 token）/ `rangeSource` / `compactTool` / `preStepErrors` / `lastPreStepError` … | 链路任一环**静默失败**都能定位——已靠它当场抓出「工具从未注册成功」「面板整卡崩掉」等真 bug |
 
-| **退役零残留**（R7） | marker 触发通道 + M5.5「挂起-自动恢复」通道**整体清零**（host/client/schema/wire/tests 五层成对删除）；6 个「静默降级」真缺陷修复；无界状态有界化；`CardBoundary` 改为**真正的 React 错误边界** | 那条通道在 R6 之后已**永远不会命中**（三处教学都改工具版），却仍在四层之间成对存在；而四个真缺陷的共同形态是「**看起来成功了，其实什么都没发生**」（工具回成功但意图丢了 / 冷却扣了但没压 / 字段算了但没人读 / 教学 catch 了但没日志）。审查报告：[`docs/r7-review-and-hardening.md`](docs/r7-review-and-hardening.md) |
+| **退役零残留**（R7） | marker 触发通道 + M5.5「挂起-自动恢复」通道**整体清零**（host/client/schema/wire/tests 五层成对删除）；6 个「静默降级」真缺陷修复；无界状态有界化；`CardBoundary` 改为**真正的 React 错误边界** | 那条通道在 R6 之后已**永远不会命中**（三处教学都改工具版），却仍在四层之间成对存在；而四个真缺陷的共同形态是「**看起来成功了，其实什么都没发生**」（工具回成功但意图丢了 / 冷却扣了但没压 / 字段算了但没人读 / 教学 catch 了但没日志）。审查报告：[`docs/r7-review-and-hardening.md`](r7-review-and-hardening.md) |
 
 **要解决的问题**：长会话上下文压力不可见；原生自动压缩（80%）只看占用、不看任务——
 重任务需要全上下文，轻任务其实可以先压缩腾空间。**这个判断只有模型能做**，插件的职责是
@@ -96,7 +96,7 @@
 
 > 为什么工具能做到：工具调用 ⇒ 必须回灌 tool result ⇒ **下一步必然存在**，
 > 而 pre-step 天然在下一步请求之前。压缩与「叫醒」因此解耦——**不需要叫醒**。
-> 详见 [`docs/r4-compaction-tool-design.md`](docs/r4-compaction-tool-design.md)。
+> 详见 [`docs/r4-compaction-tool-design.md`](r4-compaction-tool-design.md)。
 >
 > 占用达强制压缩线（生效值 = min(配置, DSH 引擎阈值 − 5pp)；内置 80% ⇒ 75%）时，
 > 仍由既有 pre-step / idle 安全网自动发起压缩——**执行路径与工具触发完全相同**
@@ -109,8 +109,8 @@
 > 边界不合法则逐节点回退；仍不行或压完还在强制线之上，才**沿用官方 overflow** 兜底；
 > 整段对话未超预算时**什么都不会压**。这条规则已**教给 Agent**（R6/R16），
 > 所以它知道压缩后还剩什么，不必靠猜。
-> 详见 [`docs/r5-retention-range-design.md`](docs/r5-retention-range-design.md) 与
-> [`docs/milestones.md`](docs/milestones.md) 的 R16 节。
+> 详见 [`docs/r5-retention-range-design.md`](r5-retention-range-design.md) 与
+> [`docs/milestones.md`](milestones.md) 的 R16 节。
 >
 > **「先说，再调用」**（R6，用户要求）：工具调用对用户**静默**（只显示「调用了某工具」），
 > 所以两个工具——`compact_context` 与 `set_reasoning_effort`——的描述、一次性说明、决策卡
@@ -205,8 +205,8 @@ Agent 自改档不应改掉新会话的默认档。
 
 **已实测**（2026-10-08）：工具注册成功（`effortTool.ok=true, via=tools.register`）+ 注入改写为工具版本。
 
-> 调查与设计全文：[`docs/r1-reasoning-effort-investigation.md`](docs/r1-reasoning-effort-investigation.md)
-> ｜ [`docs/r1-effort-design.md`](docs/r1-effort-design.md)
+> 调查与设计全文：[`docs/r1-reasoning-effort-investigation.md`](r1-reasoning-effort-investigation.md)
+> ｜ [`docs/r1-effort-design.md`](r1-effort-design.md)
 
 **恢复投递走三通道，当前实际生效顺序**（2026-10-07 实证）：
 
@@ -237,5 +237,5 @@ Agent 自改档不应改掉新会话的默认档。
 > 由 **Agent 经 `compact_context(tier=…)` 选择**（会话级持续生效，含强制线；未选 = 标准16%），
 > 不在面板配置。要改成面板可调，需给 `plugin-config.schema.mjs` 加字段 + **重启 DSH**——未做，等用户确认。
 
-详见 [`docs/setup.md`](docs/setup.md#4-部署矩阵)。
+详见 [`docs/setup.md`](setup.md#4-部署矩阵)。
 

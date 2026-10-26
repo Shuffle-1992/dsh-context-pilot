@@ -117,6 +117,8 @@ npm test    # 五套断言，< 1 秒
 | 逐里程碑台账（含踩坑与实测数值，超长） | [`docs/milestones.md`](docs/milestones.md) |
 | 设计风险与验收标准 | [`docs/design-risks.md`](docs/design-risks.md) |
 | 压缩档位实验（8/16/24 与锚点的实测） | [`docs/compression-tier-experiment-2026-10-26.md`](docs/compression-tier-experiment-2026-10-26.md) |
+| DSH 版本兼容复核（0.2.1） | [`docs/DSH-0.2.1-COMPAT-REVIEW.md`](docs/DSH-0.2.1-COMPAT-REVIEW.md) |
+| 外部审查（任务书 + 23 条findings） | [`docs/review-brief.md`](docs/review-brief.md)、[`docs/review-findings.md`](docs/review-findings.md) |
 | 调查报告（上下文压缩与推理能力） | [`docs/context-compression-reasoning-investigation-2026-10-26.md`](docs/context-compression-reasoning-investigation-2026-10-26.md) |
 | 分领域设计/审查记录（R1 起） | `docs/r*.md`（如 [`docs/r5-retention-range-design.md`](docs/r5-retention-range-design.md)、[`docs/r7-review-and-hardening.md`](docs/r7-review-and-hardening.md)） |
 
