@@ -27,6 +27,11 @@ const WINDOW = 1_000_000;         // 与真实会话一致（1M 窗口）
 const CHARS_PER_TOKEN = 1.6;      // 中文启发式：1 token ≈ 1.6 字符（与项目口径一致）
 const ARGS = process.argv.slice(2);
 const SMOKE = ARGS.includes('--smoke');
+/* --seed=seed2.json 可切到"双轴种子"（12 要点 + 12 逐字） */
+const SEED_ARG = (() => {
+  const hit = ARGS.find((a) => a.startsWith('--seed='));
+  return hit ? hit.slice('--seed='.length) : null;
+})();
 const FACTORS = (() => {
   const hit = ARGS.find((a) => a.startsWith('--factor='));
   return hit ? [Number(hit.slice('--factor='.length))] : [1, 1.55];
@@ -54,7 +59,7 @@ function smokeSeed() {
 
 function loadSeed() {
   if (SMOKE) return smokeSeed();
-  const p = join(HERE, 'seed.json');
+  const p = join(HERE, SEED_ARG || 'seed.json');
   if (!existsSync(p)) {
     console.error(`[skip] 未找到 ${p}（先跑 node bench/gen-seed.mjs，或加 --smoke 验证脚本）`);
     process.exit(2);
@@ -97,13 +102,24 @@ function needleStats(seed, arm) {
   const total = seed.messages.length;
   const keepFromIdx = arm.result?.ok ? arm.result.endIdx + 1 : total; // 保留区 = [keepFromIdx, total-1]
   const buckets = { 远端: [0, 33], 中段: [33, 67], 近端: [67, 101] };
-  const out = { retained: 0, total: seed.needles.length, byBucket: {} };
+  const out = {
+    retained: 0,
+    total: seed.needles.length,
+    byBucket: {},
+    byKind: { factual: { retained: 0, total: 0 }, verbatim: { retained: 0, total: 0 } },
+  };
   for (const [name, [lo, hi]] of Object.entries(buckets)) out.byBucket[name] = { retained: 0, total: 0 };
   for (const n of seed.needles) {
+    const kind = n.kind === 'verbatim' ? 'verbatim' : 'factual';
     const bucket = n.depthPct < 33 ? '远端' : (n.depthPct < 67 ? '中段' : '近端');
     const kept = Number.isInteger(n.msgIndex) && n.msgIndex >= keepFromIdx;
     out.byBucket[bucket].total += 1;
-    if (kept) { out.retained += 1; out.byBucket[bucket].retained += 1; }
+    out.byKind[kind].total += 1;
+    if (kept) {
+      out.retained += 1;
+      out.byBucket[bucket].retained += 1;
+      out.byKind[kind].retained += 1;
+    }
   }
   return out;
 }
@@ -145,7 +161,7 @@ for (const row of rows) {
   const st = needleStats(seed, row.arm);
   const b = st.byBucket;
   const cell = (x) => `${x.retained}/${x.total}`;
-  console.log(`| ${pad(row.label, 22)} | ${pad(row.budget, 8)} | ${pad(keptMsgs, 9)} | ${pad(r.retainedTokens, 10)} | ${pad(r.shadowTokens, 10)} | ${pad(cell(b['远端']), 5)} ${pad(cell(b['中段']), 5)} ${pad(cell(b['近端']), 5)} | ${pad(`${st.retained}/${st.total}`, 8)} |`);
+  console.log(`| ${pad(row.label, 22)} | ${pad(row.budget, 8)} | ${pad(keptMsgs, 9)} | ${pad(r.retainedTokens, 10)} | ${pad(r.shadowTokens, 10)} | ${pad(cell(b['远端']), 5)} ${pad(cell(b['中段']), 5)} ${pad(cell(b['近端']), 5)} | ${pad(`${st.retained}/${st.total}`, 8)} | 要点 ${st.byKind.factual.retained}/${st.byKind.factual.total} ｜ 逐字 ${st.byKind.verbatim.retained}/${st.byKind.verbatim.total} |`);
 }
 
 console.log('');

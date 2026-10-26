@@ -3,3 +3,8 @@ seed.md
 seed.json
 questions.json
 answers.json
+# 由 bench/gen-verbatim.mjs 从 seed.json 确定性扩展（阶段 1b 双轴种子）
+seed2.md
+seed2.json
+questions-verbatim.json
+answers-verbatim.json
