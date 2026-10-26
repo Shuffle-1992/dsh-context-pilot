@@ -3345,8 +3345,12 @@ console.log('\n== 6.28 R21.2：档位沿用 + 锚点失败痕（真机缺陷回�
   };
   const m2out = await mkM2({ m2: { skips: {}, injections: 0 }, m3: {} }, undefined, stubVerify(verify212))
     .buildInjection({ agent, step: 1, turn: 1 });
-  ok('R21.2 端到端：锚点未命中 + 判定无需压缩 ⇒ 回执**必须**出现「锚点未命中（text:not-found）⇒ 已按档位兜底」',
-    /锚点未命中（text:not-found）⇒ 已按档位兜底/.test(m2out?.text ?? '') && /已执行但判定无需压缩/.test(m2out?.text ?? ''),
+  /* R85（F16）：失败原因已映射为中文（不再把 `text:not-found` 这类内部 token 送进模型可见文本）。 */
+  ok('R21.2 端到端：锚点未命中 + 判定无需压缩 ⇒ 回执**必须**出现「锚点未命中（中文原因）⇒ 已按档位兜底」',
+    /* R85（F16）：原因已中文映射 ⇒ 断言中文短语，并**反向**断言不得出现内部 token。 */
+    /锚点未命中（按文本未匹配到那条消息）⇒ 已按档位兜底/.test(m2out?.text ?? '')
+    && !/text:not-found/.test(m2out?.text ?? '')
+    && /已执行但判定无需压缩/.test(m2out?.text ?? ''),
     `实际：${String(m2out?.text ?? '').slice(0, 160)}`);
 }
 
@@ -5216,9 +5220,13 @@ ok('R75（S4）：client 只剩**一份** unwrapEnv，面板复用模块级实�
     /锚点本次未能定位（text:not-found）/.test(anchorFail78) && /锚点未命中会自动回退/.test(anchorFail78),
     `实际：${anchorFail78.slice(0, 220)}`);
   /* ③ §4.1 去偏向：档位描述改为中性判据（不再把浅压写成"多文件联调/长推理链"专属） */
-  ok('R78 行为级（§4.1）：档位描述改为**信息需求**判据（去掉"近端细节不再需要"这类单向措辞）',
-    !/近端细节不再需要/.test(heavy78) && /边界清晰、旧资料可从文件重读/.test(heavy78)
-    && /保留最多原始细节/.test(heavy78),
+  /* R85（F14）：为压每请求成本，**中性判据搬到一次性说明**（每会话一次），卡片只留短名。
+   * 故断言改为：brief 里有中性判据、卡片里没有单向措辞（两者合起来仍满足报告 §4.1 的意图）。 */
+  const brief78 = api78.renderBrief({ criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000 }) ?? '';
+  ok('R78 行为级（§4.1）：档位判据是**信息需求**且放在一次性说明（卡片只留短名）',
+    !/近端细节不再需要/.test(heavy78) && !/接下来仍要频繁引用近端一大段/.test(brief78)
+    && /边界清晰、旧资料可从文件重读/.test(brief78) && /最保真：跨文件联调/.test(brief78)
+    && /（最省）/.test(heavy78) && /（最保真）/.test(heavy78),
     '文案偏向浅压 ⇒ 模型倾向"尽量别丢细节"，与报告 §4.1 指出的机制一致');
 }
 {
@@ -5361,7 +5369,8 @@ ok('R75（S4）：client 只剩**一份** unwrapEnv，面板复用模块级实�
   const anchorLoss81 = api81.renderCard({ ...base81, tierName: 'heavy', tierBudget: 240000, tierRatio: 0.24,
     anchorLabel: '按文本「独立模块调查」定位', anchorBudget: 40000 }) ?? '';
   ok('R81 行为级（P1）：锚点模式下 loss 行必须用**锚点预算**（40k），不能拿档位预算 240k 冒充',
-    /锚点预计保留预算 40k/.test(anchorLoss81) && /摘要掉 ~530k/.test(anchorLoss81)
+    /* R85（F15）：标签补上「（启发式口径）」——锚点预算与表盘 used 是跨口径相减，必须点明。 */
+    /锚点预计保留预算（启发式口径） 40k/.test(anchorLoss81) && /摘要掉 ~530k/.test(anchorLoss81)
     && !/本档位保留预算 240k/.test(anchorLoss81),
     `实际：${anchorLoss81.split(String.fromCharCode(10)).filter((l) => /保留预算/.test(l)).join(' ｜ ').slice(0, 240)}`);
   ok('R81 行为级（P2）：锚点模式下「两个方向」必须标注"若改按档位"（否则被读成当前计划）',
@@ -5554,6 +5563,114 @@ ok('R75（S4）：client 只剩**一份** unwrapEnv，面板复用模块级实�
     && /模型：\$\{\(routeSel && routeSel\.provider\)/.test(client84)
     && /const tierLabel = \(hostInfo && hostInfo\.currentLabel\) \|\| effort;/.test(client84),
     '路由与档位仍绑在同一对象 ⇒ 「只换模型」时 tooltip 混旧模型');
+}
+/* ═══ R85（Kimi 复核剩余 P3 + N2）：F8/F9/F13/F15/F16 + 悬停刷新 ═══ */
+{
+  const eMod85 = await import(pathToFileURL(join(PLUGIN, 'effort.mjs')).href);
+  const mk85 = (cd) => eMod85.createEffort({
+    svc: (k) => (k === 'tools' ? { register: () => () => {} } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { effortSkips: {}, effortDiag: {}, effortSwitches: 0, effortReasserts: 0, effortToolCalls: 0, effortHooks: 0 } },
+    readCfg: () => ({ enabled: true, effortEnabled: true, cooldownMs: cd }),
+    getDefineTool: () => (sp) => sp,
+  });
+  const eff85 = { ok: true, current: 'high', efforts: ['low', 'high', 'max'], provider: 'p', model: 'm' };
+  const api0 = mk85(0); api0.ensure();
+  const brief0 = api0.renderBrief(eff85) ?? '';
+  ok('R85 行为级（F8）：冷却被设为 0 ⇒ 教学说「已关闭」，不再承诺一个不存在的「1 秒」',
+    /冷却\*\*已关闭\*\*/.test(brief0) && !/当前 1 秒/.test(brief0) && !/1 秒/.test(brief0.replace(/已关闭/g, '')),
+    `实际：${brief0.slice(-160)}`);
+  const api45 = mk85(45000); api45.ensure();
+  const brief45 = api45.renderBrief(eff85) ?? '';
+  ok('R85 行为级（F8）：冷却 45s ⇒ 仍报活值（原行为不回退）', /当前 45 秒/.test(brief45), `实际：${brief45.slice(-120)}`);
+  const effortSrc85 = readFileSync(join(PLUGIN, 'effort.mjs'), 'utf8');
+  ok('R85 结构级（F13）：删掉无消费者的 `skipLabel` 导出（内部仍在用，但不对外暴露）',
+    !/hudPayload, skipLabel,/.test(effortSrc85) && /const skipLabel = /.test(effortSrc85),
+    '导出无消费者 ⇒ 阅读面噪声，暗示"外面要用"');
+  const ctSrc85 = readFileSync(join(PLUGIN, 'compact-tool.mjs'), 'utf8');
+  ok('R85 结构级（F13）：删掉 `const tb = t; tr = r;` 无意义别名；F9 兜底改用同一份 t/r',
+    !/const tb = t;/.test(ctSrc85) && !/const tr = r;/.test(ctSrc85)
+    && /Math\.round\(Number\(ratio\) \* \(t \/ r\)\)/.test(ctSrc85),
+    '别名/两套取数 ⇒ 语义漂移风险');
+  const client85 = readFileSync(join(PLUGIN, 'client.js'), 'utf8');
+  ok('R85 结构级（N2）：chip 悬停即刷新（不加轮询、不加 wire 通道）',
+    /const pullRef = react\.useRef\(null\);/.test(client85)
+    && /pullRef\.current = pullOnce;/.test(client85)
+    && /onMouseEnter: \(\) => \{ try \{ pullRef\.current\?\.\(\); \}/.test(client85),
+    'lastSkip 更新不改变投影 ⇒ 用户读到的是旧值');
+}
+{
+  const ctMod85 = await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href);
+  const api85 = ctMod85.createCompactTool({
+    svc: (k) => (k === 'tools' ? { register: () => {} } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { compactToolDiag: { calls: 0 } } }, readCfg: () => ({ enabled: true }),
+    getDefineTool: () => (sp) => sp, getRangeApi: rangeStub,
+  });
+  api85.ensure();
+  /* 注意：F15 的标签只在**锚点预算解析成功**时出现（解析失败 ⇒ 走档位口径）。 */
+  const card85 = api85.renderCard({ ratio: 0.57, minRatio: 0.3, criticalRatio: 0.75, usedTokens: 300000,
+    tierName: 'heavy', tierBudget: 240000, tierRatio: 0.24,
+    anchorLabel: '按文本「独立模块调查」定位', anchorBudget: 40000 }) ?? '';
+  const card85b = api85.renderCard({ ratio: 0.57, minRatio: 0.3, criticalRatio: 0.75, usedTokens: 300000,
+    tierName: 'heavy', tierBudget: 240000, tierRatio: 0.24,
+    anchorLabel: '按文本「独立模块调查」定位', anchorFail: '按文本未匹配到那条消息' }) ?? '';
+  /* 直连 renderCard 的测试**绕过了 m2 的映射路径**（我第一版就是这样漏掉变异 2 的）⇒ 补结构守卫。 */
+  ok('R85 结构级（F16）：m2 的卡片路径也走中文映射（不只是回执路径）',
+    /else anchorFail = anchorFailLabel\(a\?\.reason \?\? 'unknown'\);/.test(readFileSync(join(PLUGIN, 'm2.inject.mjs'), 'utf8')),
+    '卡片会把 text:not-found 这类内部 token 写进模型可见文本');
+  ok('R85 行为级（F16）：卡片显示中文失败原因，绝不出现 `text:not-found` 这类内部 token',
+    /锚点本次未能定位（按文本未匹配到那条消息）/.test(card85b) && !/text:not-found/.test(card85b),
+    `实际：${card85.split(String.fromCharCode(10)).filter((l) => /锚点/.test(l)).join(' ｜ ').slice(0, 200)}`);
+  ok('R85 行为级（F15）：锚点模式 loss 行标签点明「启发式口径」（跨口径相减必须可见）',
+    /锚点预计保留预算（启发式口径）/.test(card85),
+    `实际：${card85.split(String.fromCharCode(10)).filter((l) => /保留预算/.test(l)).join(' ｜ ').slice(0, 200)}`);
+}
+/* ═══ R85（F14）：三处教学合计 ≤3000 的【最坏可达配置】也要成立（原先只钉了温和样本） ═══ */
+{
+  const ctMod85b = await import(pathToFileURL(join(PLUGIN, 'compact-tool.mjs')).href);
+  let spec85b = null;
+  const api85b = ctMod85b.createCompactTool({
+    svc: (k) => (k === 'tools' ? { register: (t) => { spec85b = t; return () => {}; } } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e), log: () => {}, schedule: () => {},
+    state: { m3: { compactToolDiag: { calls: 0 } } }, readCfg: () => ({ enabled: true }),
+    getDefineTool: () => (sp) => sp, getRangeApi: rangeStub,
+  });
+  api85b.ensure();
+  /* 最坏可达：锚点已登记 + 本次解析失败 + 落盘恢复 + 趋势 + 越线 + 顺带换档 + 两个方向 */
+  const worst85 = {
+    ratio: 0.8, minRatio: 0.3, criticalRatio: 0.75, usedTokens: 800000,
+    deltaTokens: 90000, deltaSamples: 3, turnsToLine: 2,
+    tierName: 'heavy', tierBudget: 240000, tierRatio: 0.24, tierState: 'restored', tierDeclared: true,
+    window: 1000000, clamped: false, retainFactor: 1.55, allowSwitchTalk: true, switchToolName: 'set_reasoning_effort',
+    anchorLabel: '按文本「独立模块调查-2026-10-26」定位', anchorFail: '按文本未匹配到那条消息',
+  };
+  const card85b = api85b.renderCard(worst85) ?? '';
+  const brief85b = api85b.renderBrief({ criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000 }) ?? '';
+  const desc85b = spec85b ? String(spec85b.description ?? '') : '';
+  const total85b = desc85b.length + brief85b.length + card85b.length;
+  ok('R85 行为级（F14）：三处教学合计在【最坏可达配置】下仍 ≤3000 字符（原实测 3131 越线）',
+    total85b > 0 && total85b <= 3000 && card85b.length > 1300,
+    `desc=${desc85b.length} brief=${brief85b.length} card=${card85b.length} 合计=${total85b}`);
+}
+/* ═══ R85（F10）：锚点描述的「单源 + 漂移守卫」═══ */
+{
+  const rm85 = await import(pathToFileURL(join(PLUGIN, 'compact-range.mjs')).href);
+  const lab = rm85.anchorLabelOf;
+  ok('R85 行为级（F10）：compact-range 提供权威 `anchorLabelOf`（三种形态输出稳定）',
+    typeof lab === 'function'
+    && lab({ text: '独立模块调查' }) === '按文本「独立模块调查」定位'
+    && lab({ recentUser: 2 }) === '从最近第 2 条你的消息起'
+    && lab({ text: 'x'.repeat(30) }) === '按文本「' + 'x'.repeat(12) + '」定位',
+    `实际：${JSON.stringify([lab?.({ text: 'a' }), lab?.({ recentUser: 1 })])}`);
+  const m2src85 = readFileSync(join(PLUGIN, 'm2.inject.mjs'), 'utf8');
+  ok('R85 结构级（F10）：m2 委托单一权威（不再各写一份），m3 注明权威来源',
+    /const f = getRangeApi\(\)\?\.anchorLabelOf;/.test(m2src85)
+    && /权威实现在 `compact-range\.anchorLabelOf`/.test(readFileSync(join(PLUGIN, 'm3.compact.mjs'), 'utf8')),
+    '两份同体实现无任何约束 ⇒ 措辞漂移后用户会在两处看到不同说法');
 }
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));

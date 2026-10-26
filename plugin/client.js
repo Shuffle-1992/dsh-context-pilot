@@ -919,6 +919,10 @@ window.__ModuleLoader__.load({
 			 * R3-S9：host 现显式返回 effortEnabled 布尔 —— 开关状态与档位数据分离，
 			 * 不再用 `effort.ok` 同时承担两种语义（它既可能是「开关关闭」也可能是「读档失败」）。 */
 			const [hostInfo, setHostInfo] = react.useState(null);
+			/* R85（N2，Kimi 复核）：`lastSkip` 更新**不会**改变 modelSelection 投影，而 chip 只在投影变化/
+			 * 挂载+2.5s 补拉时取 HUD ⇒ 失败原因可能长期不可见。这里不加轮询、不加 wire 通道，
+			 * 改为**悬停即刷新**：用户真正要读 tooltip 的那一刻拉一次，天然对齐"读的时候是新的"。 */
+			const pullRef = react.useRef(null);
 			react.useEffect(() => {
 				let alive = true;
 				const pullOnce = async () => {
@@ -950,6 +954,7 @@ window.__ModuleLoader__.load({
 							: null);
 					} catch { /* 吞 */ }
 				};
+				pullRef.current = pullOnce; // R85：供 onMouseEnter 复用（同一份拉取逻辑，不复制）
 				pullOnce();
 				/* R15.1（用户实测反馈「切换到 Max 时 chip 没进入冷却」）：
 				 * 插件的状态**在投影变化之后**才落定——换档是「工具接受 → 下一次请求 apply → 才起算冷却」，
@@ -1065,6 +1070,8 @@ window.__ModuleLoader__.load({
 				className: "dcp-effort-chip",
 				"data-state": cooling ? "cooling" : "ready",
 				title: tip,
+				/* R85（N2）：悬停刷新——让 tooltip 里的 lastSkip/pendingChanged/冷却在"读的那一刻"是新的。 */
+				onMouseEnter: () => { try { pullRef.current?.(); } catch { /* 忽略 */ } },
 				style: {
 					position: "relative", overflow: "visible", flex: "none",
 					display: "inline-flex", alignItems: "center",

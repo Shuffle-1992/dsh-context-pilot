@@ -219,7 +219,12 @@ export function createEffort(deps) {
   /* R79（"同类问题"排查）：工具描述与一次性教学里原先**写死「默认 30 秒」**，而冷却可由面板
    * `effortCooldownMs` 调整 ⇒ 与 R78 修掉的「决策卡固定 16%」完全同型（显示写死值 ≠ 实际配置）。
    * 现统一现读活值；配置改了教学立刻跟上，不会再教一个不存在的数字。 */
-  const cooldownSec = () => Math.max(1, Math.round(cooldownMs() / 1000));
+  /* R85（F8，Kimi 复核）：`cooldownMs` 允许被面板设为 **0**（schema 无 min）⇒ 此时执行侧完全不拦，
+   * 而文案写「当前 1 秒」是在承诺一个不存在的约束。现返回 **null** 表示"未启用"，文案随之改口径。 */
+  const cooldownSec = () => {
+    const ms = cooldownMs();
+    return ms > 0 ? Math.max(1, Math.round(ms / 1000)) : null;
+  };
 
   /* ---- R3-S3：三个被反复内联的小逻辑抽成单点 ---- */
 
@@ -920,7 +925,9 @@ export function createEffort(deps) {
         '· **降档**：连续机械改动（改名、格式化、批量替换、照抄改动）/ 简单查询与确认 / 清单式核对——**降档是适配工作量**，省额度只是附带结果；',
         '· **不变**：任务延续且难度没变——「不变」也是合法结论，但**要写出来**。',
         '**任务阶段变化时重新评估一次**（读代码查因 → 动手改多文件 → 写文档…）；**长任务按实际需求可以切多次**'
-          + '（次数没有限制，唯一硬约束是换档冷却：当前 ' + cooldownSec() + ' 秒（面板可配），冷却中调用会返回剩余秒数）。',
+          + (cooldownSec() == null
+            ? '（次数没有限制；换档冷却**已关闭**（面板设为 0）⇒ 可随时切）。'
+            : '（次数没有限制，唯一硬约束是换档冷却：当前 ' + cooldownSec() + ' 秒（面板可配），冷却中调用会返回剩余秒数）。'),
         /* R16.14（评审建议 3，与压缩侧同款）：**「不切」也要留一行**——「只有例外路径才需要理由」会让
          * 沉默稳定胜出。R80 起把三种动作都给出示例（原先只有"保持/降"，缺"升"的示例 ⇒ 升档更难被写出来）。 */
         '**每轮开头评估一次并落一行档位决策**（含「不变」）：'
@@ -1161,7 +1168,7 @@ export function createEffort(deps) {
   }
 
   return {
-    TOOL_NAME, read, ensure, renderBrief, renderSuffix, renderNudge, hudPayload, skipLabel, diag, setPersistForTest,
+    TOOL_NAME, read, ensure, renderBrief, renderSuffix, renderNudge, hudPayload, diag, setPersistForTest,
     /* R23：档位显示名 / 入参归一（宿主与测试都从这里取，避免第二份映射）。 */
     effortLabel, effortLabels, parseEffortInput,
     /* R18 新增出口：判据（文本出口与工具可见性共用）、收敛入口（宿主 pre-step 调）、

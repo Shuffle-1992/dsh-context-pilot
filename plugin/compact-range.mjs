@@ -106,6 +106,18 @@ export function tierPct(name) {
 }
 
 /** 统一展示口径：`深压8%` / `标准16%` / `浅压24%`（拿不到比例时退化为纯标签）。 */
+/** R85（F10）：语义锚点的**中文描述**——单一权威实现。
+ * 卡片（m2）与回执（m3）都用它；m3 因 DI 拿不到同步 range api，保留同体实现，
+ * 由 contract 的「漂移守卫」保证两边输出一致（不靠人眼对两份代码）。 */
+export function anchorLabelOf(want) {
+  try {
+    if (!want || typeof want !== 'object') return null;
+    if (want.text) return `按文本「${String(want.text).slice(0, 12)}」定位`;
+    if (want.recentUser) return `从最近第 ${Number(want.recentUser)} 条你的消息起`;
+    return '你指定的位置';
+  } catch { return null; }
+}
+
 export function tierText(name) {
   const p = tierPct(name);
   return p == null ? tierLabel(name) : `${tierLabel(name)}${p}%`;

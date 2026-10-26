@@ -628,9 +628,11 @@ export function createCompactTool(deps) {
          * R19（2026-10-15 用户要求）：展示统一为中文说法 `深压8%/标准16%/浅压24%`，
          * 百分比与 1M 窗口折算值**全部由 TIERS 推导**（写死会与常量漂移）。 */
         `**压缩档位（3 选 1）**：`
-          + `**${textOf('light')}**=保留窗口 × ${pctOf('light')}%（1M 窗口 ≈ ${kfmt(Math.round(1e6 * pctOf('light') / 100))}）——全新子任务/要预留大量空间；`
-          + `**${textOf('standard')}**=× ${pctOf('standard')}%（≈${kfmt(Math.round(1e6 * pctOf('standard') / 100))}）——默认；`
-          + `**${textOf('heavy')}**=× ${pctOf('heavy')}%（≈${kfmt(Math.round(1e6 * pctOf('heavy') / 100))}）——接下来仍要频繁引用近端一大段。`
+          /* R85（F14/§4.1）：「三档的完整判据」集中放这里（每会话一次），卡片只留「名字 + 一个字」。
+           * 原先写的是「全新子任务/接下来仍要频繁引用近端一大段」——对 24% 的单向偏向（报告 §4.1 的机制）。 */
+          + `**${textOf('light')}**=窗口 × ${pctOf('light')}%（≈${kfmt(Math.round(1e6 * pctOf('light') / 100))}）——最省：边界清晰、旧资料可从文件重读；`
+          + `**${textOf('standard')}**=× ${pctOf('standard')}%（≈${kfmt(Math.round(1e6 * pctOf('standard') / 100))}）——默认：边界拿不准；`
+          + `**${textOf('heavy')}**=× ${pctOf('heavy')}%（≈${kfmt(Math.round(1e6 * pctOf('heavy') / 100))}）——最保真：跨文件联调/复杂排错，证据不能只剩摘要。`
           + `**登记方式**：调 ${TOOL_NAME} 时带 \`tier\`（**用中文档位名**，「浅压24%」这种完整写法也认）；**只想提前锁定档位、现在不压** ⇒ 加 \`action:'set-tier'\`（零压缩成本）。`
           + `**不传 tier = 沿用已登记档位；从未登记过才按 ${textOf('standard')}**（不是重置）。`,
         /* R21：把「语义锚点」教出去**必须与档位同段**——它是同一件事的更精确形态：
@@ -699,7 +701,11 @@ export function createCompactTool(deps) {
       const heurTierBudget = factor83 > 1 ? Math.round(t / factor83) : t; // 仅用于标注，不与 used 相减
       const anchorB81 = Number(anchorBudget);
       const execBudget = Number.isFinite(anchorB81) && anchorB81 > 0 ? anchorB81 : t;
-      const execLabel = Number.isFinite(anchorB81) && anchorB81 > 0 ? '锚点预计保留预算' : '本档位保留预算';
+      /* R85（F15，Kimi 复核）：锚点模式下 loss 行是「表盘真实 used − **启发式** anchorBudget」的跨口径相减
+       * （anchorBudget 来自 `tokensFromSeq` 启发式累加）⇒ 必须在标签里点明口径，否则会被当成同单位。 */
+      const execLabel = Number.isFinite(anchorB81) && anchorB81 > 0
+        ? '锚点预计保留预算（启发式口径）'
+        : '本档位保留预算';
       /* R16：档位行按**当前窗口**折算三档的近似保留量；拿不到时给比例不给 token 数。
        * R19：① 展示用中文说法；② 预算按**真实窗口**折算（win = 当前档位预算 ÷ 当前档位比例），
        * 不再用 0.5×/1.5× 的倍数魔法——那只是「8/16/24 恰好成倍数」时的巧合，常量一改就错。 */
@@ -725,15 +731,21 @@ export function createCompactTool(deps) {
        * 原文案把浅压写成"接下来仍要频繁引用近端一大段（多文件联调/长推理链）"——
        * 一般开发任务很容易符合，而深压的"近端细节不再需要"很难被模型确信 ⇒ 单向偏向 24%。
        * 现改为「按**信息需求**选，不按任务难度选」，并把"选浅压要说明保留什么"写进决策顺序行。 */
-      const tierLine = `**${textOf('light')}**（最省：边界清晰、旧资料可从文件重读）；`
-        + `**${textOf('standard')}**（默认：边界拿不准）；`
-        + `**${textOf('heavy')}**（保留最多原始细节：跨文件联调/复杂排错，证据不能过早只剩摘要）。`;
+      /* R85（F14）：三档的**完整判据已在一次性说明里教过**（brief 每会话一次），卡片每轮出现
+       * 只需给"名字 + 一个字定位"⇒ 省下的正是每请求成本（这也是 ≤3000 硬约束的主要来源）。 */
+      const tierLine = `**${textOf('light')}**（最省）；`
+        + `**${textOf('standard')}**（默认）；`
+        + `**${textOf('heavy')}**（最保真）。`;
       /* R81（review）：原 `keep` 变量已无消费者（R78 删掉「现行生效」句后遗留）⇒ 删除，避免死代码。 */
       /* R16.14（评审建议 6）：把「压了会丢什么」变成**数字**，而不是让模型猜。
        * 判据：当前上下文总量 ≈ ratio × window；与当前档位的保留预算比较。 */
+      /* R85（F9，Kimi 复核）：兜底式原先**又读了一遍** `retainTokens/retainRatio`（R78 之前的旧口径）——
+       * 与上面的 t/r 是两套取数，一旦再次分叉就会静默回到旧 bug。改用同一份 t/r。 */
       const used = Number.isFinite(Number(usedTokens)) && Number(usedTokens) > 0
         ? Number(usedTokens)
-        : (Number.isFinite(Number(ratio)) ? Math.round(Number(ratio) * (Number(retainTokens) / (Number(retainRatio) || 0.16))) : null);
+        : (Number.isFinite(Number(ratio)) && Number.isFinite(r) && r > 0
+          ? Math.round(Number(ratio) * (t / r))
+          : null);
       let loss = '';
       if (used != null && Number.isFinite(execBudget) && execBudget > 0) {
         loss = used <= execBudget
@@ -764,19 +776,18 @@ export function createCompactTool(deps) {
       const cur = typeof tierName === 'string' && tierName ? tierName : null;
       /* R78 兼容：直连调用（测试/旧接线）只给 retainRatio/retainTokens 时，把它们当作档位预算——
        * 这样「预算=档位预算」的语义在两种调用下都成立，不会出现"卡片没有数字"的空档。 */
-      const tb = t;
-      const tr = r;
+      /* R85（F13）：R81 留下的 `const tb = t / tr = r` 是无意义别名 ⇒ 直接使用 t/r。 */
       /* R82（F2）：夹取时「窗口 × N%」是**错的占比**（预算被抬到下限）⇒ 显示真实占比并标注下限。 */
-      const tbTxt = Number.isFinite(tb) && tb > 0
-        ? ` ≈${kfmt(tb)} token` + (clamped === true && realWindow != null
-          ? `（实际占窗口 ${Math.round((tb / realWindow) * 100)}%，已抬到下限）`
-          : (Number.isFinite(tr) && tr > 0 ? `（窗口 × ${Math.round(tr * 100)}%）` : ''))
+      const tbTxt = Number.isFinite(t) && t > 0
+        ? ` ≈${kfmt(t)} token` + (clamped === true && realWindow != null
+          ? `（实际占窗口 ${Math.round((t / realWindow) * 100)}%，已抬到下限）`
+          : (Number.isFinite(r) && r > 0 ? `（窗口 × ${Math.round(r * 100)}%）` : ''))
         : '';
       const tierStateTxt = tierState === 'restored' ? '（已登记；本次由**落盘恢复**）'
         : tierState === 'set' ? '（已登记）'
           : tierDeclared === true ? '（已登记）' : '（**兜底**：未登记档位）';
       const tierNow = cur == null
-        ? (Number.isFinite(tb) && tb > 0 ? `**近端保留预算**${tbTxt}（不是压后总占用）。` : '')
+        ? (Number.isFinite(t) && t > 0 ? `**近端保留预算**${tbTxt}（不是压后总占用）。` : '')
         : (anchorLabel
           ? `**当前策略：锚点（按位置）**——${anchorLabel}`
           + (Number.isFinite(Number(anchorBudget)) && Number(anchorBudget) > 0
@@ -833,10 +844,9 @@ export function createCompactTool(deps) {
           + `写法：正文里写`
           + `\`压缩决策：压｜占用 ${pct}｜理由…\` 或 \`压缩决策：不压｜占用 ${pct}｜理由…｜tier 保持 <档位>\`（档位名见下方，**正文写中文名**）。`,
         tierNow,
-        `• 不依赖（换了话题/新子任务/上一阶段已收尾），或任务繁重需要预留空间：`
-          + `**先在回复正文里用一句话说明你要压缩的理由**，**再**调用 ${TOOL_NAME}。`
-          + `它在**下一步开始前**执行、本轮不中断；`
-          + `调用后请**直接继续当前任务**——不要为了压缩而停下、不要结束回合。`,
+        `• 不依赖（换话题/新子任务/上一阶段收尾）或任务繁重要预留空间：`
+          + `**先在回复正文里用一句话说明你要压缩的理由**，**再**调用 ${TOOL_NAME}`
+          + `（**下一步开始前**执行、本轮不中断）；调用后请**直接继续当前任务**——不要为了压缩而停下、不要结束回合。`,
         `• 档位（3 选 1）：${tierLine}`
           + `**只想登记档位、现在不压** ⇒ 加 \`action:'set-tier'\`。`
           + `${overLine}`,
@@ -845,16 +855,18 @@ export function createCompactTool(deps) {
         /* R78（调查报告 §8.3 / §4.1）：把选档决策收敛为**两步**，并纠正对 24% 的单向偏向——
          * 原先把「按比例」列在①、「按位置」列在②，示例还写 `tier 浅压24%` ⇒ 示例偏向 + 锚点认知成本高。
          * 现在：先问"能否锁定任务起点"（能 ⇒ 锚点），不能再选档；并要求选浅压时说明保留什么。 */
-        `• **决策顺序（两步，锚点优先）**：①**按位置**：能锁定「当前任务从哪条消息开始」⇒ 用 \`keepFrom:{recentUser:N}\` 或 \`{text:'开头十来字'}\`——该处起**原样保留、不折算**，能压掉更早的无关历史（最省无关上下文）；②锁定不了才**按比例**选档（默认），选浅压时**说明要保留什么**。锚点未命中自动退回档位。`,
+        /* R85（F14）：决策顺序保留「两步」骨架与全部可判定要点，去掉重复的代码示例（brief 已给）。 */
+        `• **决策顺序（两步，锚点优先）**：①**按位置**：能锁定起点 ⇒ \`keepFrom\`（**原样保留、不折算**，能压掉更早的无关历史）；②锁定不了才**按比例**选档，选浅压**说明要保留什么**。锚点未命中自动退回档位。`,
         `• **省略语义不对称**：不传 \`tier\` = **沿用**已登记档位（不是重置）；不传 \`keepFrom\` = **清除**锚点——要持续用锚点就必须每次都带。`,
         loss,
         dirLine,
         trend,
         /* R16.14/15（评审建议 4）：讲清代压代价，替代原先那句替不作为背书的「无需操作」。 */
-        `• 依赖（要引用之前的路径/结论/报错现场/长推理链）：不要调用（或改用 ${textOf('heavy')}）。`
-          + `**但「不压」的代价不是零**：占用达 ${crit} 时**系统会代替你压缩**——时机由系统选、按**那一刻**生效的档位执行、`
+        `• 依赖（要引用之前的路径/结论/报错现场/长推理链）：不要调用（或改用 ${textOf('heavy')}）；`
+          + `真要压就**先把关键产物落盘或写进正文**。`
+          + `**但「不压」的代价不是零**：占用达 ${crit} 时**系统会代替你压缩**——时机与档位都由系统定，`
           + `摘要会把**当时已过期的事实**（旧版本号/旧结论）写进概要。`,
-        `• 调用前自检：本轮关键产物（文件路径、决策、未落盘的结论）先落盘或写进正文，再调用。`,
+        '',
         /* R82（F5）：换档工具在 `effortEnabled=false`（**默认**）时已被 retractTool 撤掉 ⇒
          * 卡片不能再教模型调它（这与 m2 自述的「绝不出现工具已隐藏、文本还在教你调用」铁律冲突）。
          * R82（F5b）：工具名不再硬编码，由 m2 注入 effort 域的 TOOL_NAME（R71 纪律）。 */

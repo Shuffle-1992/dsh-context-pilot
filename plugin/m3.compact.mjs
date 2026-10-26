@@ -699,7 +699,10 @@ export function createM3Compaction(deps) {
       /* R23（用户要求「显示一律中文」）：锚点的**中文**描述——回执里显示
        * 「语义锚点（从最近第 1 条你的消息起）」/「语义锚点（按文本「…」定位）」。
        * ⚠️ 旧写法直接 slice `anchor:` 后的内部 token（`recent-user`/`text`）⇒ 模型可见文本里露出英文。 */
-      const anchorLabelOf = (want) => {
+      /* R85（F10）：⚠️ 权威实现在 `compact-range.anchorLabelOf`（卡片侧走注入/委托）。
+   * m3 在 `official()` 之外拿不到同步的 range api，故保留同体实现；
+   * contract 有**漂移守卫**：两处对同一 want 的输出必须一致。 */
+  const anchorLabelOf = (want) => {
         try {
           if (!want || typeof want !== 'object') return null;
           if (want.text) return `按文本「${String(want.text).slice(0, 12)}」定位`;

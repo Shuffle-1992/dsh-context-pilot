@@ -246,12 +246,23 @@ export function createM2Injection(deps) {
    *   · 锚点模式 ⇒ 用 `resolveAnchorBudget(...)` 预算（含余量/下限/夹取），解析不到就明说
    *     「压缩时按实际边界解析」——**绝不编造数字**（本项目纪律）。
    * 失败一律退回档位口径，保证卡片永远有可信数字。 */
+  /* R85（F16）：锚点失败原因的**中文映射**（单一出口，卡片与回执共用；未知原因退回中性短语，不泄露内部 token）。 */
+  const anchorFailLabel = (reason) => {
+    const r = String(reason ?? '');
+    if (!r) return '未知原因';
+    if (/^text:not-found/.test(r)) return '按文本未匹配到那条消息';
+    if (/^recent-user:/.test(r)) return '按「最近第 N 条消息」定位失败';
+    if (/no-range-module/.test(r)) return '范围模块未就绪';
+    if (/^anchor-error/.test(r)) return '定位时出错（已按档位兜底）';
+    if (/^unknown$/.test(r)) return '未知原因';
+    return '定位失败';
+  };
+  /* R85（F10）：**委托单一权威**（compact-range.anchorLabelOf），不再各写一份。
+   * range 模块缺该导出时返回 null（卡片退回"你指定的位置"，不编造）。 */
   const anchorLabelOf = (want) => {
     try {
-      if (!want || typeof want !== 'object') return null;
-      if (want.text) return `按文本「${String(want.text).slice(0, 12)}」定位`;
-      if (want.recentUser) return `从最近第 ${Number(want.recentUser)} 条你的消息起`;
-      return '你指定的位置';
+      const f = getRangeApi()?.anchorLabelOf;
+      return typeof f === 'function' ? f(want) : null;
     } catch { return null; }
   };
   const strategyOf = (win, sid, measure, session) => {
@@ -284,10 +295,12 @@ export function createM2Injection(deps) {
         if (range?.resolveAnchorBudget && measure && session && typeof extractEventText === 'function') {
           const a = range.resolveAnchorBudget({ session, measurement: measure, want, window: w, textOf: extractEventText });
           if (a?.ok === true && Number.isFinite(a.budget) && a.budget > 0) anchorBudget = a.budget;
-          else anchorFail = a?.reason ?? 'unknown';
+          /* R85（F16，Kimi 复核）：R23 已定规矩「不要把 recent-user/text 这类内部 token 送进模型可见文本」，
+           * 回执侧改了、卡片侧没跟上。现统一走中文映射；异常只报类别，不拼原始 message（可能含路径）。 */
+          else anchorFail = anchorFailLabel(a?.reason ?? 'unknown');
         }
       }
-    } catch (e) { anchorFail = `anchor-error:${msg(e)}`; }
+    } catch { anchorFail = '定位时出错（已按档位兜底）'; }
     return {
       retainRatio: tierRatio, retainTokens: tierBudget,
       tierName, tierBudget, tierRatio,
@@ -482,7 +495,7 @@ export function createM2Injection(deps) {
       if (typeof v.retainSource === 'string' && v.retainSource.startsWith('anchor:')) {
         parts.push(`保留来源：语义锚点（${v.anchorLabel || '你指定的位置'}）`);
       } else if (v.anchorFailReason) {
-        parts.push(`锚点未命中（${String(v.anchorFailReason)}）⇒ 已按档位兜底`);
+        parts.push(`锚点未命中（${anchorFailLabel(v.anchorFailReason)}）⇒ 已按档位兜底`);
       }
       const head = parts.length ? `（${parts.join('，')}）` : '';
       /* R24/R26（用户实测「插件说回到 ~24%、DSH 显示 40%」+ 追问「下次会不会又误读成 24%」）：
