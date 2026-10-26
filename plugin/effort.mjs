@@ -216,6 +216,10 @@ export function createEffort(deps) {
     const v = cfgNow().cooldownMs;
     return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : FALLBACK_COOLDOWN_MS;
   };
+  /* R79（"同类问题"排查）：工具描述与一次性教学里原先**写死「默认 30 秒」**，而冷却可由面板
+   * `effortCooldownMs` 调整 ⇒ 与 R78 修掉的「决策卡固定 16%」完全同型（显示写死值 ≠ 实际配置）。
+   * 现统一现读活值；配置改了教学立刻跟上，不会再教一个不存在的数字。 */
+  const cooldownSec = () => Math.max(1, Math.round(cooldownMs() / 1000));
 
   /* ---- R3-S3：三个被反复内联的小逻辑抽成单点 ---- */
 
@@ -223,9 +227,30 @@ export function createEffort(deps) {
   const sidOf = (agent, fallback = '') =>
     String(pick(agent?.session?.id, agent?.sessionId, agent?.id, fallback) ?? '');
 
+  /* R79：换档"没成功"的原因原先只有**全局计数**（`state.m3.effortSkips`），面板/tooltip 都看不到
+   * ⇒ 用户只看到"档位没变"却不知道为什么。这与 R78 修掉的「锚点解析失败不可见」同型。
+   * 现在同时按 sid 记**最近一次跳过**（有界，与 bySid 同量级），并给出中文原因。 */
+  const SKIP_LABELS = {
+    foreign: '他人显式指定了档位，已让位',
+    noRoute: '读不到当前模型的档位信息',
+    invalid: '该档位不在本模型可选集内',
+    sameValue: '与当前档位相同（无需切换）',
+    cooldown: '换档冷却中',
+  };
+  const skipLabel = (kind) => SKIP_LABELS[kind] ?? String(kind ?? '');
+  const skipLastBySid = new Map();
   /** 跳过计数（原先 5 处重复 `state.m3.effortSkips.X = (… ?? 0) + 1`）。 */
-  const bumpSkip = (kind) => {
+  const bumpSkip = (kind, sid) => {
     state.m3.effortSkips[kind] = (state.m3.effortSkips[kind] ?? 0) + 1;
+    try {
+      const key = String(sid ?? '');
+      if (!key) return;
+      skipLastBySid.set(key, { at: Date.now(), kind });
+      if (skipLastBySid.size > EFFORT_SID_CAP) { // 有界化：淘汰最旧
+        const k0 = skipLastBySid.keys().next().value;
+        if (k0 !== key) skipLastBySid.delete(k0);
+      }
+    } catch { /* 吞 */ }
   };
 
   /** 档位合法性校验（原先钩子与工具各写一遍）。
@@ -384,7 +409,7 @@ export function createEffort(deps) {
         && config.reasoningEffort !== s.applied && config.reasoningEffort !== s.acceptFrom
         && config.reasoningEffort !== want) {
       dropSid(sidKey);
-      bumpSkip('foreign');
+      bumpSkip('foreign', sidKey);
       log('info', `智能思考 让位：当前请求档位 ${config.reasoningEffort} 非本插件所写（他人显式指定）`);
       return config;
     }
@@ -392,13 +417,13 @@ export function createEffort(deps) {
     const eff = await read(agent);
     if (!eff?.ok) {
       dropSid(sidKey);
-      bumpSkip('noRoute');
+      bumpSkip('noRoute', sidKey);
       return config;
     }
     const chk = checkEffort(eff, want);
     if (!chk.ok) {
       dropSid(sidKey);
-      bumpSkip('invalid');
+      bumpSkip('invalid', sidKey);
       state.m3.lastEffortApply = {
         at: new Date().toISOString(), sessionId: sidKey, want, applied: false, error: chk.reason,
       };
@@ -497,7 +522,7 @@ export function createEffort(deps) {
       const want = parseEffortInput(wantInput, eff.efforts);
       const chk = checkEffort(eff, want);
       if (!chk.ok) {
-        bumpSkip('invalid');
+        bumpSkip('invalid', sid);
         state.m3.lastEffortApply = {
           at: new Date().toISOString(), sessionId: sid, want, applied: false, via: 'tool', error: chk.reason,
         };
@@ -511,7 +536,7 @@ export function createEffort(deps) {
       }
       /* 幂等：与期望档位相同 ⇒ 直接成功（不消耗冷却） */
       if (bySid.get(sid)?.want === want) {
-        bumpSkip('sameValue');
+        bumpSkip('sameValue', sid);
         /* R15：回读 + 自检契约（同 accepted 分支，理由见那里）。 */
         return {
           ok: true,
@@ -525,7 +550,7 @@ export function createEffort(deps) {
       const since = Date.now() - (s?.switchedAt ?? 0);
       if (s?.switchedAt && since < cap) {
         const remainSec = Math.ceil((cap - since) / 1000);
-        bumpSkip('cooldown');
+        bumpSkip('cooldown', sid);
         log('info', `智能思考 工具被冷却拒绝（还剩 ${remainSec}s）`);
         schedule('effort', 400);
         return {
@@ -579,7 +604,7 @@ export function createEffort(deps) {
         + '需要更深推理（复杂设计、疑难排查、长链规划）时升档；'
         + '简单查询、机械修改时降档可省额度。'
         + '**任务阶段变化时重新判断一次**（读代码查因 → 动手改多文件 → 写文档…）；长任务按实际需求可以切多次，'
-        + '唯一硬约束是换档冷却（默认 30 秒）。切换后下一步的用量行后缀会显示新档位，可据此自检。'
+        + '唯一硬约束是换档冷却（当前 ' + cooldownSec() + ' 秒，面板可配）。切换后下一步的用量行后缀会显示新档位，可据此自检。'
         + '**换档最佳时机提示（R16.8）**：换档会使前缀缓存失效——若刚压缩过上下文（缓存已被重置），'
         + '此时换档只付一次重建成本 ⇒ 压缩的同一条消息里顺带换档是最优时机（压缩自检回执里也会提醒）。',
       parameters: {
@@ -873,7 +898,7 @@ export function createEffort(deps) {
         '· **降档**：连续机械改动（改名、格式化、加断言、照抄改动、只跑命令看结果）/ 简单查询 / 用户明确要求「快点、只要、简单、省点」；',
         '· **不变**：正常编码推进（当前档位通常够用）——**不确定就不切，「不变」也是合法结论**。',
         '**任务阶段变化时重新评估一次**（读代码查因 → 动手改多文件 → 写文档…）；**长任务按实际需求可以切多次**'
-          + '（次数没有限制，唯一硬约束是换档冷却：默认 30 秒，冷却中调用会返回剩余秒数）。',
+          + '（次数没有限制，唯一硬约束是换档冷却：当前 ' + cooldownSec() + ' 秒（面板可配），冷却中调用会返回剩余秒数）。',
         /* R16.14（评审建议 3，与压缩侧同款）：**「不切」也要留一行**——评审原文：
          * 「只有例外路径（调用）才需要理由。『不压』零成本、零证据 ⇒ 沉默稳定胜出。」
          * 把沉默变成可检查产物，正是这两项功能共同缺的那一环。 */
@@ -1054,6 +1079,12 @@ export function createEffort(deps) {
         at: fmtSwitchAt(ls.at),
       } : null,
       switchCount: s?.switchCount ?? 0,
+      /* R79：本会话最近一次「没生效」的原因（有则给中文标签）——面板 tooltip 直接显示，
+       * 让"为什么没切成功"从不可见变成可见。 */
+      lastSkip: (() => {
+        const it = sid ? skipLastBySid.get(sid) : null;
+        return it ? { at: fmtSwitchAt(it.at), kind: it.kind, label: skipLabel(it.kind) } : null;
+      })(),
     };
     /* R18：把判据也交给面板——单档模型下插件会**静默**（不注入文本、隐藏工具），
      * 用户看到「开关开着却不提档位」会疑惑，必须给一个可解释的读数。 */
@@ -1090,7 +1121,7 @@ export function createEffort(deps) {
   }
 
   return {
-    TOOL_NAME, read, ensure, renderBrief, renderSuffix, renderNudge, hudPayload, diag, setPersistForTest,
+    TOOL_NAME, read, ensure, renderBrief, renderSuffix, renderNudge, hudPayload, skipLabel, diag, setPersistForTest,
     /* R23：档位显示名 / 入参归一（宿主与测试都从这里取，避免第二份映射）。 */
     effortLabel, effortLabels, parseEffortInput,
     /* R18 新增出口：判据（文本出口与工具可见性共用）、收敛入口（宿主 pre-step 调）、

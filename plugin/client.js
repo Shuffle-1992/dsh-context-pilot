@@ -899,9 +899,12 @@ window.__ModuleLoader__.load({
 				if (typeof up === "function") sel = up("modelSelection") || null;
 			} catch { /* 投影不可用 ⇒ 不显示 */ }
 			/* pending 优先（已选待生效，用户可提前看到「下一步生效」的结果） */
-			const shown = (sel && (sel.pending || sel.lastUsed)) || null;
+			/* R79：pending 存在但**没带档位**（只换模型/选「默认」）时，原先 effort 被判空 ⇒
+			 * **整个 chip 消失**，即使 lastUsed 有值。现按「带档位的 pending → lastUsed → 任意 pending」回退。 */
+			const pendingSel = sel && sel.pending && sel.pending.reasoningEffort ? sel.pending : null;
+			const shown = pendingSel || (sel && sel.lastUsed) || (sel && sel.pending) || null;
 			const effort = shown && shown.reasoningEffort ? String(shown.reasoningEffort) : null;
-			const pendingNow = !!(sel && sel.pending);
+			const pendingNow = !!pendingSel;
 			/* ① host 侧信息（开关状态 + 换档冷却）：挂载时问一次；**投影变化时再问一次**
 			 * （换档必然改变投影 ⇒ 天然触发重问，拿到新的 cooldownUntil）。
 			 * 依赖数组用 effort/pendingNow：它们变化即代表投影变了。
@@ -930,6 +933,11 @@ window.__ModuleLoader__.load({
 								/* R23：host 侧统一给的「中文(id)」显示名（如 高(high)）——
 								 * 客户端**不自己维护档位名映射**（避免第二份真值）。 */
 								currentLabel: e && typeof e.currentLabel === "string" ? e.currentLabel : "",
+								/* R79：把"用户刚改档（本步骤即生效）"与"最近一次为什么没生效"透传上来——
+								 * host 早已在 hudPayload 里返回，client 不取就永远到不了 tooltip。 */
+								pendingChanged: e && e.pendingChanged === true,
+								pendingFrom: e && typeof e.pendingFrom === "string" ? e.pendingFrom : null,
+								lastSkip: e && e.lastSkip ? e.lastSkip : null,
 							}
 							: null);
 					} catch { /* 吞 */ }
@@ -1007,7 +1015,13 @@ window.__ModuleLoader__.load({
 			 * ✔ title 只放**稳定内容**；剩余秒数本就有火花显色动画承担（进度即信息），不再进 title。 */
 			const tip = [
 				`模型：${shown.provider}/${shown.model}`,
-				`当前档位：${(hostInfo && hostInfo.currentLabel) || effort}${pendingNow ? "（已选，下一步生效）" : ""}`,
+				`当前档位：${(hostInfo && hostInfo.currentLabel) || effort}`
+					+ (hostInfo && hostInfo.pendingChanged
+						? "（**用户刚改，本步骤即生效**——不是「保持」）"
+						: (pendingNow ? "（已选，下一步生效）" : "")),
+				(hostInfo && hostInfo.lastSkip)
+					? `最近一次未生效：${hostInfo.lastSkip.label}（${hostInfo.lastSkip.at}）`
+					: null,
 				cooling ? "换档冷却中（剩余时间见火花显色，从下往上）" : "换档冷却：已就绪",
 				ls ? `最近切换：${ls.from} → ${ls.to}（${ls.at}）` : "最近切换：本会话还没有",
 				`会话切换次数：${(hostInfo && hostInfo.switchCount) || 0} 次`,

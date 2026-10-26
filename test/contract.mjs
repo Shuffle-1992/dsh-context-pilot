@@ -1000,7 +1000,10 @@ ok('R16.14 接线：趋势数据（增量/触线轮数）由 m2 现算并注入�
 }
 
 ok('投影 pending 优先显示（已选待生效提前可见）',
-  /sel\.pending \|\| sel\.lastUsed/.test(client),
+  /* R79：回退顺序改为「带档位的 pending → lastUsed → 任意 pending」——
+   * 只换模型（pending 无 reasoningEffort）时不再让整个 chip 消失。 */
+  /const pendingSel = sel && sel\.pending && sel\.pending\.reasoningEffort \? sel\.pending : null;/.test(client)
+  && /pendingSel \|\| \(sel && sel\.lastUsed\)/.test(client),
   '未优先取 pending ⇒ 换档后要等下一轮才显示');
 ok('host 信息在投影变化时重问（事件驱动，非定时器）',
   /settingsScope\.subscribe\?\.\(\(\) => \{ pullOnce\(\); \}\)/.test(client) &&
@@ -1895,7 +1898,8 @@ ok('状态合并为单一 bySid 对象（S6）',
   '状态仍分散在多张 Map ⇒ 各自 delete 会留孤儿');
 ok('sid/校验/跳过计数三个小逻辑已抽单点（S3）',
   /const sidOf = \(agent, fallback = ''\)/.test(effort) && /const checkEffort = \(eff, want\) => \{/.test(effort) &&
-  /const bumpSkip = \(kind\) => \{/.test(effort),
+  /* R79：bumpSkip 增加 sid 参数（按会话记"最近一次为什么没生效"）。 */
+  /const bumpSkip = \(kind, sid\) => \{/.test(effort),
   '三个小逻辑仍内联重复 ⇒ S3 未消');
 /* S5：`readEffort` 原先在早退路径**同步返回对象**、在正常路径返回 Promise ⇒ 调用方必须 await，
  * 但读代码看不出它可能是 Promise；某处漏 await 就会拿到 Promise 当对象用（`eff.ok` 恒 undefined）
@@ -1917,7 +1921,7 @@ ok('应用前校验档位合法性（否则 llm 抛 UNSUPPORTED_REASONING_EFFORT
   /const chk = checkEffort\(eff, want\);/.test(effort),
   '未校验档位 ⇒ 非法档会中断整个请求');
 ok('非法档只忽略并留痕（不硬送）',
-  /bumpSkip\('invalid'\)/.test(effort) && /applied: false, error: chk\.reason/.test(effort),
+  /bumpSkip\('invalid', sid(?:Key)?\)/.test(effort) && /applied: false, error: chk\.reason/.test(effort),
   '非法档未留痕 ⇒ 无法取证为何没生效');
 ok('有换档冷却（防频繁换档反复打断前缀缓存）',
   /export const DEFAULT_COOLDOWN_MS = 30_000/.test(effort) && /since < cap/.test(effort),
@@ -5204,6 +5208,55 @@ ok('R75（S4）：client 只剩**一份** unwrapEnv，面板复用模块级实�
     && /range\.resolveAnchorBudget\(\{ session, measurement: measure, want, window: w, textOf: extractEventText \}\)/.test(m2_78)
     && /strategyOf\(win, trend\?\.sid \?\? null, actx\.measure/.test(m2_78),
     '仍固定读 RETAIN_RATIO ⇒ 卡上「当前档位」与「现行预算」继续自相矛盾（报告 §5.1 已复现）');
+}
+/* ═══ R79（"档位切换是否有同类问题"排查结论）：冷却活值 / 跳过原因可见 / chip 回退 ═══ */
+{
+  const eMod79 = await import(pathToFileURL(join(PLUGIN, 'effort.mjs')).href);
+  const st79 = { m3: { effortSkips: {}, effortDiag: {}, effortSwitches: 0, effortReasserts: 0, effortToolCalls: 0, effortHooks: 0 } };
+  let spec79 = null;
+  const api79 = eMod79.createEffort({
+    svc: (k) => (k === 'tools' ? { register: (t) => { spec79 = t; return () => {}; } } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: st79, readCfg: () => ({ enabled: true, effortEnabled: true, cooldownMs: 45000 }),
+    getDefineTool: () => (sp) => sp,
+  });
+  const route79 = { provider: 'p', model: 'm' };
+  const ag79 = {
+    id: 'sid-r79', sessionId: 'sid-r79',
+    session: { id: 'sid-r79', requestHeader: () => ({ config: { ...route79, reasoningEffort: 'high' } }) },
+  };
+  /* stub llm 投影：可选 low/high/max（effort.read 走 routeOf + resolveModelInfo） */
+  api79.ensure();
+  const effState79 = { ok: true, current: 'high', efforts: ['low', 'high', 'max'], provider: 'p', model: 'm' };
+  /* ① 冷却时长必须**读活值**（原先教学写死"默认 30 秒"，而配置可改 —— 与 R78 的「固定 16%」同型） */
+  const brief79 = api79.renderBrief(effState79) ?? '';
+  const desc79 = spec79 && spec79.description ? String(spec79.description) : '';
+  ok('R79 行为级：教学与工具描述里的冷却时长是**活值**（配置 45s ⇒ 文本 45 秒，不再是写死的 30）',
+    /45 秒/.test(brief79) && /45 秒/.test(desc79) && !/30 秒/.test(brief79) && !/30 秒/.test(desc79),
+    `brief 含45=${/45 秒/.test(brief79)} desc 含45=${/45 秒/.test(desc79)}；brief 仍写30=${/30 秒/.test(brief79)}`);
+  /* ② 换档"没成功"的原因必须按会话可见（原先只有全局计数，用户看不到为什么没切） */
+  const r79a = await spec79.execute({ effort: 'max' }, { agent: ag79 });
+  const r79b = await spec79.execute({ effort: 'low' }, { agent: ag79 });
+  const hud79 = await api79.hudPayload(ag79);
+  ok('R79 行为级：按会话暴露「最近一次未生效的原因」（冷却 ⇒ 中文标签 + 时间）',
+    r79a?.ok === true && r79b?.ok === false
+    && hud79?.lastSkip?.kind === 'cooldown' && hud79?.lastSkip?.label === '换档冷却中'
+    && typeof hud79?.lastSkip?.at === 'string' && hud79.lastSkip.at.length >= 16
+    && (st79.m3.effortSkips.cooldown ?? 0) >= 1,
+    `实际 r79b=${JSON.stringify(r79b)} lastSkip=${JSON.stringify(hud79?.lastSkip)}`);
+  /* ③ chip：pending 无档位时不得整块消失；且"用户刚改"与"最近未生效"要透传到 tooltip */
+  const client79 = readFileSync(join(PLUGIN, 'client.js'), 'utf8');
+  ok('R79 结构级：chip 回退顺序 + pendingChanged/lastSkip 透传 + tooltip 两行',
+    /const pendingSel = sel && sel\.pending && sel\.pending\.reasoningEffort \? sel\.pending : null;/.test(client79)
+    && /pendingChanged: e && e\.pendingChanged === true/.test(client79)
+    && /lastSkip: e && e\.lastSkip \? e\.lastSkip : null/.test(client79)
+    && /用户刚改，本步骤即生效/.test(client79) && /最近一次未生效：/.test(client79),
+    '只换模型时 chip 会消失；或 host 已返回 pending/lastSkip 但 client 不取 ⇒ 永远到不了 tooltip（同 R79-② 的可见性缺口）');
+  ok('R79 结构级：hudPayload 的 lastSkip 由 per-sid 映射派生（不是全局计数冒充）',
+    /const skipLastBySid = new Map\(\);/.test(readFileSync(join(PLUGIN, 'effort.mjs'), 'utf8'))
+    && /lastSkip: \(\(\) => \{/.test(readFileSync(join(PLUGIN, 'effort.mjs'), 'utf8')),
+    '只记全局计数 ⇒ 面板无法按会话解释"为什么没切成功"');
 }
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));
