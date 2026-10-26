@@ -2697,8 +2697,15 @@ ok('R17 静态：后缀必须紧跟档位值说明「用户刚改档」',
   ok('R36 行为级：**没有**切档的轮次不出现该提示（避免每轮噪声）',
     !/不是"保持"/.test(apiB.renderSuffix(effB) ?? ''),
     `实际：${JSON.stringify(apiB.renderSuffix(effB))}`);
-  ok('R17/R23 行为级：无 pending 时后缀形状稳定（R23 起档位显示「中文(id)」，其余逐字不变）',
-    (apiB.renderSuffix(effB) ?? '') === '思考强度 高(high)（可选 关闭(off)/低(low)/高(high)/最高(max)，需要时先说再调用 set_reasoning_effort）',
+  ok('R17/R23 行为级：无 pending 时后缀形状稳定（档位「中文(id)」+ 可选集 + **每轮判据** + 工具名）',
+    /* R80：后缀新增一句可判定的判据（原先只写"需要时…"，属自指判断 ⇒ 等于没有触发条件）。
+     * 仍逐项钉住形状：档位中文(id) → 可选集 → 判据 → 工具名。 */
+    (() => {
+      const s = apiB.renderSuffix(effB) ?? '';
+      return s.startsWith('思考强度 高(high)（可选 关闭(off)/低(low)/高(high)/最高(max)；')
+        && /难则升、机械则降，以一次做对为先/.test(s) && /set_reasoning_effort/.test(s)
+        && !/不是"保持"/.test(s);
+    })(),
     `实际：${JSON.stringify(apiB.renderSuffix(effB))}`);
 
   const apiC = mkApi17('absent');
@@ -2844,7 +2851,9 @@ console.log('\n== 6.23 R18：单档静默 + 工具可见性 + 开关撤回 ==');
     && gateApi.renderNudge(one, { agent: ag18, turn: 3, userText: '帮我排查根因' }) === null,
     `suffix=${JSON.stringify(gateApi.renderSuffix(one))} brief=${JSON.stringify(gateApi.renderBrief(one))}`);
   ok('R18/R23 行为级：多档 ⇒ 三处都有内容（R23 起档位显示「中文(id)」）',
-    gateApi.renderSuffix(four) === '思考强度 关闭(off)（可选 关闭(off)/低(low)/高(high)/最高(max)，需要时先说再调用 set_reasoning_effort）'
+    /* R80：后缀形状改为「档位 + 可选集 + 每轮判据 + 工具名」（不再写死"需要时…"）。 */
+    (/^思考强度 关闭\(off\)（可选 关闭\(off\)\/低\(low\)\/高\(high\)\/最高\(max\)；/.test(gateApi.renderSuffix(four) ?? '')
+      && /难则升、机械则降，以一次做对为先/.test(gateApi.renderSuffix(four) ?? ''))
     && typeof gateApi.renderBrief(four) === 'string'
     && typeof gateApi.renderNudge(four, { agent: ag18, turn: 3, userText: '帮我排查根因' }) === 'string',
     `suffix=${JSON.stringify(gateApi.renderSuffix(four))}`);
@@ -5257,6 +5266,66 @@ ok('R75（S4）：client 只剩**一份** unwrapEnv，面板复用模块级实�
     /const skipLastBySid = new Map\(\);/.test(readFileSync(join(PLUGIN, 'effort.mjs'), 'utf8'))
     && /lastSkip: \(\(\) => \{/.test(readFileSync(join(PLUGIN, 'effort.mjs'), 'utf8')),
     '只记全局计数 ⇒ 面板无法按会话解释"为什么没切成功"');
+}
+/* ═══ R80（用户要求「明确需求应换则换 / 任务完成优先 / 适配档位优先」）═══ */
+{
+  const eMod80 = await import(pathToFileURL(join(PLUGIN, 'effort.mjs')).href);
+  const mk80 = () => eMod80.createEffort({
+    svc: (k) => (k === 'tools' ? { register: () => () => {} } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { effortSkips: {}, effortDiag: {}, effortSwitches: 0, effortReasserts: 0, effortToolCalls: 0, effortHooks: 0 } },
+    readCfg: () => ({ enabled: true, effortEnabled: true, cooldownMs: 30000 }),
+    getDefineTool: () => (sp) => sp,
+  });
+  const api80 = mk80();
+  api80.ensure();
+  const mkEff = (cur, list) => ({ ok: true, current: cur, efforts: list, provider: 'p', model: 'm' });
+  const trio = ['low', 'high', 'max'];
+  const ag80 = (sid) => ({ id: sid, sessionId: sid, session: { id: sid } });
+
+  /* ① brief：把"选档"改成任务类型→相对位置，并明确任务完成优先 / 降档是适配而非省额度 */
+  const brief80 = api80.renderBrief(mkEff('high', trio)) ?? '';
+  ok('R80 行为级：教学给出「任务类型 → 相对位置」映射（不写死档位名，可选集随模型变）',
+    /选档看任务/.test(brief80) && /相对位置/.test(brief80) && /最高档=多文件因果排查/.test(brief80)
+    && /中间档=常规多步实现/.test(brief80) && /最低档=机械批量改动/.test(brief80) && /只有两档时/.test(brief80),
+    `实际：${brief80.slice(0, 200)}`);
+  ok('R80 行为级：明确「应换则换 / 任务完成优先」，且把省额度降级为附带结果',
+    /该换就换/.test(brief80) && /以任务完成优先/.test(brief80)
+    && /不要为了.怕打断缓存.而将就/.test(brief80)
+    && /降档是适配工作量/.test(brief80) && /省额度只是附带结果/.test(brief80)
+    && !/降档.{0,6}省额度/.test(brief80.replace(/省额度只是附带结果/g, '')),
+    `实际：${brief80.slice(0, 260)}`);
+  ok('R80 行为级：档位决策行给出**三种**示例（升/降/保持），升档也有可抄模板',
+    /档位决策：升 最高\(max\)/.test(brief80) && /档位决策：降 低\(low\)/.test(brief80)
+    && /档位决策：保持 高\(high\)/.test(brief80) && /判据是\*\*这一轮的活需要多少思考\*\*/.test(brief80),
+    '只有"保持/降"示例 ⇒ 升档更难被写出来');
+  /* ② 后缀：每轮都带一句可判定判据 */
+  const suf80 = api80.renderSuffix(mkEff('high', trio)) ?? '';
+  ok('R80 行为级：每轮后缀带可判定判据 + 任务优先（不再只有自指的"需要时"）',
+    /难则升、机械则降/.test(suf80) && /以一次做对为先/.test(suf80) && /可选 低\(low\)\/高\(high\)\/最高\(max\)/.test(suf80),
+    `实际：${JSON.stringify(suf80)}`);
+
+  /* ③ nudge 精度：已到顶/到底不再给无效建议（模型照做只会被拒绝） */
+  const steps80 = (sid) => ({ ok: true, current: sid, efforts: trio });
+  const nTop = api80.renderNudge(mkEff('max', trio), { agent: ag80('sid-top'), turn: 5, userText: '帮我彻底排查根因' });
+  ok('R80 行为级：已是最高档 ⇒ 深度信号下**不再**提示升档（避免无效动作）',
+    nTop === null, `实际：${JSON.stringify(nTop)}`);
+  const nBottom = api80.renderNudge(mkEff('low', trio), { agent: ag80('sid-bot'), turn: 5, userText: '快点改名就行' });
+  ok('R80 行为级：已是最低档 ⇒ 机械信号下**不再**提示降档',
+    nBottom === null, `实际：${JSON.stringify(nBottom)}`);
+  const nUp = api80.renderNudge(mkEff('high', trio), { agent: ag80('sid-up'), turn: 5, userText: '这个并发问题需要彻底排查根因' });
+  ok('R80 行为级：升档提示含"任务一次做对优先"（而不是只喊升档）',
+    typeof nUp === 'string' && /升档/.test(nUp) && /任务一次做对优先/.test(nUp),
+    `实际：${JSON.stringify(nUp)}`);
+  const nDown = api80.renderNudge(mkEff('high', trio), { agent: ag80('sid-down'), turn: 5, userText: '快点批量改名' });
+  ok('R80 行为级：降档提示写明"适配工作量、省额度只是附带结果"',
+    typeof nDown === 'string' && /降档/.test(nDown) && /适配工作量/.test(nDown) && /省额度只是附带结果/.test(nDown),
+    `实际：${JSON.stringify(nDown)}`);
+  /* ④ 关键词表扩充：任务类型词（无语气）也能触发 */
+  const nMigrate = api80.renderNudge(mkEff('high', trio), { agent: ag80('sid-mig'), turn: 5, userText: '把这个模块迁移到新接口' });
+  ok('R80 行为级：任务类型词（如"迁移"）也能触发换档评估（原先只认语气词）',
+    typeof nMigrate === 'string' && /升档/.test(nMigrate), `实际：${JSON.stringify(nMigrate)}`);
 }
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));

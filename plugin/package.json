@@ -1,6 +1,6 @@
 {
   "name": "dsh-context-pilot",
-  "version": "0.1.72",
+  "version": "0.1.73",
   "icon": "./icon.svg",
   "private": true,
   "type": "module",
