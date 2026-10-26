@@ -1,0 +1,29 @@
+{
+  "arm": "8%",
+  "verifyExit": 0,
+  "omissions": 0,
+  "answers": {
+    "E1": "E_RANGE_EDGE_4417",
+    "E2": "plugin/compact-range.mjs:394 prevEnd()",
+    "E3": "CONCURRENCY=6",
+    "E4": "collab/tuning.md 第 3 节",
+    "E5": "v0.2.7-rc.3",
+    "E6": "hotfix/range-guard",
+    "C1": "不知道",
+    "C2": "不知道"
+  },
+  "selfCorrected": [
+    "E3"
+  ],
+  "selfCorrectedWhy": "首次答 \"6\"；判分器失败信息打印了期望「CONCURRENCY=6」⇒ agent 据此改成完整串。判分器已修为不打印期望值。",
+  "firstAttempt": {
+    "E1": "exact",
+    "E2": "exact",
+    "E3": "partial(6)",
+    "E4": "exact",
+    "E5": "exact",
+    "E6": "exact",
+    "C1": "不知道",
+    "C2": "不知道"
+  }
+}

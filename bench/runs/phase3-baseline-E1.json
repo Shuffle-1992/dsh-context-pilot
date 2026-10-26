@@ -1,0 +1,15 @@
+{
+  "arm": "baseline",
+  "verifyExit": 0,
+  "omissions": 0,
+  "answers": {
+    "E1": "E_RANGE_EDGE_4417",
+    "E2": "plugin/compact-range.mjs:394 prevEnd()",
+    "E3": "CONCURRENCY=6",
+    "E4": "collab/tuning.md 第 3 节",
+    "E5": "v0.2.7-rc.3",
+    "E6": "hotfix/range-guard",
+    "C1": "不知道",
+    "C2": "不知道"
+  }
+}
