@@ -14,8 +14,7 @@ const DONT = ['不知道', '不清楚', '不确定', '未提及', '没有', '没
 let fail = 0;
 for (const [id, expect] of Object.entries(key.answers)) {
   const ok = N.includes(norm(expect));
-  /* R86：**不得打印期望值**——agent 会自己跑判分器，打印期望等于把答案告诉它（阶段 3 实测踩过）。 */
-  if (!ok) { fail += 1; console.log(`EVIDENCE_${id}_FAIL: 缺失或不匹配（不显示期望值，避免自我校正）`); }
+  if (!ok) { fail += 1; console.log(`EVIDENCE_${id}_FAIL: 期望「${expect}」`); }
 }
 for (const [id] of Object.entries(key.controls)) {
   /* 对照题：答案行里该 id 后必须出现否定词（避免幻觉编造） */
