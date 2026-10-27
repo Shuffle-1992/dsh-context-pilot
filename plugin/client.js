@@ -229,6 +229,16 @@ window.__ModuleLoader__.load({
 			".dcp-tplbtns{display:flex;flex-direction:column;gap:6px;flex:none}",
 			".dcp-tpl{flex:1 1 auto;width:100%;min-height:150px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.45));border-radius:6px;background:transparent;color:var(--dsw-alias-label-primary,currentColor);padding:6px 8px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;line-height:1.55;resize:vertical;box-sizing:border-box}",
 			".dcp-tpl:disabled{opacity:.6}",
+			/* R87：模板字段的折叠行（默认折叠；样式全部走主题 token） */
+			".dcp-row-tpl{flex-direction:column;align-items:stretch;gap:6px}",
+			".dcp-tplhead{display:flex;align-items:center;gap:8px;width:100%;padding:6px 10px;border:1px solid var(--dsw-alias-border-l1,rgba(128,128,128,.35));border-radius:6px;background:var(--dsw-alias-bg-layer-1,transparent);color:inherit;font:inherit;cursor:pointer;text-align:left}",
+			".dcp-tplhead:hover{background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.12))}",
+			".dcp-tplhead:focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary,#4c7dff));outline-offset:1px}",
+			".dcp-caret{width:12px;flex:none;opacity:.85}",
+			".dcp-tplname{font-weight:600}",
+			".dcp-tplstate{margin-left:auto;opacity:.7;font-size:11px}",
+			".dcp-tplbody{display:block}",
+			".dcp-tplbody.is-collapsed{display:none}",
 			".dcp-builtin{margin:0;padding:8px 10px;border:1px dashed var(--dsw-alias-border-l2,rgba(128,128,128,.45));border-radius:6px;background:var(--dsw-alias-bg-layer-1,transparent);white-space:pre-wrap;word-break:break-word;font-size:11.5px;line-height:1.5;max-height:340px;overflow:auto}",
 			".dcp-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}",
 			".dcp-btn{padding:4px 14px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.45));border-radius:6px;background:var(--dsw-alias-bg-layer-1,transparent);color:var(--dsw-alias-label-primary,currentColor);cursor:pointer;font-size:12px}",
@@ -358,6 +368,9 @@ window.__ModuleLoader__.load({
 			const [cfg, setCfg] = react.useState(null);
 			/* R57：哪一行模板正在展开「内置文案」（null = 全部收起）。必须与其他 hook 同层无条件调用。 */
 			const [tplOpen, setTplOpen] = react.useState(null);
+			/* R87（2026-10-27 用户要求）：三个模板框默认**折叠**——它们占掉整个面板的高度；
+			 * 用一个可点标题（左 ▸/▾ + 名字 + 右侧状态）替代原先常驻的 label + 大文本框。 */
+			const [tplExpand, setTplExpand] = react.useState({});
 			/* R71（审查 #6 + F-10）：原先 pullInj 与 pullCap **两个 effect 各发一次 getHud("")** —— 同一载荷拉两遍
 			 * （上方注释自己写着「不加定时器以免 RPC 翻倍」，挂载路径却翻了倍）；且 cap 走**无 sid** 调用 ⇒
 			 * host 侧 modelPolicies 永不命中，面板钳制上限与该模型真实引擎阈值可能不符（弹窗那条带 sid）。
@@ -631,8 +644,19 @@ window.__ModuleLoader__.load({
 					: (inj?.builtinEffBrief ?? cfg?.builtins?.effBrief));
 			return el("div", { className: "dcp-panel" },
 				el("div", { className: "dcp-grid" },
-					FIELDS.map((field) => el("div", { className: "dcp-row", key: field.key },
-						el("label", { className: "dcp-label", title: hintFor(field) }, field.label),
+					FIELDS.map((field) => el("div", { className: "dcp-row" + (field.type === "tpl" ? " dcp-row-tpl" : ""), key: field.key },
+						field.type === "tpl"
+							? el("button", {
+								className: "dcp-tplhead", type: "button",
+								"aria-expanded": tplExpand[field.key] ? "true" : "false",
+								title: hintFor(field),
+								onClick: () => setTplExpand((v) => Object.assign({}, v, { [field.key]: !v[field.key] })),
+							},
+								el("span", { className: "dcp-caret" }, tplExpand[field.key] ? "▾" : "▸"),
+								el("span", { className: "dcp-tplname" }, field.label),
+								el("span", { className: "dcp-tplstate" }, String(valueOf(field)).trim() ? "已自定义 · 点击展开编辑" : "留空 = 内置文案 · 点击展开编辑"),
+							)
+							: el("label", { className: "dcp-label", title: hintFor(field) }, field.label),
 						field.type === "bool"
 							? el("label", { className: "dcp-switch", title: hintFor(field) },
 								el("input", {
@@ -643,7 +667,8 @@ window.__ModuleLoader__.load({
 								el("span", { className: "dcp-slider" }),
 							)
 							: field.type === "tpl"
-								? el("div", { className: "dcp-tplcol" },
+								? el("div", { className: "dcp-tplbody" + (tplExpand[field.key] ? "" : " is-collapsed") },
+									el("div", { className: "dcp-tplcol" },
 									el("div", { className: "dcp-tplwrap" },
 										el("textarea", {
 											className: "dcp-tpl", rows: 8,
@@ -678,6 +703,7 @@ window.__ModuleLoader__.load({
 											builtinTextOf(field)
 												|| "（暂无内置文案：先 toggle 插件（关→开）加载新版 host，再重新打开本面板后重试；本面板不设刷新按钮）")
 										: null,
+								)
 								)
 								: el("input", {
 									className: "dcp-input", type: field.type === "text" ? "text" : "number",

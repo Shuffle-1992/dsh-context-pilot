@@ -236,9 +236,9 @@ ok('C / page：渲染出只读占位', C.page.classes.includes('dcp-panel'), `cl
 ok('B / page：**渲染出配置网格 dcp-grid**（用户要的表单本体）',
   B.page.classes.includes('dcp-grid'),
   `class=${B.page.classes.join(',')} ⇒ 只有占位说明命名空间没绑上`);
-ok('B / page：配置行数量与 FIELDS 对得上（≥12 行 dcp-row）',
-  B.page.classes.filter((c) => c === 'dcp-row').length >= 12,
-  `实际 ${B.page.classes.filter((c) => c === 'dcp-row').length} 行`);
+ok('B / page：配置行数量与 FIELDS 对得上（≥12 行 dcp-row；R87 起模板行是 dcp-row + dcp-row-tpl）',
+  B.page.classes.filter((c) => c === 'dcp-row' || c === 'dcp-row dcp-row-tpl').length >= 12,
+  `实际 ${B.page.classes.filter((c) => c === 'dcp-row' || c === 'dcp-row dcp-row-tpl').length} 行`);
 ok('B / page：带出保存/恢复按钮',
   B.page.classes.some((c) => c.startsWith('dcp-action')) || B.page.classes.includes('dcp-actions'),
   `class=${B.page.classes.join(',')}`);
@@ -258,6 +258,24 @@ const btnText = (kw) => B.page.nodes.filter((n) => n.type === "button" && String
 ok('R65：三个模板行各有「查看内置文案」+「复制内置文案」两个按钮',
   btnText("查看内置文案") >= 3 && btnText("复制内置文案") >= 3,
   `查看=${btnText("查看内置文案")} 复制=${btnText("复制内置文案")}（各需 ≥3）`);
+
+/* ── R87（2026-10-27 用户要求）：三个模板框改成**可折叠**（默认折叠，左侧 ▸/▾） ── */
+const tplHeads = B.page.nodes.filter((n) => n.props && n.props.className === "dcp-tplhead");
+const tplBodies = B.page.nodes.filter((n) => n.props && typeof n.props.className === "string" && n.props.className.includes("dcp-tplbody"));
+const tplCarets = B.page.nodes.filter((n) => n.props && n.props.className === "dcp-caret").map((n) => String(n.props.children ?? ""));
+ok('R87：三个模板字段各有折叠头（默认折叠 / aria-expanded=false / 左侧 ▸）',
+  tplHeads.length >= 3 && tplHeads.every((h) => String(h.props["aria-expanded"]) === "false")
+  && tplCarets.length >= 3 && tplCarets.every((c) => c === "▸" || c === "\\u25b8"),
+  `heads=${tplHeads.length} aria=${JSON.stringify(tplHeads.map((h) => h.props["aria-expanded"]))} carets=${JSON.stringify(tplCarets)}`);
+ok('R87：折叠态靠 class + CSS 实现（正文 DOM 仍完整，textarea/按钮不受影响）',
+  tplBodies.filter((n) => n.props.className.includes("is-collapsed")).length >= 3
+  && tplBodies.length >= 3
+  && /"\.dcp-tplbody\.is-collapsed\{display:none\}"/.test(SRC),
+  `bodies=${tplBodies.length} collapsed=${tplBodies.filter((n) => n.props.className.includes("is-collapsed")).length}`);
+ok('R87：折叠头可点击（onClick）且键盘可达（focus-visible 样式）',
+  tplHeads.length >= 3 && tplHeads.every((h) => typeof h.props.onClick === "function")
+  && /"\.dcp-tplhead:focus-visible\{outline:/.test(SRC),
+  `onClick=${tplHeads.filter((h) => typeof h.props.onClick === "function").length}`);
 ok('R65：「本轮注入（只读）」板块**整段撤掉**（用户：「太乱了…可以不要」）',
   !/className: "dcp-inj"/.test(SRC) && !/injSec/.test(SRC) && !/injBlock/.test(SRC) && !/injAll/.test(SRC),
   '注入区仍在渲染 ⇒ 与三个模板的内置文案重复，面板太乱');
