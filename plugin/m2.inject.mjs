@@ -669,7 +669,17 @@ export function createM2Injection(deps) {
       const card = renderPolicyCard(r.ratio, effCrit, r.window, trendOf(sid, r.ratio, r.window, effCrit), {
         session: agent.session, measure: r.measure, allowSwitchTalk,
       });
-      const baseText = effSuffix ? `${r.text} ｜ ${effSuffix}` : r.text;
+      /* R86（用户 2026-10-27）：把**锚点**放进每轮后缀——卡片有 30% 门槛，低占用时模型完全看不到锚点；
+       * 已登记 ⇒ 显示"沿用中"（强化一次声明长期生效）；未登记 ⇒ 给最短示例（认知成本降到最低）。 */
+      const anchorHint = (() => {
+        try {
+          const t = getCompactToolApi();
+          const a = (t && sid) ? (t.getAnchor?.(sid) ?? null) : null;
+          if (a) return a.text ? '锚点「按文本」沿用中' : `锚点「最近第${Number(a.recentUser) || 1}条」沿用中`;
+          return '锚点:keepFrom:{recentUser:1}';
+        } catch { return null; }
+      })();
+      const baseText = [r.text, effSuffix, anchorHint].filter(Boolean).join(' ｜ ');
       if (effSuffix) state.m2.effortSuffixes = (state.m2.effortSuffixes ?? 0) + 1;
       /* R16.12：换档提醒——**只在真有信号时出现**（用户意图关键词 / 本会话从未换档），
        * 由 effort 域判定与限量（冷却中不提示、两次间隔 ≥4 轮）。无信号 ⇒ null ⇒ 零 token。 */

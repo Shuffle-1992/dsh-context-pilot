@@ -242,15 +242,19 @@ export function createCompactTool(deps) {
   /** 登记/更新会话档位（入参已由 normTier 规范化）。R16.16：**同时落盘**（跨 toggle/重启有效）。
    * R16.17：写入前有界化（只保留最近 TIER_SID_CAP 个会话）。
    * R21：锚点随档位一起存（`anchor` 缺省即不带 ⇒ **清除**旧锚点，见 normAnchor 的语义说明）。 */
-  function setTier(sid, tier, anchor, explicit) {
+  function setTier(sid, tier, anchor, explicit, anchorAction) {
     const key = String(sid ?? '');
     if (!key) return;
+    const prevRec = tierBySid.get(key);
     tierSeq += 1;
     /* R73（审查 C5）：`explicit` 标记本次是**模型真的指定了档位**（tierGiven），还是仅"沿用当前值"
      * 的 carry 路径。carry 也写表（为了带上锚点），但**不算申报**，否则：未登记会话会被标成
      * 「已申报 standard」⇒「系统代压」提示消失；落盘恢复的 restored:true 也会被覆盖成 set。 */
     const next = { tier, at: Date.now(), seq: tierSeq, restored: false, explicit: explicit === true };
-    if (anchor && typeof anchor === 'object' && Object.keys(anchor).length) next.anchor = { ...anchor };
+    /* R86：锚点三态 —— clear=显式清除 / set=本次登记 / 其余=沿用旧锚点（含"只改档位"的 carry 路径） */
+    if (anchorAction === 'clear') { /* 显式清除：不写 anchor */ }
+    else if (anchor && typeof anchor === 'object' && Object.keys(anchor).length) next.anchor = { ...anchor };
+    else if (prevRec?.anchor) next.anchor = { ...prevRec.anchor };
     tierBySid.set(key, next);
     const dropped = pruneTiers(tierBySid);
     if (dropped > 0) {
@@ -428,23 +432,26 @@ export function createCompactTool(deps) {
     return b == null ? b : (applyTpl(M3?.tplCard, tplVars(args, b), 'card') ?? b);
   };
   /* ═══ R21：语义锚点（A: recentUser 1..3 / B: text 片段）═══
-   * 语义边界只有模型知道、物理节点只有插件知道 ⇒ 工具只**登记声明**，**解析放到压缩那一刻**
-   * （锚点会随新消息移动；只有到压缩时才拿得到最终 surface）。
-   * ⚠️ 缺省即**清除**已存锚点：这次没说锚点就按档位——"忘记重申"必须退化为安全兜底，而不是沿用旧锚点。 */
+   * 语义边界只有模型知道、物理节点只有插件知道 ⇒ 工具只**登记声明**，**解析放到压缩那一刻**。
+   * R86（用户 2026-10-27 决定）：**缺省 = 沿用**（与 tier 的"不传=沿用"对称）；只有**显式 `keepFrom:null`** 才清除。
+   * 依据（本机真实数据）：452 次压缩里锚点用了 **0 次**——"每轮都必须重带"的维护成本让模型直接放弃锚点；
+   * 沿用把它变成"一次声明、长期生效"，才谈得上"锚点优先"。 */
   const anchorLimits = () => { try { return rangeApi()?.ANCHOR_LIMITS ?? { maxRecentUser: 3, maxText: 60 }; } catch { return { maxRecentUser: 3, maxText: 60 }; } };
   const normAnchor = (keepFrom) => {
     try {
       const lim = anchorLimits();
-      if (keepFrom === undefined || keepFrom === null) return { anchor: null, cleared: true, invalid: false };
-      if (typeof keepFrom !== 'object' || Array.isArray(keepFrom)) return { anchor: null, cleared: false, invalid: true };
+      if (keepFrom === undefined) return { anchor: undefined, action: 'carry', cleared: false, invalid: false };
+      if (keepFrom === null) return { anchor: null, action: 'clear', cleared: true, invalid: false };
+      if (typeof keepFrom !== 'object' || Array.isArray(keepFrom)) return { anchor: undefined, action: 'carry', cleared: false, invalid: true };
       const out = {};
       const n = Number(keepFrom.recentUser);
       if (Number.isInteger(n) && n >= 1 && n <= lim.maxRecentUser) out.recentUser = n;
       const t = typeof keepFrom.text === 'string' ? keepFrom.text.replace(/\s+/g, ' ').trim().slice(0, lim.maxText) : '';
       if (t) out.text = t;
       const has = Object.keys(out).length > 0;
-      return { anchor: has ? out : null, cleared: !has, invalid: !has };
-    } catch { return { anchor: null, cleared: false, invalid: true }; }
+      if (!has) return { anchor: undefined, action: 'carry', cleared: false, invalid: true };
+      return { anchor: out, action: 'set', cleared: false, invalid: false };
+    } catch { return { anchor: undefined, action: 'carry', cleared: false, invalid: true }; }
   };
   /** 本会话已登记的锚点（压缩点读取；未登记 ⇒ null）。 */
   function getAnchor(sid) {
@@ -508,9 +515,9 @@ export function createCompactTool(deps) {
       const { tier, fallback, via } = tierGiven
         ? normTier(args.tier)
         : { tier: getTier(sid), fallback: false, via: 'carry' };
-      /* R21：语义锚点（可选）。缺省 ⇒ 清除旧锚点（"忘记重申"退化为按档位 = 安全方向）。 */
+      /* R86：语义锚点缺省 = **沿用**（显式 keepFrom:null 才清除）。 */
       const anchorNorm = normAnchor(args?.keepFrom);
-      setTier(sid, tier, anchorNorm.anchor, tierGiven); // R73（C5）：只有真的传了 tier 才算申报
+      setTier(sid, tier, anchorNorm.anchor, tierGiven, anchorNorm.action); // R73（C5）：只有真的传了 tier 才算申报
       const at = Date.now();
       const prev = bySid.get(sid);
       sweepExpired(); // R73（审查 E10）：登记路径原先不扫过期 ⇒ TTL 只靠「宿主每 pre-step peek」兜底
@@ -526,8 +533,9 @@ export function createCompactTool(deps) {
         tierLabel: textOf(tier),
         tierVia: via || null,
         tierFallback: fallback || null,
-        /* R21：锚点取证（`keepFrom` 若给了但形状非法 ⇒ anchorInvalid，压缩点会退档位）。 */
-        anchor: anchorNorm.anchor,
+        /* R21/R86：锚点取证（action: set / carry / clear；形状非法 ⇒ anchorInvalid）。 */
+        anchor: anchorNorm.action === 'carry' ? (getAnchor(sid) ?? null) : anchorNorm.anchor,
+        anchorAction: anchorNorm.action,
         anchorInvalid: anchorNorm.invalid || null,
         anchorCleared: anchorNorm.cleared || null,
         /* 连续调用（<5s）多半是模型重复触发；记下来供报告核查，但**不拒绝**——
@@ -543,11 +551,15 @@ export function createCompactTool(deps) {
       const pctNow = pctOf(tier);
       /* R21：锚点回执。**必须把「压缩时才解析」说清**——否则模型会以为锚点已生效；
        * 失败路径（形状非法）也要当场告知，而不是等压缩点静默退档位。 */
-      const anchorNote = anchorNorm.anchor
-        ? (anchorNorm.anchor.text
-          ? `；**语义锚点已登记**：按文本「${anchorNorm.anchor.text}」定位那条消息（压缩时解析，失败自动退档位）`
-          : `；**语义锚点已登记**：从最近第 ${anchorNorm.anchor.recentUser} 条你的消息起全部保留（压缩时解析，失败自动退档位）`)
-        : (anchorNorm.invalid ? '；⚠️ `keepFrom` 形状非法，已忽略（本次按档位）' : '');
+      const anchorNow = getAnchor(sid);
+      const anchorTag = anchorNorm.action === 'carry' ? '沿用中' : '已登记';
+      const anchorNote = anchorNorm.action === 'clear'
+        ? '；**已清除语义锚点**（此后按档位压缩）'
+        : anchorNow
+          ? (anchorNow.text
+            ? `；**语义锚点${anchorTag}**：按文本「${anchorNow.text}」定位那条消息（压缩时解析，失败自动退档位）`
+            : `；**语义锚点${anchorTag}**：从最近第 ${anchorNow.recentUser} 条你的消息起全部保留（压缩时解析，失败自动退档位）`)
+          : (anchorNorm.invalid ? '；⚠️ `keepFrom` 形状非法，已忽略（沿用原锚点/按档位）' : '');
       if (action === 'set-tier') {
         /* ⚠️ R16.16（另一会话实测事故，高）：这里曾写 `scheduled: false`（**boolean**），
          * 而 `output.schema` 声明 `type:'string'` ⇒ 宿主按 schema 校验**整条调用被拒**：
@@ -638,10 +650,11 @@ export function createCompactTool(deps) {
         /* R21：把「语义锚点」教出去**必须与档位同段**——它是同一件事的更精确形态：
          * 模型知道新旧需求的边界，插件知道 token ⇒ 分工是「模型指位置、插件算预算」。
          * ⚠️ 措辞要短：三处教学合计有 ≤3000 字符的预算断言（desc+brief+card）。 */
-        `**语义锚点（比比例更准）**：旧需求占地方、新需求只在近端时，按比例选档会白留旧内容——`
-          + `传 \`keepFrom:{recentUser:1}\`（从最近第 1 条你的消息起全保留，可 1/2/3）`
-          + `或 \`keepFrom:{text:'开头十来字'}\`（按文本定位）。text 优先、失败退 recentUser、再失败退档位；`
-          + `**锚点之后原样保留**。不传 = 清除锚点。`,
+        `**语义锚点**：旧需求占地方、新需求只在近端时——`
+          + `**判据**：本轮与上一条用户消息之间**换了话题**（新子任务/收尾）就用锚点。`
+          + `传 \`keepFrom:{recentUser:1}\`（最近第 1 条你的消息起）或 \`keepFrom:{text:'开头十来字'}\`；`
+          + `text 优先、失败退 recentUser、再失败退档位；锚点之后原样保留。`
+          + `**不传=沿用**已登记锚点；清除传 \`keepFrom:null\`。`,
         `**档位是会话级持久选择**：登记后对本会话之后的所有压缩（含 ${crit} 强制线那次）持续生效，直到再次改选。`
           + `**若预计任务会推高占用，趁占用还在 ${crit} 强制线之下时选定档位**——越线那一刻的自动压缩就按它执行；`
           + '越线之后才改档，管不上正在发生的那次（下一轮起才生效）。',
@@ -796,7 +809,7 @@ export function createCompactTool(deps) {
           /* R81：这是**本次**解析的结果（卡片每轮现算），不是"上次"——措辞如实。 */
           + (anchorFail ? `；锚点本次未能定位（${String(anchorFail).slice(0, 40)}）` : '')
           + `。锚点未命中会自动回退到**${textOf(cur)}**${tbTxt}。`
-          : `**当前策略：档位 ${textOf(cur)}**${tbTxt}${tierStateTxt}——这是**近端保留预算**（不是压后总占用）`
+          : `**当前策略：档位 ${textOf(cur)}**${tbTxt}${tierStateTxt}——这是**近端保留预算**（非压后占用）`
             /* R83：标注口径（真实承诺不变；换算成启发式的选择预算与回执同源），不与 used 相减。 */
             + (factor83 > 1 ? `（真实口径 ×${factor83.toFixed(2)}；交给范围选择的启发式预算 ≈${kfmt(heurTierBudget)} token）` : '')
             + '。');
@@ -856,16 +869,17 @@ export function createCompactTool(deps) {
          * 原先把「按比例」列在①、「按位置」列在②，示例还写 `tier 浅压24%` ⇒ 示例偏向 + 锚点认知成本高。
          * 现在：先问"能否锁定任务起点"（能 ⇒ 锚点），不能再选档；并要求选浅压时说明保留什么。 */
         /* R85（F14）：决策顺序保留「两步」骨架与全部可判定要点，去掉重复的代码示例（brief 已给）。 */
-        `• **决策顺序（两步，锚点优先）**：①**按位置**：能锁定起点 ⇒ \`keepFrom\`（**原样保留、不折算**，能压掉更早的无关历史）；②锁定不了才**按比例**选档，选浅压**说明要保留什么**。锚点未命中自动退回档位。`,
-        `• **省略语义不对称**：不传 \`tier\` = **沿用**已登记档位（不是重置）；不传 \`keepFrom\` = **清除**锚点——要持续用锚点就必须每次都带。`,
+        /* R86（用户 2026-10-27）：把"能否锁定起点"变成**可回答的问题**（此前是空判据，模型只能选更简单的档位）。 */
+        `• **决策顺序（两步，锚点优先）**：①**按位置**：**本轮与上一条用户消息之间换了话题**（新任务/收尾）⇒ \`keepFrom:{recentUser:1}\`（**原样保留**，压掉更早的无关历史）；②锁定不了才**按比例**选档，选浅压**说明要保留什么**。锚点未命中自动退回档位。`,
+        `• **省略语义（对称）**：不传 \`tier\`/\`keepFrom\` 均 = **沿用**；清除传 \`keepFrom:null\`。`,
         loss,
         dirLine,
         trend,
         /* R16.14/15（评审建议 4）：讲清代压代价，替代原先那句替不作为背书的「无需操作」。 */
         `• 依赖（要引用之前的路径/结论/报错现场/长推理链）：不要调用（或改用 ${textOf('heavy')}）；`
-          + `真要压就**先把关键产物落盘或写进正文**。`
-          + `**但「不压」的代价不是零**：占用达 ${crit} 时**系统会代替你压缩**——时机与档位都由系统定，`
-          + `摘要会把**当时已过期的事实**（旧版本号/旧结论）写进概要。`,
+          + `真压就先落盘关键产物。`
+          + `**但「不压」的代价不是零**：占用达 ${crit} 时**系统会代替你压缩**——时机/档位由系统定，`
+          + `摘要会把**已过期的事实**写进概要。`,
         '',
         /* R82（F5）：换档工具在 `effortEnabled=false`（**默认**）时已被 retractTool 撤掉 ⇒
          * 卡片不能再教模型调它（这与 m2 自述的「绝不出现工具已隐藏、文本还在教你调用」铁律冲突）。
@@ -899,10 +913,10 @@ export function createCompactTool(deps) {
         + '压缩在**你的下一个步骤开始前**执行，本轮不中断，调用后请直接继续当前任务、不要停下等它。'
         + '参数：`action`（默认 compact=登记并压缩；**set-tier=只登记档位、本次不压缩**）、'
         + '`tier`（三选一：深压8% / 标准16% / 浅压24%，**不传 = 沿用已登记档位**）、'
-        + '`keepFrom`（可选，语义锚点：从你指定的那条需求起保留，比比例更准）、`reason`。'
-        + '档位是**会话级持久选择**（含强制线那次）。'
+        + '`keepFrom`（换话题时传 `{recentUser:1}`，从该处起原样保留；不传=沿用，`null`=清除）、`reason`。'
+        + '档位是**会话级持久**（含强制线那次）。'
         + '**策略、当前档位与本轮数据（损失/趋势）见每轮注入的压缩决策卡**——按卡上的数字判断，不要凭空预测占用。'
-        + '工具返回后会给出自检契约。',
+        + '返回后会给出自检契约。',
       parameters: {
         /* ⚠️ 可选参数必须**省略** `required`——写成 `required: false` 会被 defineTool 拒绝：
          * 实测 `unsupported JSON schema: parameters.reason.required must be true when present`

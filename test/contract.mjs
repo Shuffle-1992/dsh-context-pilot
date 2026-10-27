@@ -759,10 +759,12 @@ ok('R16.14 接线：趋势数据（增量/触线轮数）由 m2 现算并注入�
   /* R43（用户 2026-10-16）：「决策卡里是优先用 keepFrom 还是档位？使用时应该说清哪种模式。要求都是中文」。 */
   /* R78（调查报告 §8.3）：决策顺序收敛为**两步**（先判起点→锚点；再选档），并补上省略语义对称（§4.2）。 */
   const mode43 = (card15.match(/• \*\*决策顺序[\s\S]*?锚点未命中自动退回档位。/) ?? [''])[0];
-  ok('R78 文本级：决策顺序两步（锚点优先）+ 省略语义对称（tier 沿用 / keepFrom 清除）',
+  /* R86（用户 2026-10-27）：判据可执行化（"换了话题"）+ 省略语义对称化（缺省=沿用，null=清除）。 */
+  ok('R86 文本级：决策顺序两步（可执行判据 + 锚点优先）+ 省略语义（均沿用 / null 清除）',
     /决策顺序（两步，锚点优先）/.test(card15) && /①\*\*按位置\*\*/.test(card15) && /②锁定不了才\*\*按比例\*\*/.test(card15)
-    && /原样保留、不折算/.test(card15) && /锚点未命中自动退回档位/.test(card15)
-    && /不传 .tier. = \*\*沿用\*\*已登记档位/.test(card15) && /不传 .keepFrom. = \*\*清除\*\*锚点/.test(card15),
+    && /原样保留/.test(card15) && /锚点未命中自动退回档位/.test(card15)
+    && /换了话题/.test(card15) && /keepFrom:\{recentUser:1\}/.test(card15)
+    && /不传 .tier.\/.keepFrom. 均 = \*\*沿用\*\*/.test(card15) && /keepFrom:null/.test(card15),
     `实际：${mode43.slice(0, 220)}`);
   ok('R43 中文守卫：模式说明**除代码标识符外全中文**（剥掉反引号片段后不得残留拉丁字母）',
     mode43.length > 40 && !/[A-Za-z]/.test(mode43.replace(/`[^`]*`/g, '')),
@@ -778,8 +780,8 @@ ok('R16.14 接线：趋势数据（增量/触线轮数）由 m2 现算并注入�
       && /（已登记）/.test(cardDecl) && /（\*\*兜底\*\*：未登记档位）/.test(cardUnd)
       && !/当前策略：档位 heavy/.test(cardDecl),
     '决策行要求写 tier 保持 X 而 X 无处可查 ⇒ 模型只能猜（评审建议 3）');
-  ok('R16.15 措辞：明确「不传 tier = 沿用已登记档位（不是重置）」',
-    /沿用已登记档位/.test(desc15) && /不是重置/.test(card15),
+  ok('R16.15 措辞：明确「不传 tier = 沿用已登记档位」（R86 起与 keepFrom 的"沿用"对称）',
+    /沿用已登记档位/.test(desc15) && /均 = \*\*沿用\*\*/.test(card15),
     '「不传参 = 维持现状（初始 standard）」易被读成重置（评审建议 4）');
 }
 
@@ -1797,9 +1799,10 @@ ok('读档失败不阻断注入（try/catch 吞）',
 ok('思考强度教学与插件说明同时机（会话首次）',
   /!effBriefedBySid\.has\(sid\)/.test(injectBody),
   '教学未按会话一次性 ⇒ 每轮重复占 token');
-ok('用量行后缀拼装（每轮告知当前实际档位）',
-  /effSuffix \? `\$\{r\.text\} ｜ \$\{effSuffix\}` : r\.text/.test(injectBody),
-  '未拼后缀 ⇒ 模型不知道当前**实际生效**档位');
+ok('用量行后缀拼装（每轮告知当前实际档位 + R86 起附带锚点提示）',
+  /const baseText = \[r\.text, effSuffix, anchorHint\]\.filter\(Boolean\)\.join\(' ｜ '\);/.test(injectBody)
+  && /锚点「最近第\$\{Number\(a\.recentUser\) \|\| 1\}条」沿用中/.test(injectBody),
+  '未拼后缀 ⇒ 模型不知道当前**实际生效**档位；未带锚点提示 ⇒ 低占用时看不到锚点');
 ok('注入文本出口走模块（host 不再内联文案）',
   /effortApi\?\.renderSuffix\(eff\)/.test(injectBody) && /effortApi\?\.renderBrief\(eff\)/.test(injectBody),
   'host 仍内联 effort 文案 ⇒ 与模块两份实现会漂移');
@@ -3178,14 +3181,21 @@ console.log('\n== 6.26 R21：语义锚点保留（A/B + 降级链）==');
   ok('R21 工具：锚点**随档位一起落盘**（跨 toggle/重启仍有效）',
     B21.api.getAnchor('sess-r21')?.recentUser === 2 && B21.api.getTier('sess-r21') === 'light',
     `restored anchor=${JSON.stringify(B21.api.getAnchor('sess-r21'))} tier=${B21.api.getTier('sess-r21')}`);
-  const vNoKeep = await B21.spec().execute({ tier: '标准', action: 'set-tier' }, { agent: { session: { id: 'sess-r21' } } });
-  ok('R21 工具：本次**不带 keepFrom ⇒ 清除**旧锚点（"忘记重申"退化为按档位 = 安全方向）',
-    B21.api.getAnchor('sess-r21') === null && B21.api.getTier('sess-r21') === 'standard' && /语义锚点/.test(vNoKeep?.verify ?? '') === false,
-    `anchor=${JSON.stringify(B21.api.getAnchor('sess-r21'))}`);
+  /* R86（用户 2026-10-27）：语义从"缺省即清除"改为**缺省沿用**（实测锚点使用率 0/452）。 */
+  const vCarry = await B21.spec().execute({ tier: '标准', action: 'set-tier' }, { agent: { session: { id: 'sess-r21' } } });
+  ok('R86 工具：不传 keepFrom ⇒ **沿用**已登记锚点（不再清除）',
+    B21.api.getAnchor('sess-r21')?.recentUser === 2 && B21.api.getTier('sess-r21') === 'standard'
+    && /语义锚点沿用中/.test(vCarry?.verify ?? ''),
+    `anchor=${JSON.stringify(B21.api.getAnchor('sess-r21'))} verify=${String(vCarry?.verify ?? '').slice(0, 90)}`);
+  const vClear = await B21.spec().execute({ tier: '标准', action: 'set-tier', keepFrom: null }, { agent: { session: { id: 'sess-r21' } } });
+  ok('R86 工具：显式 `keepFrom:null` ⇒ 清除锚点（回执明示）',
+    B21.api.getAnchor('sess-r21') === null && /已清除语义锚点/.test(vClear?.verify ?? ''),
+    `anchor=${JSON.stringify(B21.api.getAnchor('sess-r21'))} verify=${String(vClear?.verify ?? '').slice(0, 90)}`);
   const anchorBad = B21.api.normAnchor({ recentUser: 9 });
   const anchorTxt = B21.api.normAnchor({ text: '  a   b  ' });
   ok('R21 工具：锚点形状校验（越界 recentUser 视为非法；text 归一化空白并截断）',
-    anchorBad.invalid === true && anchorBad.anchor === null && anchorTxt.anchor?.text === 'a b',
+    /* R86：非法形状现在返回 action='carry'（沿用），anchor 为 undefined */
+    anchorBad.invalid === true && anchorBad.anchor == null && anchorBad.action === 'carry' && anchorTxt.anchor?.text === 'a b',
     `bad=${JSON.stringify(anchorBad)} txt=${JSON.stringify(anchorTxt)}`);
   rmSync(tmp21, { recursive: true, force: true });
 
@@ -4982,11 +4992,11 @@ ok('R72（S1/H7）：宿主死委托已删，行预算注释与实测一致',
 
   const ct73 = readFileSync(join(PLUGIN, 'compact-tool.mjs'), 'utf8');
   ok('R73（C5）：carry 路径不算「申报过档位」（explicit 标记 + hasTier/tierState 同口径）',
-    /function setTier\(sid, tier, anchor, explicit\) \{/.test(ct73)
+    /function setTier\(sid, tier, anchor, explicit, anchorAction\) \{/.test(ct73)
     && /explicit: explicit === true/.test(ct73)
     && /return it != null && it\.explicit !== false;/.test(ct73)
     && /if \(it\.explicit === false\) return 'none';/.test(ct73)
-    && /setTier\(sid, tier, anchorNorm\.anchor, tierGiven\)/.test(ct73),
+    && /setTier\(sid, tier, anchorNorm\.anchor, tierGiven, anchorNorm\.action\)/.test(ct73),
     'carry 也登记 ⇒ 未申报会话被标「已申报 standard」、「系统代压」提示消失、restored 被覆盖成 set');
   ok('R73（E2）：用户模板超 3000 字符**留痕不截断**',
     /state\.m3\.tplOversize = \{ at: new Date\(\)\.toISOString\(\), which, len: out\.length \}/.test(ct73),
@@ -5671,6 +5681,28 @@ ok('R75（S4）：client 只剩**一份** unwrapEnv，面板复用模块级实�
     /const f = getRangeApi\(\)\?\.anchorLabelOf;/.test(m2src85)
     && /权威实现在 `compact-range\.anchorLabelOf`/.test(readFileSync(join(PLUGIN, 'm3.compact.mjs'), 'utf8')),
     '两份同体实现无任何约束 ⇒ 措辞漂移后用户会在两处看到不同说法');
+}
+/* ═══ R86（用户 2026-10-27）：锚点优先的三项落地 —— 判据可执行 / 缺省沿用 / 每轮可见 ═══ */
+{
+  const ct86 = await import(pathToFileURL(join(PLUGIN, "compact-tool.mjs")).href);
+  const range86 = await import(pathToFileURL(join(PLUGIN, "compact-range.mjs")).href);
+  let spec86 = null;
+  const api86 = ct86.createCompactTool({
+    svc: (k) => (k === "tools" ? { register: (t) => { spec86 = t; return () => {}; } } : null),
+    tryOf: (f) => { try { return { value: f(), error: null }; } catch (e) { return { value: undefined, error: String(e) }; } },
+    pick: (...a) => a.find((x) => x != null), msg: (e) => String(e), log: () => {}, schedule: () => {},
+    state: { m3: { compactToolDiag: { calls: 0 } } }, readCfg: () => ({ enabled: true }),
+    getDefineTool: () => (sp) => sp, getRangeApi: () => range86,
+  });
+  api86.ensure();
+  const brief86 = api86.renderBrief({ criticalRatio: 0.75, retainRatio: 0.16, retainTokens: 160000 }) ?? "";
+  const desc86 = String(spec86.description ?? "");
+  ok("R86 文本级：一次性说明也给出**可执行判据**（换了话题 ⇒ 用锚点）+ 缺省沿用 / null 清除",
+    /判据.*换了话题/.test(brief86) && /不传=沿用/.test(brief86) && /keepFrom:null/.test(brief86),
+    `实际：${brief86.split(String.fromCharCode(10)).filter((l) => /锚点|判据/.test(l)).join(" ｜ ").slice(0, 240)}`);
+  ok("R86 结构级：工具描述含锚点示例（{recentUser:1}）与沿用/清除语义",
+    /\{recentUser:1\}/.test(desc86) && /不传=沿用/.test(desc86) && /null/.test(desc86) && /清除/.test(desc86),
+    `实际描述：${desc86.slice(300, 480)}`);
 }
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));
