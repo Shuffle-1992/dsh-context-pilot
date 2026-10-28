@@ -30,6 +30,23 @@
  * （引擎/手动、pre-step 自选范围、idle 扫除），避免"同一物理量三处各写一遍"（本项目多次踩坑）。
  * `stale`（surface 比 provider 上报时缩水 >50%）⇒ 带「provider 待刷新，下次请求后会回落」：
  * 刚压完的表盘是**过渡值**（真机：12.6% → 13 分钟后 5%，见 R37 的账本算术）。 */
+/** R88（2026-10-28 用户反馈「浅压24% 却只留了 40k」）：面板/记录行要**说清保留来源**。
+ * 锚点路径下档位预算不参与（R39），且锚点段常被 `MIN_RETAIN_TOKENS` 抬起（R44）——
+ * 面板只写「压后占用 x%」时，用户会以为档位名没生效（真机截图：24% 档、实际 40k/8%）。
+ * 输出：` · 锚点(下限40k，锚点段仅3.4k)` / ` · 锚点(保留40k)`；非锚点路径返回空串。 */
+export function anchorActSuffix(retainSource, retainBudget, anchorTokens, anchorClamped) {
+  if (!retainSource || !String(retainSource).startsWith('anchor:')) return '';
+  const kb = (n) => {
+    const v = Number(n) / 1000;
+    return v < 10 ? `${(Math.round(v * 10) / 10).toFixed(1)}k` : `${Math.round(v)}k`;
+  };
+  const budget = Number.isFinite(Number(retainBudget)) ? kb(retainBudget) : '?';
+  if (anchorClamped === true && Number.isFinite(Number(anchorTokens))) {
+    return ` · 锚点(下限${budget}，锚点段仅${kb(anchorTokens)})`;
+  }
+  return ` · 锚点(保留${budget})`;
+}
+
 export function occupancyActSuffix(ratioAfter, stale, settledRatio) {
   if (!Number.isFinite(ratioAfter)) return '';
   /* R46（用户 2026-10-16 同意）：面板行后缀也带上「预计稳定后」——与回执同源同数（R45 的样本中位数）。
@@ -137,8 +154,10 @@ export function createM3Compaction(deps) {
      * 大压缩后 surface 骤降、而那份旧开销（本例 350,476 − 225,221 = 125,255）仍在分子里
      * ⇒ 投影**系统性偏高**，要等 provider 实报新 prompt 才回落。此处只**标注**（`stale`），
      * 供显示层加一句「provider 待刷新」；⚠️ 不参与判定（方向偏高 = 保守）。 */
-    const stale = proj.reported != null && proj.sampled != null && proj.surface != null
-      && proj.sampled > 0 && proj.surface < proj.sampled * 0.5;
+    /* R88：优先用 core 的单源判定（补了"reported 远高于投影"这条更稳的判据），保留本地 fórmula 兜底。 */
+    const stale = proj.stale === true
+      || (proj.reported != null && proj.sampled != null && proj.surface != null
+        && proj.sampled > 0 && proj.surface < proj.sampled * 0.5);
     const ratio = window && used != null ? used / window : null;
     return { ok: true, used, total, surface, window, ratio, basis, projected, reported, sampled: proj.sampled, stale, measure: m.value };
   };
@@ -875,7 +894,9 @@ export function createM3Compaction(deps) {
         /* D8/F13（R7 审查修）：HUD 文案必须用**真实触发原因**——原先写死 `'pressure'`，
          * 于是「模型主动请求压缩」在弹窗与 hud-acts 里被标成「强制压缩」，与实际动机不符
          * （而 `lastPreStep.trigger` 记的是真值 ⇒ 同一件事两个说法）。 */
-        const __t = formatAct(trigger, result?.shadowedTokenCount) + occupancyActSuffix(ratioAfter, staleAfter, settledRatio);
+        const __t = formatAct(trigger, result?.shadowedTokenCount)
+          + occupancyActSuffix(ratioAfter, staleAfter, settledRatio)
+          + anchorActSuffix(out.retainSource, out.retainBudget, out.anchorTokens, out.anchorClamped);
         publishHud({ hudLastAct: __t }); // M5
         recordHudAct(sid, __t);
         clearBriefed(sid); // R1：同 idle 路径——压缩后一次性说明需重讲

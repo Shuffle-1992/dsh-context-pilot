@@ -5704,6 +5704,57 @@ ok('R75（S4）：client 只剩**一份** unwrapEnv，面板复用模块级实�
     /\{recentUser:1\}/.test(desc86) && /不传=沿用/.test(desc86) && /null/.test(desc86) && /清除/.test(desc86),
     `实际描述：${desc86.slice(300, 480)}`);
 }
+/* ═══ R88（2026-10-28 真机诊断）：压缩后"27.8% vs 8.4%"与"24%档却只留40k"的显示修复 ═══ */
+{
+  const core88 = await import(pathToFileURL(join(PLUGIN, "core.mjs")).href);
+  const m3src88 = readFileSync(join(PLUGIN, "m3.compact.mjs"), "utf8");
+  const m388 = await import(pathToFileURL(join(PLUGIN, "m3.compact.mjs")).href);
+
+  /* ① stale：真机数字（provider 仍报压缩前 689,631、我方投影 291,964）必须判"待刷新" */
+  const realP = core88.projectedFromPressure({ pressureTokens: 689631, surfaceTokens: 51051, sampledSurfaceTokens: 448718 });
+  /* ② stale：surface/sampled 缺失时，靠"reported 远高于投影"这条兜底判据也要成立 */
+  /* gapP：surface/sampled 缺失时**无法判**（没有投影可比）⇒ 保持 false 属可接受降级；
+   * gapView：wire.view 只给 projectedTokens 时，靠「reported 远高于投影」兜底判据必须成立。 */
+  const gapP = core88.projectedFromPressure({ pressureTokens: 689631, surfaceTokens: null, sampledSurfaceTokens: null });
+  const gapView = core88.projectedFromPressure({ pressureTokens: 689631, projectedTokens: 291964 });
+  /* ③ 反例：provider 已刷新（reported≈projected）不得误标 */
+  const freshP = core88.projectedFromPressure({ pressureTokens: 300000, surfaceTokens: 299000, sampledSurfaceTokens: 299000 });
+  ok("R88 core：压缩刚落地时 `projectedFromPressure` 必须标 stale（真机 689,631→291,964；surface 缺失也有兜底判据）",
+    realP.projected === 291964 && realP.stale === true && gapView.stale === true && gapP.stale === false && freshP.stale === false,
+    `real=${JSON.stringify(realP)} gapView=${gapView.stale} gapNoProjection=${gapP.stale} fresh=${freshP.stale}`);
+
+  /* ④ 面板/记录行必须说清保留来源（锚点+下限），否则用户看到"24%档"与"8%"对不上 */
+  const a1 = m388.anchorActSuffix("anchor:recent-user", 40000, 3426, true);
+  const a2 = m388.anchorActSuffix("anchor:recent-user", 240000, null, false);
+  const a3 = m388.anchorActSuffix("tier", 240000, null, null);
+  ok("R88 面板行：锚点路径标注「下限40k，锚点段仅3.4k」；档位路径不标注",
+    /锚点\(下限40k，锚点段仅3\.4k\)/.test(a1) && /锚点\(保留240k\)/.test(a2) && a3 === "",
+    `a1=${a1} a2=${a2} a3=${a3}`);
+
+  /* ⑤ 接线：pre-step 的 HUD/落盘行必须真的拼上它 */
+  ok("R88 接线：pre-step 行 = formatAct + occupancyActSuffix + anchorActSuffix（单一来源，防两处漂移）",
+    /anchorActSuffix\(out\.retainSource, out\.retainBudget, out\.anchorTokens, out\.anchorClamped\)/.test(m3src88)
+    && /occupancyActSuffix\(ratioAfter, staleAfter, settledRatio\)/.test(m3src88),
+    "m3 pre-step 行未拼锚点后缀 ⇒ 面板仍会出现「24%档却只显示占用」的歧义");
+
+  /* ⑥ 卡片风险提示：锚点会覆盖档位预算（R88 B） */
+  const ct88 = await import(pathToFileURL(join(PLUGIN, "compact-tool.mjs")).href);
+  const range88 = await import(pathToFileURL(join(PLUGIN, "compact-range.mjs")).href);
+  let spec88 = null;
+  const api88 = ct88.createCompactTool({
+    svc: (k) => (k === "tools" ? { register: (t) => { spec88 = t; return () => {}; } } : null),
+    tryOf: (f) => ({ value: f(), error: null }), pick: (...a) => a.find((x) => x != null),
+    msg: (e) => String(e), log: () => {}, schedule: () => {},
+    state: { m3: { compactToolDiag: { calls: 0 } } }, readCfg: () => ({ enabled: true }),
+    getDefineTool: () => (sp) => sp, getRangeApi: () => range88,
+  });
+  api88.ensure();
+  const card88 = api88.renderCard({ ratio: 0.65, minRatio: 0.3, criticalRatio: 0.75, usedTokens: 680000,
+    tierName: "heavy", tierBudget: 240000, tierRatio: 0.24, tierState: "set" }) ?? "";
+  ok("R88 卡片：明确「锚点覆盖档位预算；长任务可能只留几 k（≈深压），要留大段证据用档位」",
+    /锚点覆盖档位预算/.test(card88) && /只留几 k/.test(card88) && /要留大段证据用档位/.test(card88),
+    `卡片锚点段=${(card88.split(String.fromCharCode(10)).filter((l) => /锚点/.test(l)).join(" ｜ ")).slice(0, 220)}`);
+}
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));
 process.exit(failures ? 1 : 0);

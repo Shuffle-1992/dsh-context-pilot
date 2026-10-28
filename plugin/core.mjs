@@ -209,13 +209,24 @@ export function projectedFromPressure(rec) {
   const reported = rec?.pressureTokens ?? null;
   const surface = rec?.surfaceTokens ?? null;
   const sampled = rec?.sampledSurfaceTokens ?? null;
-  const out = { projected: null, reported, surface, sampled, used: null, basis: '无 provider 数据' };
+  const out = { projected: null, reported, surface, sampled, stale: false, used: null, basis: '无 provider 数据' };
+  /* R88（2026-10-28 真机：压缩后 provider 仍报 689,631、我方投影 291,964=27.8%，面板行却**没标**
+   * 「provider 待刷新」⇒ 用户以为 27.8% 是压后真实值，和两秒后刷新的 8.4% 对不上）。
+   * 原判据只在 surface/sampled 都齐全时才成立（真机某些时刻 sampledSurfaceTokens 缺失 ⇒ 永远 false）。
+   * 现补一条**更稳的**判据：provider 上报值仍显著高于我们的投影（reported > projected×1.5）⇒
+   * 说明「本次上报是压缩前那次请求的」，投影必然偏高 ⇒ 同样属于待刷新。
+   * ⚠️ 只作显示标注，**不参与判定**（方向偏高 = 保守，与 R29 一致）。 */
+  const staleOf = (p) => {
+    const bySurface = reported != null && sampled != null && surface != null && sampled > 0 && surface < sampled * 0.5;
+    const byGap = reported != null && Number.isFinite(p) && p > 0 && reported > p * 1.5;
+    return bySurface || byGap;
+  };
   if (rec?.projectedTokens != null) {
-    return { ...out, projected: rec.projectedTokens, used: rec.projectedTokens, basis: '下一请求预估' };
+    return { ...out, projected: rec.projectedTokens, stale: staleOf(rec.projectedTokens), used: rec.projectedTokens, basis: '下一请求预估' };
   }
   if (reported != null && surface != null && sampled != null) {
     const p = Math.max(0, reported + surface - sampled);
-    return { ...out, projected: p, used: p, basis: '下一请求预估(自算)' };
+    return { ...out, projected: p, stale: staleOf(p), used: p, basis: '下一请求预估(自算)' };
   }
   if (reported != null) return { ...out, used: reported, basis: 'provider 实报(无增量参照)' };
   return out;
@@ -241,6 +252,8 @@ export function contextLedgerOf(pressure, measure, breakdown) {
     providerSurface: proj.surface,
     displayUsed: proj.used,
     basis: proj.basis,
+    /* R88：过渡读数标记（provider 还没刷新到压缩后的值）——报告/面板据此加「待刷新」。 */
+    stale: proj.stale === true,
     /* ② 启发式口径（面板三行 / 日志总量） */
     heuristicTotal: measure?.totalTokens ?? null,
     heuristicSurface: measure?.surfaceTokens ?? null,
