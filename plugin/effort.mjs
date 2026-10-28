@@ -1024,6 +1024,27 @@ export function createEffort(deps) {
    * @param {object} eff `read(agent)` 的结果（含 current/efforts）
    * @param {{agent?: object, turn?: number, userText?: string}} ctx 注入上下文
    */
+  /** R89：解析模型自己写的档位决策行（`档位决策：降 低(low)｜理由…`）→ `{intent, tier}`。
+   * 只认「升/降/保持 + 档位标签」这一种形态；标签与 DSH 一致（关闭(off)/低(low)/高(high)/最高(max)）。 */
+  const parseTierDeclaration = (text) => {
+    try {
+      const m = /档位决策[：:]\s*(升|降|保持)[  \t]*([^\s｜|，,。；;）)]+)/.exec(String(text ?? ''));
+      if (!m) return null;
+      const raw = m[2];
+      /* 标签形如「低(low)」「最高(max)」「高(high)」「关闭(off)」；也容忍只写 id 或只写中文。 */
+      const idIn = /\((off|low|high|max)\)/i.exec(raw);
+      let tier = idIn ? idIn[1].toLowerCase() : null;
+      if (!tier) {
+        const zh = raw.replace(/[()（）]/g, '');
+        if (/关/.test(zh)) tier = 'off';
+        else if (/^低/.test(zh) || /低档/.test(zh)) tier = 'low';
+        else if (/最高/.test(zh) || /^顶/.test(zh)) tier = 'max';
+        else if (/^高/.test(zh) || /中/.test(zh)) tier = 'high';
+      }
+      return tier ? { intent: m[1], tier } : null;
+    } catch { return null; }
+  };
+
   function renderNudge(eff, ctx) {
     try {
       if (!eff?.ok || !eff.current) return null;
@@ -1058,6 +1079,24 @@ export function createEffort(deps) {
        * ① 到顶时先记了提醒位再 return null ⇒ 白烧 4 轮提醒额度；
        * ② `return null` 直接吃掉整条分支 ⇒ 同句里本可给、且真实可行的**降档**提示被吞掉
        *    （实测「重构…直接改名」在 max 档下返回 null）。现改为**先按方向过滤再命中**。 */
+      /* ④ R89（真机多次实测：截图里写了「档位决策：降 低(low)」，但工具列表里没有 set_reasoning_effort，
+       * 底部仍是 Max ⇒ 用户以为切了、模型也以为切了）。这是**声明≠生效**，必须显式指出；
+       * 它比"用户要求深入/快速"的软建议优先级更高——先纠正执行缺口，再谈要不要换。
+       * 同一档位的重复声明 4 轮内只提醒一次（避免每轮刷屏）。 */
+      if (ctx?.assistantText) {
+        const dec = parseTierDeclaration(ctx.assistantText);
+        if (dec && dec.intent !== '保持' && dec.tier && dec.tier !== eff.current) {
+          const mis = s.misNudge ?? null;
+          const fresh = !mis || mis.tier !== dec.tier || turn - (mis.turn ?? 0) >= 4;
+          if (fresh) {
+            s.misNudge = { tier: dec.tier, turn };
+            s.nudgeAtTurn = turn;
+            return '【声明-执行不一致】你上一条写了「档位决策：' + dec.intent + ' ' + effortLabel(dec.tier) + '」，'
+              + '但**没有调用 ' + TOOL_NAME + '** ⇒ 实际仍是 ' + effortLabel(eff.current) + '。'
+              + '要生效就**现在调用一次**（一句话说明即可）；不打算换就收回那句话。' + tail;
+          }
+        }
+      }
       if (gap >= NUDGE_MIN_GAP && text) {
         const up = atTop ? null : WANT_DEEP_RE.exec(text);
         if (up) {

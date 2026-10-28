@@ -636,6 +636,24 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
     return messageText(m);
   };
 
+  /** R89（2026-10-28 真机多次：模型写了「档位决策：降 低(low)」却没调用工具）：
+   * 最近一条**模型自己的**消息文本——用于检测「声明了升降档但没执行」。
+   * 与 lastUserText 同构（surface 尾部 + eventAt 取事件），只筛 `assistant/message`。
+   * 读不到返回空串（调用方据此不提示，绝不影响注入主流程）。 */
+  const lastAssistantText = (session, maxNodes = 6, maxLen = 800) => {
+    try {
+      const nodes = Array.isArray(session?.surface) ? session.surface : session?.surface?.nodes;
+      if (!Array.isArray(nodes) || typeof session?.eventAt !== 'function') return '';
+      for (let i = nodes.length - 1, k = 0; i >= 0 && k < maxNodes; i -= 1, k += 1) {
+        const ev = session.eventAt(nodes[i]);
+        if (!ev || ev.type !== 'assistant/message') continue;
+        const t = extractEventText(ev);
+        if (t) return String(t).slice(0, maxLen);
+      }
+    } catch { /* 吞：读不到即不提示 */ }
+    return '';
+  };
+
   /** R16.12：最近一条**真人用户**消息的文本（换档提醒的外部触发输入）。
    * 只读 surface 尾部若干节点；跳过插件自己注入的 user/message（kind=context-pilot）
    * 与 UI 产生的 model-selection，否则会读到自己的用量行。
@@ -900,7 +918,7 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
     state, log, msg, svc, tryOf, pick, kfmt, nfmt, errCodeOf, remember, SET_CAP,
     M3, mergeConfig, effEnabled, schedule, addListener, SOURCE_KIND, TAG, clearSchedules,
     COMPACT_TIMEOUT_MS, HISTORY_CAP, HEARTBEAT_MS, SESSION_CAP,
-    compactMeasure, summarizeBreakdown, messageText, extractEventText, lastUserText,
+    compactMeasure, summarizeBreakdown, messageText, extractEventText, lastUserText, lastAssistantText,
     /* R25：占用口径单源（m3 触发/显示、m1 报告账本都用这两支）。 */
     projectedFromPressure, contextLedgerOf,
     loadCreateUserMessage, loadDefineTool, getCreateUserMessage: () => createUserMessage,

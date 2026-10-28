@@ -242,6 +242,9 @@ export function createCompactTool(deps) {
   /** 登记/更新会话档位（入参已由 normTier 规范化）。R16.16：**同时落盘**（跨 toggle/重启有效）。
    * R16.17：写入前有界化（只保留最近 TIER_SID_CAP 个会话）。
    * R21：锚点随档位一起存（`anchor` 缺省即不带 ⇒ **清除**旧锚点，见 normAnchor 的语义说明）。 */
+  /** R90：sid → 本会话 compact_context 调用次数（只增；m2 复检用）。 */
+  const toolCallsBySid = new Map();
+
   function setTier(sid, tier, anchor, explicit, anchorAction) {
     const key = String(sid ?? '');
     if (!key) return;
@@ -524,6 +527,12 @@ export function createCompactTool(deps) {
       if (action === 'compact') bySid.set(sid, { at, reason });
       if (action === 'compact') rearmBySid.delete(sid); // R75（E3）：新意图登记 ⇒ 重挂预算重置
       state.m3.compactToolCalls = (state.m3.compactToolCalls ?? 0) + 1;
+      /* R90：**每会话**调用计数——m2 用它做"声明了要压但没调用工具"的复检（全局计数会被别的会话污染）。 */
+      {
+        const k90 = String(sid);
+        toolCallsBySid.set(k90, (toolCallsBySid.get(k90) ?? 0) + 1);
+        if (toolCallsBySid.size > 64) { const k0 = toolCallsBySid.keys().next().value; if (k0 && k0 !== k90) toolCallsBySid.delete(k0); }
+      }
       state.m3.lastCompactTool = {
         at: new Date().toISOString(),
         sessionId: sid,
@@ -1106,5 +1115,5 @@ export function createCompactTool(deps) {
     };
   }
 
-  return { TOOL_NAME, ensure, peekIntent, takeIntent, rearmIntent, pending, getTier, hasTier, setTier, tierState, renderBrief, renderCard, renderTemplated, diag, tierText: (t) => textOf(t), getAnchor, normAnchor, TIER_DISPLAY_FALLBACK: TIER_FALLBACK };
+  return { TOOL_NAME, ensure, peekIntent, takeIntent, rearmIntent, pending, getTier, hasTier, setTier, tierState, renderBrief, renderCard, renderTemplated, diag, tierText: (t) => textOf(t), getAnchor, normAnchor, /* R90：每会话调用计数（m2 的"声明-执行复检"用） */ toolCallsOf: (sid) => Number(toolCallsBySid.get(String(sid)) ?? 0), TIER_DISPLAY_FALLBACK: TIER_FALLBACK };
 }

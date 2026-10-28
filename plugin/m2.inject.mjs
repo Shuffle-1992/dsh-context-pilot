@@ -40,7 +40,7 @@ export function createM2Injection(deps) {
     /* R75（审查 E1）：m3 的**生效强制线**（含 5–20pp 动态余量）——教学必须与它同源。 */
     effectiveCriticalOf: effectiveCriticalInjected,
     getRangeApi, getCompactToolApi, getEffortApi, getCreateUserMessage, SOURCE_KIND, takeCompactVerify, extractEventText,
-    getLastUserText,
+    getLastUserText, getLastAssistantText,
     /* R35：把"持续重复"上报到面板（复用 m3 已有的 HUD 出口；文本进 acts 行，用户可直接复制） */
     recordHudAct, publishHud,
   } = deps;
@@ -357,6 +357,11 @@ export function createM2Injection(deps) {
   const TREND_RESET_MIN_RATIO = 0.02;   // 骤降判据：> 2% 窗口
   const TREND_RESET_MIN_TOKENS = 2000; // 或 > 2000 token（小窗口下避免误判）
   const trendHistory = new Map(); // sid -> { used: number|null, deltas: number[] }
+  /* R90（用户要求「模型决定压缩或调档后，要复检是否真的调用了工具」）：
+   * 压缩侧的**声明快照**——sid → { sig, calls, atTurn }。声明首次出现时记下当时的工具调用计数；
+   * 之后每轮若计数没涨 ⇒ 说明模型只写了「压缩决策：压」却没真的调用 compact_context。
+   * 有界化同其它 Map（防长期累积）。 */
+  const compactDeclSeen = new Map();
   const trendOf = (sid, ratio, win, crit) => {
     try {
       if (!Number.isFinite(ratio) || !Number.isFinite(win) || win <= 0) return {};
@@ -686,10 +691,42 @@ export function createM2Injection(deps) {
       let effNudge = null;
       try {
         effNudge = eff && effortApi?.renderNudge
-          ? (effortApi.renderNudge(eff, { agent, turn, userText: getLastUserText?.(agent) ?? '' }) ?? null)
+          ? (effortApi.renderNudge(eff, {
+          agent, turn,
+          userText: getLastUserText?.(agent) ?? '',
+          /* R89：把"模型自己上一条说了什么"也给它——检测"声明了升降档却没调用工具"的唯一输入。 */
+          assistantText: getLastAssistantText?.(agent) ?? '',
+        }) ?? null)
           : null;
       } catch { /* 提醒失败绝不影响注入 */ }
       if (effNudge) state.m2.effortNudges = (state.m2.effortNudges ?? 0) + 1;
+      /* R90：压缩侧的"声明-执行"复检。判定只看两件事：模型上一条**说了要压** + 每会话工具调用计数**没涨**。
+       * 说明：模型只在 assistant 文本里写"压"，但没调 compact_context ⇒ 未到强制线时**根本不会压**，
+       * 而用户会以为压过了（真机多次）。这里给出一次纠正，绝不自动替它压。 */
+      let declNudge = null;
+      try {
+        const at = String(getLastAssistantText?.(agent) ?? '');
+        const mDec = /压缩决策[：:]\s*\**\s*(不?压)/.exec(at);
+        const key = String(sid);
+        if (mDec && mDec[1] !== '不压') {
+          const calls = Number(getCompactToolApi?.()?.toolCallsOf?.(sid) ?? NaN);
+          if (Number.isFinite(calls)) {
+            const sig = at.slice(-200);
+            const prev = compactDeclSeen.get(key);
+            if (!prev || prev.sig !== sig) {
+              compactDeclSeen.set(key, { sig, calls, atTurn: turn });
+              if (compactDeclSeen.size > 64) { const k0 = compactDeclSeen.keys().next().value; if (k0 && k0 !== key) compactDeclSeen.delete(k0); }
+            } else if (calls <= prev.calls) {
+              declNudge = '【声明-执行不一致】你上一条写了「压缩决策：压」，但**没有调用 '
+                + (getCompactToolApi?.()?.TOOL_NAME ?? 'compact_context')
+                + '** ⇒ 压缩不会发生（未到强制线时系统不会自动压）。要压就**现在调用一次**；不压就收回那句话。';
+              state.m2.compactDeclNudges = (state.m2.compactDeclNudges ?? 0) + 1;
+            }
+          }
+        } else if (mDec && mDec[1] === '不压') {
+          compactDeclSeen.delete(key);   // 明确"不压" ⇒ 清快照，避免陈旧误报
+        }
+      } catch { /* 复检失败绝不影响注入 */ }
       const brief = briefedBySid.has(sid) ? null : renderBrief(effCrit, r.window); // M2.5+A3：现拼活值（含生效强制线 + 保留范围）
       /* 思考强度教学与「插件说明」同一时机（会话首次）——合并进同一条消息，
        * 不额外增加消息结构开销（role 框架/JSON 包装各一次）。 */
@@ -712,7 +749,7 @@ export function createM2Injection(deps) {
         state.m2.briefings = (state.m2.briefings ?? 0) + 1;
       }
       const receiptText = renderCompactReceipt(takeCompactReceipt(sidEarly), allowSwitchTalk);
-      const fullText = [baseText, effNudge, card, brief, effBrief, receiptText].filter(Boolean).join('\n\n');
+      const fullText = [baseText, effNudge, declNudge, card, brief, effBrief, receiptText].filter(Boolean).join('\n\n');
       const message = createUserMessage({
         content: [{ type: 'text', text: fullText }],
         source: { kind: SOURCE_KIND, form: 'snapshot', sections: [{ name: SOURCE_KIND, text: fullText }] },
@@ -727,7 +764,7 @@ export function createM2Injection(deps) {
        * 且 `fullText` 与真正注入的那条消息**同源**（就是上面拼出来的那个字符串）。 */
       state.m2.lastInjection = {
         at: state.m2.lastAt, sid, fullText,
-        usageText: r.text, effSuffix, nudgeText: effNudge, cardText: card,
+        usageText: r.text, effSuffix, nudgeText: [effNudge, declNudge].filter(Boolean).join('\n\n') || null, cardText: card,
         briefText: brief, effBriefText: effBrief, receiptText,
         /* R57：内置原文（模板留空时就是最终文案）⇒ 面板「查看内置文案」按钮用 */
         builtinBrief: state.m3?.lastBuiltin?.brief ?? null, builtinCard: state.m3?.lastBuiltin?.card ?? null,

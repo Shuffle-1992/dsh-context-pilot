@@ -522,8 +522,10 @@ ok('R16.12 接线：nudge 判定在 effort 域、取用户文本在 core、注�
     && /const lastUserText = \(session/.test(coreSrc)
     && /kind !== 'user'/.test(coreSrc)
     && /getLastUserText: \(agent\) => lastUserText\(agent\?\.session\)/.test(host)
-    && /effortApi\.renderNudge\(eff, \{ agent, turn, userText: getLastUserText\?\.\(agent\) \?\? '' \}\)/.test(m2src)
-    && /\[baseText, effNudge, card, brief, effBrief/.test(m2src),
+    && /effortApi\.renderNudge\(eff, \{/.test(m2src)
+    && /assistantText: getLastAssistantText\?\.\(agent\) \?\? ''/.test(m2src)  /* R89：声明-执行一致性需要它 */
+    && /const lastAssistantText = \(session/.test(coreSrc) && /assistant\/message/.test(coreSrc)
+    && /\[baseText, effNudge, declNudge, card, brief, effBrief/.test(m2src)  /* R90：压缩侧复检也进注入链 */,
   '任一环缺位 ⇒ 提醒要么不触发、要么永远不出现（接线不可达 = R11 那类静默失效）');
 ok('R16.12 冷却期间不提示（避免「让你切但工具必然拒绝」的无效往返）',
   /if \(s\.switchedAt && Date\.now\(\) - s\.switchedAt < cap\) return null;/.test(effort),
@@ -5754,6 +5756,65 @@ ok('R75（S4）：client 只剩**一份** unwrapEnv，面板复用模块级实�
   ok("R88 卡片：明确「锚点覆盖档位预算；长任务可能只留几 k（≈深压），要留大段证据用档位」",
     /锚点覆盖档位预算/.test(card88) && /只留几 k/.test(card88) && /要留大段证据用档位/.test(card88),
     `卡片锚点段=${(card88.split(String.fromCharCode(10)).filter((l) => /锚点/.test(l)).join(" ｜ ")).slice(0, 220)}`);
+}
+/* ═══ R89/R90（用户 2026-10-29）：模型决定「压缩/调档」后，必须复检是否真的调用了工具 ═══ */
+{
+  const eMod89 = await import(pathToFileURL(join(PLUGIN, "effort.mjs")).href);
+  const tmp89 = mkdtempSync(join(tmpdir(), "dcp-decl-"));
+  const api89 = eMod89.createEffort({
+    svc: (k) => (k === "tools" ? { register: () => {} } : null),
+    tryOf: (f) => ({ value: f(), error: null }), pick: (...a) => a.find((x) => x != null),
+    msg: (e) => String(e?.message ?? e), log: () => {}, schedule: () => {},
+    state: { m3: { effortSkips: {}, effortDiag: {}, effortSwitches: 0, effortReasserts: 0, effortHooks: 0, effortToolCalls: 0 } },
+    readCfg: () => ({ enabled: true, effortEnabled: true, effortCooldownMs: 30000 }),
+    getDefineTool: (sp) => sp, pluginDir: tmp89,
+  });
+  await api89.ensure();
+  const effHigh = { ok: true, current: "high", efforts: ["off", "low", "high", "max"] };
+  const effLow = { ok: true, current: "low", efforts: ["off", "low", "high", "max"] };
+  const ag89 = { id: "decl-sid", session: { id: "decl-sid" } };
+  const declLow = "档位决策：降 低(low)｜理由：纯机械改动（默认每页统一改 50）";
+  const d1 = api89.renderNudge(effHigh, { agent: ag89, turn: 5, userText: "", assistantText: declLow });
+  ok("R89 行为级：**说了降档但没调用工具** ⇒ 明确提醒「声明-执行不一致」并指出实际档位",
+    typeof d1 === "string" && /声明-执行不一致/.test(d1) && /实际仍是/.test(d1) && /没有调用/.test(d1),
+    `实际：${JSON.stringify(d1)}`);
+  const d2 = api89.renderNudge(effHigh, { agent: ag89, turn: 6, userText: "", assistantText: declLow });
+  ok("R89 行为级：同一档位的重复声明 4 轮内**不刷屏**（第二次返回 null）", d2 === null, `实际：${JSON.stringify(d2)}`);
+  const d3 = api89.renderNudge(effHigh, { agent: ag89, turn: 10, userText: "", assistantText: declLow });
+  ok("R89 行为级：4 轮后仍未执行 ⇒ 再提醒一次（漏执行不会被忘掉）",
+    typeof d3 === "string" && /声明-执行不一致/.test(d3), `实际：${JSON.stringify(d3)}`);
+  const d4 = api89.renderNudge(effHigh, { agent: ag89, turn: 12, userText: "", assistantText: "档位决策：保持 高(high)｜理由：任务难度没变" });
+  ok("R89 行为级：声明「保持」⇒ **不误报**", d4 === null, `实际：${JSON.stringify(d4)}`);
+  const ag89b = { id: "decl-sid2", session: { id: "decl-sid2" } };
+  const d5 = api89.renderNudge(effLow, { agent: ag89b, turn: 3, userText: "", assistantText: "档位决策：降 低(low)｜理由：机械改动" });
+  ok("R89 行为级：声明目标 == 当前实际档位 ⇒ **不误报**（说明已经切过了）", d5 === null, `实际：${JSON.stringify(d5)}`);
+  rmSync(tmp89, { recursive: true, force: true });
+
+  /* —— 压缩侧：每会话调用计数 + m2 复检接线 —— */
+  const ct90 = await import(pathToFileURL(join(PLUGIN, "compact-tool.mjs")).href);
+  const range90 = await import(pathToFileURL(join(PLUGIN, "compact-range.mjs")).href);
+  let spec90 = null;
+  const api90 = ct90.createCompactTool({
+    svc: (k) => (k === "tools" ? { register: (t) => { spec90 = t; return () => {}; } } : null),
+    tryOf: (f) => ({ value: f(), error: null }), pick: (...a) => a.find((x) => x != null),
+    msg: (e) => String(e), log: () => {}, schedule: () => {},
+    state: { m3: { compactToolDiag: { calls: 0 } } }, readCfg: () => ({ enabled: true }),
+    getDefineTool: () => (sp) => sp, getRangeApi: () => range90,
+  });
+  api90.ensure();
+  const agent90 = { session: { id: "decl-compact" } };
+  const c0 = api90.toolCallsOf("decl-compact");
+  await spec90.execute({ tier: "深压8%", action: "set-tier" }, { agent: agent90 });
+  const c1 = api90.toolCallsOf("decl-compact");
+  await spec90.execute({ tier: "深压8%", action: "set-tier" }, { agent: agent90 });
+  const c2 = api90.toolCallsOf("decl-compact");
+  ok("R90 行为级：compact_context 提供**每会话**调用计数（只增；别的会话不串）",
+    c0 === 0 && c1 === 1 && c2 === 2 && api90.toolCallsOf("decl-other") === 0,
+    `c0=${c0} c1=${c1} c2=${c2} other=${api90.toolCallsOf("decl-other")}`);
+  ok("R90 接线：m2 解析「压缩决策：压」+ 用 toolCallsOf 快照比对 + 注入「声明-执行不一致」提醒",
+    /压缩决策\[：:\]/.test(m2src) && /toolCallsOf\?\.\(sid\)/.test(m2src) && /声明-执行不一致/.test(m2src)
+    && /compactDeclSeen/.test(m2src),
+    "缺任一环 ⇒ 模型只说「压」而不调用工具时，用户会以为压过了，直到强制线才暴露");
 }
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));

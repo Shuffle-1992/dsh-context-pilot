@@ -44,7 +44,7 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
      * F1：第 317 行把 lastUserText 当自由标识符用（core 导出了但没取 ⇒ 每次调用 ReferenceError，
      *     再被 m2 空 catch 吞掉 ⇒ 思考强度提醒永远拿不到用户文本）；F2：清理块原先直接引用 `pending`
      *     （既没解构、core 也没导出）⇒ 卸载第一行就抛、所有 disposer 都不执行。 */
-    lastUserText, getCreateUserMessage, attachSnapshot, loadDefineTool, loadReportBase, clearSchedules,
+    lastUserText, lastAssistantText, getCreateUserMessage, attachSnapshot, loadDefineTool, loadReportBase, clearSchedules,
   } = core;
   const IMPL_TS = (() => {
     try { return new URL(import.meta.url).searchParams.get('ts') || String(Date.now()); } catch { return String(Date.now()); }
@@ -297,7 +297,8 @@ export function apply(ctx, config, { pluginDir, reportPath, core } = {}) {
         getEffortApi: () => effortApi,
         /* R16.12：换档提醒的**外部触发**输入——最近一条真人用户消息文本
          * （实现在 core.lastUserText：只读 surface 尾部并跳过插件自己的注入行）。 */
-        getLastUserText: (agent) => lastUserText(agent?.session), recordHudAct, publishHud, // R35：m2 也要能把"决策行持续重复"上报到面板
+        /* R89：`getLastAssistantText` 用于检测"声明了升降档但没调用工具"（真机多次）。 */
+  getLastUserText: (agent) => lastUserText(agent?.session), getLastAssistantText: (agent) => lastAssistantText(agent?.session), recordHudAct, publishHud, // R35/R89
         getCreateUserMessage,
         extractEventText, // R78：卡片按锚点派生预算时需要它解析文本锚点
         SOURCE_KIND,
