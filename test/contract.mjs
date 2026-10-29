@@ -5816,6 +5816,52 @@ ok('R75（S4）：client 只剩**一份** unwrapEnv，面板复用模块级实�
     && /compactDeclSeen/.test(m2src),
     "缺任一环 ⇒ 模型只说「压」而不调用工具时，用户会以为压过了，直到强制线才暴露");
 }
+/* ═══ R91（2026-10-29 真机：R89/R90 一次都没触发）—— 复检必须扫描"最近多条" assistant 文本 ═══ */
+{
+  const core91 = await import(pathToFileURL(join(PLUGIN, "core.mjs")).href);
+  const extract91 = (ev) => {
+    const m = ev?.type === "user/message" ? ev.data : ev?.data?.message;
+    if (m == null) return "";
+    const c = m.content;
+    if (Array.isArray(c)) return c.map((x) => x?.text ?? "").join("");
+    return String(m.text ?? c ?? "");
+  };
+  const mkSess = (evs) => ({ surface: { nodes: evs.map((_e, i) => i) }, eventAt: (i) => evs[i] });
+  const decl = "档位决策：降 低(low)｜理由：纯样式/微活动的小改动，机械性工作。压缩决策：不压｜占用 29.1%";
+  /* 真机形态：声明在**轮首**，之后 ~30 个工具节点 + 一条收尾 assistant 消息 */
+  const evReal = [
+    { type: "user/message", data: { content: "改样式", source: { kind: "user" } } },
+    { type: "assistant/message", data: { message: { role: "assistant", content: [{ type: "text", text: decl }] } } },
+    ...Array.from({ length: 30 }, (_v, i) => ({ type: "tool/result", data: { message: { content: [{ type: "text", text: "tool out " + i }] } } })),
+    { type: "assistant/message", data: { message: { role: "assistant", content: [{ type: "text", text: "测试都过了。" }] } } },
+  ];
+  const gotReal = core91.scanAssistantText(mkSess(evReal), extract91);
+  ok("R91 回归：**声明在轮首 + 30 个工具节点 + 收尾消息** 时仍能扫到声明（旧实现只读最后一条 ⇒ 永远读不到）",
+    /档位决策：降/.test(gotReal) && /压缩决策：不压/.test(gotReal),
+    `实际尾部=${JSON.stringify(gotReal.slice(-120))}`);
+  /* 形状差异：type 不是 assistant/message，而是 role=assistant */
+  const evRole = [{ type: "message", data: { message: { role: "assistant", content: [{ type: "text", text: "档位决策：降 低(low)" }] } } }];
+  const evRolePlain = [{ type: "message", data: { message: { role: "assistant", content: [{ type: "text", text: "普通收尾说明（没有决策行）" }] } } }];
+  ok("R91 回归：事件类型不同（只靠 role==='assistant'）也要认得出——**无声明**的普通文本同样收集",
+    /档位决策：降/.test(core91.scanAssistantText(mkSess(evRole), extract91))
+    && /普通收尾说明/.test(core91.scanAssistantText(mkSess(evRolePlain), extract91)),
+    `decl=${JSON.stringify(core91.scanAssistantText(mkSess(evRole), extract91).slice(0, 40))} plain=${JSON.stringify(core91.scanAssistantText(mkSess(evRolePlain), extract91).slice(0, 40))}`);
+  /* type 分支的独立护栏：**只有 type 含 assistant、没有 role** 的形态也要收（不同版本字段不同） */
+  const extractTypeOnly = (ev) => String(ev?.data?.text ?? "");
+  const evTypeOnly = [{ type: "assistant/note", data: { text: "普通说明（无 role 字段）" } }];
+  ok("R91 回归：只靠 type 含 assistant（无 role 字段）也能收集",
+    /普通说明/.test(core91.scanAssistantText(mkSess(evTypeOnly), extractTypeOnly)),
+    `实际=${JSON.stringify(core91.scanAssistantText(mkSess(evTypeOnly), extractTypeOnly))}`);
+  /* 解析端到端：扫到的文本喂给档位侧正则，必须命中"降 + 低(low)" */
+  const mDecl = /档位决策[：:]\s*(升|降|保持)[  \t]*([^\s｜|，,。；;）)]+)/.exec(gotReal);
+  ok("R91 回归：扫到的文本能被档位决策正则解析出「降 低(low)」",
+    !!mDecl && mDecl[1] === "降" && /low/.test(mDecl[2]),
+    `match=${JSON.stringify(mDecl && mDecl.slice(0, 3))}`);
+  /* 诊断字段接线（报告里能看到"读没读到/有没有声明"） */
+  ok("R91 诊断：m2 上报 lastDeclProbe（asstLen / hasTierDecl / hasCompactDecl / toolCalls）",
+    /state\.m2\.lastDeclProbe = \{/.test(m2src) && /hasTierDecl/.test(m2src) && /hasCompactDecl/.test(m2src),
+    "没有诊断字段 ⇒ 下次再失效仍只能靠猜");
+}
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));
 process.exit(failures ? 1 : 0);

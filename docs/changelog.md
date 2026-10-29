@@ -4,6 +4,7 @@
 
 | 版本 | 更新 | 为什么值得知道 |
 | --- | --- | --- |
+| **v0.1.83** | **「声明 ≠ 执行」复检真因修复（R91）：只读最后一条 assistant ⇒ 改为扫最近多条** | 用户反馈"还是这毛病"；报告取证 `compactDeclNudges=0`、历史 120 条里「声明-执行不一致」0 次 ⇒ R89/R90 从未命中。根因：决策行写在**轮首**、后面几十个工具节点 + 收尾消息，而实现只取"最后一条 assistant"。修：`core.scanAssistantText()` 顶层纯函数（扫最近 4 条、形状容忍 type/role、内容兜底），`createCore` 委托它；新增 `m2.lastDeclProbe` 诊断字段。**1021 断言**，3 变异全 CAUGHT |
 | **v0.1.82** | **「声明 ≠ 执行」复检：说了压缩/调档但没调工具 ⇒ 下一步当场指出（R89/R90）** | 用户反馈多次：模型写了 `档位决策：降 低(low)` 却没调 `set_reasoning_effort`（底部仍是 Max）；`压缩决策：压` 却没调 `compact_context`（未到强制线根本不会压）。新增 `core.lastAssistantText()`（读模型自己的上一条）+ 档位侧 `renderNudge` 不一致提醒 + 压缩侧每会话调用计数快照复检（`toolCallsOf`）。不误报（保持/目标==当前/4 轮内只提醒一次），无声明零 token。**1016 断言**，5 变异全 CAUGHT |
 | **v0.1.81** | **压缩后「27.8% vs 8.4%」与「24%档却只留40k」的显示修复（R88）** | 真机取证：`retainSource=anchor:recent-user`、`anchorTokens=3426`、`anchorClamped=true` ⇒ 实际只留 40k（R44 已知）；27.8% 是 provider 未刷新时的投影，2s 后刷新 8.4%。①`stale` 补「reported≫投影」兜底判据（原先 surface/sampled 缺失就永不标）；②面板行增 `anchorActSuffix()`：`· 锚点(下限40k，锚点段仅3.4k)`；③卡片补风险句「锚点覆盖档位预算，长任务可能只留几k（≈深压），要留大段证据用档位」。**1009 断言**，4 变异全 CAUGHT |
 | **v0.1.80** | **面板三个模板框改为可折叠（默认折叠，左侧 ▸/▾）** | 用户实测：三个 min-height 150px 的模板框把整页撑满，真正常改的开关/比例被挤到上面。改成折叠行：左侧 caret + 名称 + 右侧状态（留空=内置 / 已自定义）；正文用 class+CSS 隐藏但 **DOM 始终渲染**（草稿不丢、测试可无状态断言）；`<button>`+`aria-expanded`+`focus-visible` 保证键盘可达。纯客户端改动 ⇒ **刷新页面生效**，无需 toggle。**1005 断言**（client-render 33） |

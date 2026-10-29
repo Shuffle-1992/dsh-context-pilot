@@ -204,6 +204,42 @@ export function summarizeBreakdown(bd) {
  * m3（触发判定 + 显示）与 m1（报告取证）都用同一份，禁止在模块内重写公式（参见 R22/R23 的重复实现教训）。
  * `usage.composer` 的 `pressureFrom` 定义：prompt 侧压力 = input + cacheRead + cacheWrite（不含 output）。 */
 
+/**
+ * R91：从 surface 尾部收集"最近若干条 assistant 文本"（含内容兜底），供"声明-执行复检"使用。
+ * 为什么不是"只读最后一条"：真机上决策行写在**轮首**，之后还有几十个工具节点 + 一条收尾消息，
+ * 最后一条 assistant 里根本没有声明 ⇒ R89/R90 一次都没触发（已用报告里的 0 次计数坐实）。
+ * 纯函数（extract(event) 由调用方注入）⇒ 可单测；createCore 内部直接复用同一实现，避免两份漂移。
+ * 容忍事件形状差异：type 含 assistant / data.message.role==='assistant' / 内容含「档位决策|压缩决策」。
+ */
+export function scanAssistantText(session, extract, opts = {}) {
+  const maxNodes = Number(opts.maxNodes ?? 200);
+  const maxMsg = Number(opts.maxMsg ?? 4);
+  const maxLen = Number(opts.maxLen ?? 1600);
+  try {
+    const nodes = Array.isArray(session?.surface) ? session.surface : session?.surface?.nodes;
+    if (!Array.isArray(nodes) || typeof session?.eventAt !== 'function' || typeof extract !== 'function') return '';
+    const isAsst = (ev) => {
+      const ty = String(ev?.type ?? '');
+      if (/assistant/i.test(ty)) return true;
+      const m = ev?.data?.message ?? ev?.data ?? null;
+      return (m?.role ?? m?.message?.role) === 'assistant';
+    };
+    const parts = [];
+    let budget = maxLen;
+    for (let i = nodes.length - 1, k = 0; i >= 0 && k < maxNodes && parts.length < maxMsg && budget > 0; i -= 1, k += 1) {
+      const ev = session.eventAt(nodes[i]);
+      if (!ev) continue;
+      const t = extract(ev);
+      if (!t) continue;
+      const dec = /档位决策|压缩决策/.test(t);
+      if (!isAsst(ev) && !dec) continue;
+      parts.unshift(String(t).slice(0, budget));
+      budget -= Math.min(String(t).length, budget);
+    }
+    return parts.join(String.fromCharCode(10)).slice(-maxLen);
+  } catch { return ''; }
+}
+
 /** → `{ used, projected, reported, surface, sampled, basis }`；`used=null` 表示**没有任何** provider 数据。 */
 export function projectedFromPressure(rec) {
   const reported = rec?.pressureTokens ?? null;
@@ -640,19 +676,9 @@ export function createCore({ ctx, config, pluginDir, reportPath }) {
    * 最近一条**模型自己的**消息文本——用于检测「声明了升降档但没执行」。
    * 与 lastUserText 同构（surface 尾部 + eventAt 取事件），只筛 `assistant/message`。
    * 读不到返回空串（调用方据此不提示，绝不影响注入主流程）。 */
-  const lastAssistantText = (session, maxNodes = 6, maxLen = 800) => {
-    try {
-      const nodes = Array.isArray(session?.surface) ? session.surface : session?.surface?.nodes;
-      if (!Array.isArray(nodes) || typeof session?.eventAt !== 'function') return '';
-      for (let i = nodes.length - 1, k = 0; i >= 0 && k < maxNodes; i -= 1, k += 1) {
-        const ev = session.eventAt(nodes[i]);
-        if (!ev || ev.type !== 'assistant/message') continue;
-        const t = extractEventText(ev);
-        if (t) return String(t).slice(0, maxLen);
-      }
-    } catch { /* 吞：读不到即不提示 */ }
-    return '';
-  };
+  /* R91：委托顶层 scanAssistantText（单一实现；这里只绑定 extractEventText）。 */
+  const lastAssistantText = (session, maxNodes = 200, maxMsg = 4, maxLen = 1600) =>
+    scanAssistantText(session, extractEventText, { maxNodes, maxMsg, maxLen });
 
   /** R16.12：最近一条**真人用户**消息的文本（换档提醒的外部触发输入）。
    * 只读 surface 尾部若干节点；跳过插件自己注入的 user/message（kind=context-pilot）

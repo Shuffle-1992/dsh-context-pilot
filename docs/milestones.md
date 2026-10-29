@@ -4820,3 +4820,41 @@ F8 冷却 0 仍报 1 秒 / F16 回退英文 / N2 去掉悬停 / F14 加回长文
 
 - **不自动替模型执行**（不代调 `set_reasoning_effort` / `compact_context`）：那会伪造模型意图；
   插件只负责"指出缺口"，执行权仍在模型（与"压缩由模型决定"的既定设计一致）。
+### R91 「声明 ≠ 执行」复检真因：只读了**最后一条** assistant 消息（2026-10-29，用户反馈"还是这个毛病"）
+
+#### 现象
+
+按 R89/R90 上线后，用户再截图：`档位决策：降 低(low)｜理由：…` 依旧没有 `set_reasoning_effort`，底部仍是 `Max`。
+**取证**（`plugin/.data/m1-report.json`）：`max compactDeclNudges = 0`、「声明-执行不一致」在 120 条历史里**一次都没出现**
+（而老的 `effortNudges = 5` 说明提醒管道本身是活的）⇒ **新规则从未命中**。
+
+#### 根因
+
+R89/R90 的输入是"模型上一条消息"，而我实现成了 **surface 尾部第一条 `assistant/message`**。
+但真机形态是：**决策行写在轮首**，之后还有几十个工具节点、最后再跟一条收尾 assistant 消息
+⇒ "最后一条 assistant" 里**没有声明**，永远匹配不到。（这也是 `lastUserText` 当年踩过的同类坑：
+surface 结构/顺序与"最近一条"的直觉不一致。）
+
+#### 修复
+
+1. `core.scanAssistantText(session, extract, opts)`（**顶层纯函数**，可单测）：
+   从尾部向前扫最多 200 个节点，收集**最近 4 条** assistant 文本拼起来（新→旧），上限 1600 字符；
+   - 形状容忍：`type` 含 `assistant` **或** `data.message.role === 'assistant'`；
+   - 兜底：任何事件文本里含「档位决策|压缩决策」也收（不同 DSH 版本字段不同，宁可多认）；
+   - `createCore` 内部 `lastAssistantText` 改为**委托**它（单一实现，防两处漂移）。
+2. **诊断字段** `state.m2.lastDeclProbe = { at, asstLen, hasTierDecl, hasCompactDecl, decl, toolCalls }`：
+   下次再失效，报告里就能看出"到底读没读到 assistant 文本 / 有没有声明"，不必再靠猜。
+3. 假会话回归：构造"声明在轮首 + 30 个工具节点 + 收尾消息"的真机形态，断言仍能扫到声明。
+
+#### 验证
+
+- 新增 5 条断言：真机形态回归、只靠 `role` 识别、只靠 `type` 识别（两分支各自独立护栏）、
+  扫到的文本能被档位正则解析出「降 低(low)」、诊断字段接线。
+- **变异 3 项全部 CAUGHT**：退化为"只读最后一条" / 不认 `role=assistant` / 不认 `type=assistant` / 去掉诊断赋值。
+- 测试：**1021 断言**全绿（contract 828 / static 84 / report 54 / boot 22 / client-render 33）。
+
+#### 教训（写进项目纪律）
+
+**"最近一条"类读取必须用真机形态的回归用例钉住**（声明在开头、后面一堆工具节点），
+否则很容易实现成"最后一条"而静默失效——本项目已第二次踩（R72 的 `lastUserText` 是第一次）。
+凡是"能不能读到"的能力，最终断言必须是**行为级 + 真机形态**，不能只做源文本断言。

@@ -707,9 +707,20 @@ export function createM2Injection(deps) {
       try {
         const at = String(getLastAssistantText?.(agent) ?? '');
         const mDec = /压缩决策[：:]\s*\**\s*(不?压)/.exec(at);
+        /* R91 诊断：报告里能看出"到底读没读到 assistant 文本 / 有没有声明"——
+         * 上一轮 R89/R90 失效时只能靠"计数器为 0"猜，太慢。 */
+        state.m2.lastDeclProbe = {
+          at: new Date().toISOString(),
+          asstLen: at.length,
+          hasTierDecl: /档位决策[：:]/.test(at),
+          hasCompactDecl: !!mDec,
+          decl: mDec ? mDec[1] : null,
+          toolCalls: null,
+        };
         const key = String(sid);
         if (mDec && mDec[1] !== '不压') {
           const calls = Number(getCompactToolApi?.()?.toolCallsOf?.(sid) ?? NaN);
+          if (state.m2.lastDeclProbe) state.m2.lastDeclProbe.toolCalls = Number.isFinite(calls) ? calls : null;
           if (Number.isFinite(calls)) {
             const sig = at.slice(-200);
             const prev = compactDeclSeen.get(key);

@@ -1,6 +1,6 @@
 # dsh-context-pilot — DSH 上下文智能压缩 + 智能思考插件
 
-**当前版本 `v0.1.82`** · 逐版本更新见 [`docs/changelog.md`](docs/changelog.md) · 逐里程碑见 [`docs/milestones.md`](docs/milestones.md)。
+**当前版本 `v0.1.83`** · 逐版本更新见 [`docs/changelog.md`](docs/changelog.md) · 逐里程碑见 [`docs/milestones.md`](docs/milestones.md)。
 
 > 面板名「上下文智能压缩」。一句话：**让长会话的上下文压力可见、可控，并把「何时压缩、留多少」交给模型决定**——
 > 用工具调用触发、在下一步开始前落地，**本轮不中断、不注入消息、不伪造用户发言**。
@@ -92,7 +92,7 @@ profile `package.json` 两处要改（以本机 `desktop` profile 为例）：
 **已完成**：M1–M5（用量读取 / 每轮注入 / 会话自说明 / HUD 弹窗 / 历史持久化）、R1–R21
 （智能思考 + 换档工具、压缩改工具触发、保留范围自算、全面审查加固、**压缩档位三选一**、
 工具后自检回执、回执按会话隔离、**用户手动改档的轮首知情**、**单档模型零注入 + 工具静默**）。**9 个域模块 + core**，`host.impl.mjs` **1836 → 518 行**。
-**测试**：contract 823 + static 84 + report 54 + boot 22 + client-render 33 = **1016 断言**全绿；关键回归均有变异验证。
+**测试**：contract 828 + static 84 + report 54 + boot 22 + client-render 33 = **1021 断言**全绿；关键回归均有变异验证。
 逐里程碑台账（含踩坑与实测数值）：[`docs/milestones.md`](docs/milestones.md)；
 早期进度历史存档：[`docs/status-archive.md`](docs/status-archive.md)。
 
