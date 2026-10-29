@@ -225,18 +225,28 @@ export function scanAssistantText(session, extract, opts = {}) {
       return (m?.role ?? m?.message?.role) === 'assistant';
     };
     const parts = [];
-    let budget = maxLen;
-    for (let i = nodes.length - 1, k = 0; i >= 0 && k < maxNodes && parts.length < maxMsg && budget > 0; i -= 1, k += 1) {
+    let declPart = null;   // R93：**最新一条含声明的** assistant 文本（必须优先保留）
+    /* R93（真机 2026-10-30）：**扫描不能按预算提前停**——原实现在 `budget` 用尽时退出循环，
+     * 而真机是"先吃到两条很长的收尾消息 → 预算耗尽 → 声明所在的那条根本没被扫到"
+     * （诊断字段实测 asstLen 恰好 1600 且 hasTierDecl=false）。现改为**扫满窗口**，
+     * 只对输出做截断；每段单独限长，避免一条超长消息吃掉全部预算。 */
+    const perPartCap = Math.max(200, Math.floor(maxLen / maxMsg));
+    for (let i = nodes.length - 1, k = 0; i >= 0 && k < maxNodes; i -= 1, k += 1) {
       const ev = session.eventAt(nodes[i]);
       if (!ev) continue;
       const t = extract(ev);
       if (!t) continue;
       const dec = /档位决策|压缩决策/.test(t);
       if (!isAsst(ev) && !dec) continue;
-      parts.unshift(String(t).slice(0, budget));
-      budget -= Math.min(String(t).length, budget);
+      if (dec && declPart === null) declPart = String(t);   // 从尾部往前扫 ⇒ 第一次命中就是最新的声明
+      if (parts.length < maxMsg) parts.unshift(String(t).slice(0, perPartCap));
     }
-    return parts.join(String.fromCharCode(10)).slice(-maxLen);
+    const base = parts.join(String.fromCharCode(10));
+    /* R93（真机 2026-10-30：asstLen 恰好卡在 1600 且 hasTierDecl=false）：
+     * 原实现 `slice(-maxLen)` 保留**尾部**——而声明写在**轮首**，后面更长的收尾消息把声明挤出窗口 ⇒
+     * 永远检测不到。现改为**声明优先**：命中声明的消息放最前，保证不被截断掉。 */
+    if (declPart !== null) return (declPart + String.fromCharCode(10) + base).slice(0, maxLen);
+    return base.slice(-maxLen);
   } catch { return ''; }
 }
 

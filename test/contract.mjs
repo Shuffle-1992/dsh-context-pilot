@@ -5854,6 +5854,22 @@ ok('R75（S4）：client 只剩**一份** unwrapEnv，面板复用模块级实�
   ok("R91 回归：只靠 type 含 assistant（无 role 字段）也能收集",
     /普通说明/.test(core91.scanAssistantText(mkSess(evTypeOnly), extractTypeOnly)),
     `实际=${JSON.stringify(core91.scanAssistantText(mkSess(evTypeOnly), extractTypeOnly))}`);
+  /* R93（2026-10-30 真机第三次复现）：声明在**轮首** + 后面两条 900 字的收尾消息 ⇒ 旧实现
+   * 「按预算提前停」+「slice(-maxLen) 保尾部」会把声明挤掉（诊断字段实测 asstLen=1600 且 hasTierDecl=false）。
+   * 这条用例直接复刻真机形状，锁死"声明必须能扫到"。 */
+  const longTail = (tag) => tag + "：" + "x".repeat(900);
+  const evDeclThenLong = [
+    { type: "user/message", data: { content: "看这个", source: { kind: "user" } } },
+    { type: "assistant/message", data: { message: { role: "assistant", content: [{ type: "text", text: "档位决策：升 高(high)｜理由：跨消息锚点错位，涉及锚点评分与 DOM 结构，需要深挖根因。" }] } } },
+    ...Array.from({ length: 20 }, (_v, i) => ({ type: "tool/result", data: { message: { content: [{ type: "text", text: "out" + i }] } } })),
+    { type: "assistant/message", data: { message: { role: "assistant", content: [{ type: "text", text: longTail("A") }] } } },
+    { type: "assistant/message", data: { message: { role: "assistant", content: [{ type: "text", text: longTail("B") }] } } },
+  ];
+  const gotDeclLong = core91.scanAssistantText(mkSess(evDeclThenLong), extract91);
+  ok("R93 回归：声明在轮首 + 两条 900 字长收尾消息 ⇒ **仍必须扫到声明**（旧实现被截断/提前停）",
+    /档位决策：升/.test(gotDeclLong) && /高\(high\)/.test(gotDeclLong),
+    `长度=${gotDeclLong.length} 头部=${JSON.stringify(gotDeclLong.slice(0, 60))}`);
+
   /* 解析端到端：扫到的文本喂给档位侧正则，必须命中"降 + 低(low)" */
   const mDecl = /档位决策[：:]\s*(升|降|保持)[  \t]*([^\s｜|，,。；;）)]+)/.exec(gotReal);
   ok("R91 回归：扫到的文本能被档位决策正则解析出「降 低(low)」",
