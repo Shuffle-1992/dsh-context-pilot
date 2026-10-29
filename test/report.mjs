@@ -15,7 +15,7 @@
  * 用法：node test/report.mjs
  * 退出码：0 = 全通过；1 = 有失败（无报告时跳过 ②，不算失败）
  */
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
@@ -221,24 +221,33 @@ if (!existsSync(REPORT)) {
   }
 }
 
-/* ═══════════ ⑤ hud-acts.json 形状 ═══════════ */
-console.log('\n== 5. 压缩历史持久化（hud-acts.json）==');
-if (!existsSync(HUD_ACTS)) {
-  console.log('  ⚠️ 跳过（文件不存在，下次压缩时会创建）');
+/* ═══════════ ⑤ 压缩历史持久化（R92：per-session 文件）═══════════ */
+console.log('\n== 5. 压缩历史持久化（.data/acts/<sid>.json，每会话 ≤100）==');
+const ACTS_DIR = join(PLUGIN, '.data', 'acts');
+const actFiles = existsSync(ACTS_DIR) ? readdirSync(ACTS_DIR).filter((f) => f.endsWith('.json')) : [];
+if (!actFiles.length) {
+  console.log('  ⚠️ 跳过（目录不存在或为空，下次压缩时会创建）');
 } else {
-  const j = readJsonRetry(HUD_ACTS);   // R50：同样防"活插件写盘窗口"竞态
-  ok('含 version 字段', typeof j.version === 'number');
-  ok('含 acts 数组', Array.isArray(j.acts));
-  const acts = j.acts ?? [];
-  ok(`acts 条数 ≤ 50 上限（实际 ${acts.length}）`, acts.length <= 50);
-  if (acts.length) {
-    const a = acts[0];
-    ok('条目含 sid/text/at 三字段', typeof a.sid === 'string' && typeof a.text === 'string' && typeof a.at === 'string');
-    // 去重校验（recordHudAct 的防护）
-    const keys = acts.map((x) => `${x.at}|${x.sid}|${x.text}`);
-    ok('无完全重复条目（去重防护生效）', new Set(keys).size === keys.length,
-      `发现 ${keys.length - new Set(keys).size} 条重复`);
+  ok(`存在 per-session 文件（${actFiles.length} 个会话）`, actFiles.length > 0);
+  let shapeOk = true, badCap = null, badSid = null, dup = 0, total = 0;
+  for (const f of actFiles) {
+    const j = readJsonRetry(join(ACTS_DIR, f));   // R50：防"活插件写盘窗口"竞态
+    if (typeof j.version !== 'number' || !Array.isArray(j.acts)) { shapeOk = false; continue; }
+    if (j.acts.length > 100) badCap = `${f}: ${j.acts.length}`;
+    const keys = j.acts.map((x) => `${x.at}|${x.sid}|${x.text}`);
+    dup += keys.length - new Set(keys).size;
+    for (const x of j.acts) {
+      if (!(typeof x.sid === 'string' && typeof x.text === 'string' && typeof x.at === 'string')) shapeOk = false;
+      else if (x.sid !== j.sid) badSid = f;
+    }
+    total += j.acts.length;
   }
+  ok('每个文件含 version + acts；条目含 sid/text/at', shapeOk);
+  ok(`每会话条数 ≤ 100 上限${badCap ? `（超限：${badCap}）` : ''}`, !badCap);
+  ok('文件内条目的 sid 与文件一致（不再混存别的会话）', !badSid, `不一致：${badSid}`);
+  ok(`无完全重复条目（去重防护生效；共 ${total} 条）`, dup === 0, `发现 ${dup} 条重复`);
+  ok('旧共享 hud-acts.json 已迁移（不再是活动存储）',
+    !existsSync(HUD_ACTS) || existsSync(HUD_ACTS + '.migrated'));
 }
 
 /* ═══════════ ⑥ 思考强度调查结论契约（探针已退役，结论必须留档）═══════════ */

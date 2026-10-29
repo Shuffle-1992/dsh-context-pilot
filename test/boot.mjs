@@ -25,7 +25,7 @@
  * ## 副作用边界
  * 报告写到**临时目录**；`hud-acts.json` **只读不写**（临时报告无 m3-act ⇒ 合并分支不触发）。
  */
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -200,9 +200,12 @@ await sleep(1000);
 }
 
 /* ④ 启动回填真跑过（有历史时才可判定；无历史则跳过，不算失败——避免污染别人的 checkout） */
-const actsPath = join(PLUGIN, '.data', 'hud-acts.json');
+const actsDir = join(PLUGIN, '.data', 'acts');   // R92：按会话分文件
 let storedActs = 0;
-try { storedActs = (JSON.parse(readFileSync(actsPath, 'utf8')).acts ?? []).length; } catch { storedActs = 0; }
+try {
+  storedActs = readdirSync(actsDir).filter((f) => f.endsWith('.json'))
+    .reduce((n, f) => n + ((JSON.parse(readFileSync(join(actsDir, f), 'utf8')).acts ?? []).length), 0);
+} catch { storedActs = 0; }
 if (storedActs > 0) {
   await sleep(900); // m5-publish 防抖 400ms + 落盘
   const rep = existsSync(reportPath) ? JSON.parse(readFileSync(reportPath, 'utf8')) : null;

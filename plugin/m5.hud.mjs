@@ -24,7 +24,7 @@
  * - 由宿主 `import(\`./m5.hud.mjs?ts=${IMPL_TS}\`)` 加载（漏 `?ts=` ⇒ P16 永久缓存）。
  * - **不抛错**：读写失败一律吞 + 留痕；**读路径不写盘**（`buildHudResponse` 只写 `state.m5.hudPollReq` 取证）。
  */
-import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync, readdirSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 
 export function createM5Hud(deps) {
@@ -34,8 +34,33 @@ export function createM5Hud(deps) {
     svc, pick, measureRatio, criticalCapOf, mergeConfig, M3, getEffortApi, getReportBase,
   } = deps;
 
-  const hudActsPath = join(pluginDir, '.data', 'hud-acts.json');
-  const HUD_ACTS_CAP = 50;
+  /* R92（用户 2026-10-29 要求）：压缩记录改为**按会话分文件**存 `.data/acts/<sid>.json`，
+   * 每会话上限 **100 条**。动机：
+   * - 原先所有会话共用 `hud-acts.json` + **全局 cap 50** ⇒ 活跃会话的历史会被别的会话挤掉；
+   * - 多会话写同一文件虽是原子写（不会半截），但语义上仍是共享可变状态（热换/重放时更容易互相覆盖）。
+   * 兼容：旧共享文件在首次加载时**一次性迁移**到 per-sid 文件，随后改名为 `.migrated` 留档（不删）。 */
+  const hudActsDir = join(pluginDir, '.data', 'acts');
+  const hudActsPath = join(pluginDir, '.data', 'hud-acts.json');   // 旧共享文件：仅迁移用 + 兼容导出
+  const HUD_ACTS_CAP = 100;     // R92：**每会话**上限（原为全局 50）
+  const HUD_SID_MEM_CAP = 64;   // 内存里最多缓存多少个会话的记录（磁盘不受此限）
+
+  /** sid → 安全文件名（只留 [A-Za-z0-9._-]；空/异常 ⇒ `_unknown`）。 */
+  const sidSafe = (sid) => {
+    const s = String(sid ?? '').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80);
+    return s || '_unknown';
+  };
+  const actsFileOf = (sid) => join(hudActsDir, sidSafe(sid) + '.json');
+  /** 内存缓存：sid → acts[]（新→旧）。按插入顺序淘汰最旧（Map 保序）。 */
+  const actsBySid = new Map();
+  const rememberActs = (sid, acts) => {
+    const k = sidSafe(sid);
+    actsBySid.set(k, acts);
+    while (actsBySid.size > HUD_SID_MEM_CAP) {
+      const k0 = actsBySid.keys().next().value;
+      if (k0 === k) break;
+      actsBySid.delete(k0);
+    }
+  };
 
   /* R7：`'marker'` 分支随 marker 通道退役删除；并把 `context-overflow`（=**模型主动请求**）单列——
    * 原先它落进 `String(reason)` 默认分支，弹窗会直接显示内部枚举名。 */
@@ -69,23 +94,27 @@ export function createM5Hud(deps) {
     }
   };
 
-  /* ═══════════ 压缩历史持久化（hud-acts.json，cap 50） ═══════════ */
-  const loadHudActs = () => {
+  /* ═══════════ 压缩历史持久化（per-session：`.data/acts/<sid>.json`，每会话 cap 100） ═══════════ */
+  const validAct = (a) => a && typeof a.sid === 'string' && typeof a.text === 'string' && typeof a.at === 'string';
+  /** 读单个文件（返回 acts[] 或 null）。旧文件的 `lineage` 键读入即忽略（2026-10-08 血统链退役）。 */
+  const loadActsFile = (p) => {
     try {
-      const raw = readFileSync(hudActsPath, 'utf8');
+      const raw = readFileSync(p, 'utf8');
       const j = JSON.parse(raw.replace(/^\uFEFF/, '')); // 剥 BOM（外部工具写入可能带，JSON.parse 不容忍）
-      if (j && Array.isArray(j.acts)) {
-        return {
-          acts: j.acts
-            .filter((a) => a && typeof a.sid === 'string' && typeof a.text === 'string' && typeof a.at === 'string')
-            .slice(0, HUD_ACTS_CAP),
-        };
-        /* 旧文件的 `lineage` 键**读入即忽略**（2026-10-08 血统链退役）。 */
-      }
+      if (j && Array.isArray(j.acts)) return j.acts.filter(validAct).slice(0, HUD_ACTS_CAP);
     } catch (e) {
-      if (e?.code !== 'ENOENT') log('warn', `hud-acts.json 读取失败（忽略，走报告回填）：${msg(e)}`);
+      if (e?.code !== 'ENOENT') log('warn', `压缩记录读取失败（忽略）：${p} · ${msg(e)}`);
     }
-    return null; // 文件缺失/损坏 → null（调用方回退报告回填）
+    return null;
+  };
+  /** 某会话的记录（内存优先；未命中则读盘并缓存）。空 sid ⇒ 空数组（不返回全局）。 */
+  const loadActsFor = (sid) => {
+    if (!sid) return [];
+    const k = sidSafe(sid);
+    if (actsBySid.has(k)) return actsBySid.get(k);
+    const loaded = loadActsFile(actsFileOf(sid)) ?? [];
+    rememberActs(k, loaded);
+    return loaded;
   };
 
   /* R53（自审发现 #2，2026-10-17）：**原子落盘**（同目录 tmp + rename）。
@@ -108,37 +137,84 @@ export function createM5Hud(deps) {
     }
   };
 
-  const saveHudActs = (acts) => {
+  const saveActsFor = (sid, acts) => {
     try {
-      mkdirSync(dirname(hudActsPath), { recursive: true });
-      writeJsonAtomic(hudActsPath, { version: 1, savedAt: new Date().toISOString(), acts: acts.slice(0, HUD_ACTS_CAP) });
+      mkdirSync(hudActsDir, { recursive: true });
+      writeJsonAtomic(actsFileOf(sid), {
+        version: 2,
+        savedAt: new Date().toISOString(),
+        sid: String(sid ?? ''),
+        acts: acts.filter(validAct).slice(0, HUD_ACTS_CAP),
+      });
     } catch (e) {
-      log('warn', `hud-acts.json 写入失败（吞）：${msg(e)}`);
+      log('warn', `压缩记录写入失败（吞）：${sidSafe(sid)} · ${msg(e)}`);
     }
   };
 
   const recordHudAct = (sid, text) => {
     try {
       const at = new Date().toISOString();
+      const key = String(sid ?? '');
+      if (!key) return;   // R92：没有会话 id 不落盘（宁缺勿错；旧全局池已退役）
+      const list = loadActsFor(key);
       /* 去重：同一会话 + 同文本 + 1 秒内视为同一次压缩的重复上报。
-       * 成因（2026-10-07 实测发现 hud-acts.json 出现 1ms 间隔的重复条目）：同一压缩成功回调可能
-       * 被两个并存实例各记一次（热换窗口），或引擎事件重放；不加防护会污染历史与悬停列表。 */
-      const dup = state.m5.acts.find(
-        (a) => a.sid === String(sid ?? '') && a.text === text && Math.abs(new Date(a.at).getTime() - Date.now()) < 1000,
-      );
+       * 成因（2026-10-07 实测发现 1ms 间隔的重复条目）：同一压缩成功回调可能被两个并存实例各记一次
+       * （热换窗口）或引擎事件重放；不加防护会污染历史与悬停列表。 */
+      const dup = list.find((a) => a.text === text && Math.abs(new Date(a.at).getTime() - Date.now()) < 1000);
       if (dup) return;
-      state.m5.acts.unshift({ sid: String(sid ?? ''), text: String(text ?? ''), at });
-      if (state.m5.acts.length > HUD_ACTS_CAP) state.m5.acts.length = HUD_ACTS_CAP;
-      saveHudActs(state.m5.acts);
+      list.unshift({ sid: key, text: String(text ?? ''), at });
+      if (list.length > HUD_ACTS_CAP) list.length = HUD_ACTS_CAP;
+      rememberActs(key, list);
+      saveActsFor(key, list);
     } catch { /* 吞 */ }
   };
 
-  /** 激活即恢复（原 `state.m5.acts = loadHudActs()?.acts ?? []`）。
-   *  构造时调用 ⇒ 「跨重启显示历史」这条承诺不因搬模块而丢。 */
+  /** 激活即恢复 + **一次性迁移**旧共享文件（R92）。
+   *  构造时调用 ⇒ 「跨重启显示历史」这条承诺不因搬模块而丢；
+   *  旧 `hud-acts.json` 里各会话的条目被拆到各自文件，旧文件改名 `.migrated` 留档（不删，便于回滚核对）。 */
   const loadStoredActs = () => {
-    const loaded = loadHudActs();
-    state.m5.acts = loaded?.acts ?? [];
-    return state.m5.acts;
+    try {
+      /* ① 迁移旧共享文件（只做一次：迁移后改名为 .migrated） */
+      const legacy = loadActsFile(hudActsPath);
+      if (legacy) {
+        const bySid = new Map();
+        for (const a of legacy) {
+          const k = String(a.sid ?? '');
+          if (!k) continue;
+          if (!bySid.has(k)) bySid.set(k, loadActsFile(actsFileOf(k)) ?? []);
+          bySid.get(k).push(a);
+        }
+        for (const [k, arr] of bySid) {
+          const seen = new Set();
+          const merged = arr
+            .filter((a) => (seen.has(`${a.at}`) ? false : (seen.add(`${a.at}`), true)))
+            .sort((x, y) => (x.at < y.at ? 1 : -1))
+            .slice(0, HUD_ACTS_CAP);
+          rememberActs(k, merged);
+          saveActsFor(k, merged);
+        }
+        try { renameSync(hudActsPath, hudActsPath + '.migrated'); } catch { /* 改名失败就留着（下次再试，幂等） */ }
+        log('info', `M5：旧共享记录已迁移到 .data/acts/（${bySid.size} 个会话），旧文件改名 .migrated`);
+      }
+    } catch (e) {
+      log('warn', `M5：旧记录迁移失败（吞，不影响新存储）：${msg(e)}`);
+    }
+    /* ③ R92：预载已有 per-session 文件（按文件修改时间新→旧，最多 HUD_SID_MEM_CAP 个）——
+     * 启动回填（republishFromReport）需要有东西可发布；否则弹窗在首次 getHud 前是空态。 */
+    try {
+      const files = readdirSync(hudActsDir).filter((f) => f.endsWith('.json'));
+      const rows = files.map((f) => {
+        const p = join(hudActsDir, f);
+        try { return { p, m: statSync(p).mtimeMs }; } catch { return { p, m: 0 }; }
+      }).sort((x, y) => y.m - x.m).slice(0, HUD_SID_MEM_CAP);
+      for (const r of rows) {
+        const acts = loadActsFile(r.p);
+        if (!acts || !acts.length) continue;
+        const sid = acts[0]?.sid;
+        if (sid) rememberActs(sid, acts);
+      }
+    } catch { /* 目录不存在/读失败 ⇒ 忽略（懒加载仍可用） */ }
+    return actsBySid.size;
   };
 
   /**
@@ -146,7 +222,8 @@ export function createM5Hud(deps) {
    * @param sid 可选：传会话 id 则返回该会话的压缩记录；空=全局。
    */
   const buildHudResponse = async (sid) => {
-    const list = Array.isArray(state.m5.acts) ? state.m5.acts : [];
+    /* R92：**只读该会话自己的文件**（空 sid ⇒ 空列表，不返回全局；宁缺勿错）。 */
+    const list = sid ? loadActsFor(sid) : [];
     /* 会话过滤（2026-10-08 改为**严格按 sid 精确匹配**，用户实测反馈驱动）。
      * 原实现走 C-lineage 血统链（当前 sid + 沿 lineage 回溯的全部历史前身 id），
      * 其前提「DSH 压缩会轮转 session id」已被证伪；实测血统链反而**跨会话误连**：
@@ -286,21 +363,38 @@ export function createM5Hud(deps) {
           const a = e.m3.lastAct;
           return { sid: String(a.sessionId ?? ''), text: formatAct(a.reason, a.shadowedTokens, a.at), at: a.at };
         });
-        const have = new Set(state.m5.acts.map((a) => `${a.at}|${a.sid}`));
-        const merged = [...state.m5.acts];
-        for (const a of fromReport) if (!have.has(`${a.at}|${a.sid}`)) merged.push(a);
-        merged.sort((x, y) => (x.at < y.at ? 1 : -1)); // 新→旧
-        if (merged.length > state.m5.acts.length) {
-          state.m5.acts = merged.slice(0, HUD_ACTS_CAP);
-          saveHudActs(state.m5.acts);
+        /* R92：按 sid 分组合并进各自文件（去重键 = at；新→旧；每会话 cap 100）。 */
+        const bySid = new Map();
+        for (const a of fromReport) {
+          const k = String(a.sid ?? '');
+          if (!k) continue;
+          if (!bySid.has(k)) bySid.set(k, loadActsFor(k));
+          bySid.get(k).push(a);
         }
+        let mergedCount = 0;
+        for (const [k, arr] of bySid) {
+          const seen = new Set();
+          const merged = arr
+            .filter((a) => (seen.has(a.at) ? false : (seen.add(a.at), true)))
+            .sort((x, y) => (x.at < y.at ? 1 : -1))
+            .slice(0, HUD_ACTS_CAP);
+          if (merged.length > (loadActsFor(k)?.length ?? 0) - bySid.get(k).length + bySid.get(k).length) { /* 恒真，保持结构 */ }
+          rememberActs(k, merged);
+          saveActsFor(k, merged);
+          mergedCount += merged.length;
+        }
+        if (mergedCount) log('info', `M5 HUD 启动回填：报告补 ${fromReport.length} 条 → ${bySid.size} 个会话文件`);
       }
-      const newest = state.m5.acts[0];
+      const newest = (() => {
+        let best = null;
+        for (const arr of actsBySid.values()) if (arr[0] && (!best || arr[0].at > best.at)) best = arr[0];
+        return best;
+      })();
       if (newest) {
         publishHud({ hudLastAct: newest.text }); // 内存写入，无 HMR 问题；跨激活显示靠这里回填
-        log('info', `M5 HUD 启动回填：${newest.at}（历史 ${state.m5.acts.length} 条，持久化 hud-acts.json）`);
+        log('info', `M5 HUD 启动回填：${newest.at}（内存 ${actsBySid.size} 个会话，持久化 .data/acts/）`);
       }
-      return { ok: true, tried: bfTries, merged: state.m5.acts.length };
+      return { ok: true, tried: bfTries, merged: actsBySid.size };
     } catch (e) {
       /* C1②（审查）：同步 + 3 次重试（共 4 发）全失败即终态留痕，不再永久静默 */
       if (bfTries >= 4) log('warn', `M5 HUD 回填 ${bfTries} 次尝试均失败（终态放弃）：${msg(e)}`);
@@ -311,5 +405,5 @@ export function createM5Hud(deps) {
   /* 构造即装载（等价于原「激活即从 hud-acts.json 恢复历史」）。 */
   loadStoredActs();
 
-  return { hudReasonLabel, formatAct, publishHud, recordHudAct, loadStoredActs, buildHudResponse, republishFromReport, HUD_ACTS_CAP, hudActsPath };
+  return { hudReasonLabel, formatAct, publishHud, recordHudAct, loadStoredActs, buildHudResponse, republishFromReport, HUD_ACTS_CAP, hudActsPath, hudActsDir, actsFileOf, loadActsFor };
 }

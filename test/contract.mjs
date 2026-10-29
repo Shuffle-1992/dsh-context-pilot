@@ -12,7 +12,7 @@
  * 用法：node test/contract.mjs
  * 退出码：0 = 全通过；1 = 有漂移
  */
-import { readFileSync, readdirSync, statSync, mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import {readFileSync, readdirSync, statSync, mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -2237,8 +2237,10 @@ ok('M5 模块未就绪时不中断：三个发布口 no-op、getHud 返回明确
   && /m5-module-pending/.test(host)
   && /M5 HUD 模块加载失败（吞/.test(host),
   '未做空值降级 ⇒ 激活期会 TypeError（apply 不是 async，不能 await）');
-ok('M5 模块构造即装载历史（跨重启显示不因搬模块而丢）',
-  /loadStoredActs\(\);\n\n  return \{ hudReasonLabel/.test(m5src) && /state\.m5\.acts = loaded\?\.acts \?\? \[\];/.test(m5src),
+ok('M5 模块构造即装载历史（跨重启显示不因搬模块而丢）——R92 起是 per-session 装载 + 旧文件迁移',
+  /loadStoredActs\(\);\n\n  return \{ hudReasonLabel/.test(m5src)
+  && /const actsBySid = new Map\(\);/.test(m5src) && /const loadActsFor = \(sid\) =>/.test(m5src)
+  && /renameSync\(hudActsPath, hudActsPath \+ '\.migrated'\)/.test(m5src),
   '模块不再构造即装载 ⇒ 重启后弹窗空态（原「激活即恢复」承诺丢失）');
 
 /* ═══ R12 解耦第四刀：M2 注入域 ═══ */
@@ -4547,7 +4549,7 @@ console.log('\n== 6.39 R39：保留预算真实口径折算 ==');
  * 结构守卫：五个落盘点都走 `writeJsonAtomic`，且没有任何一处直接 `writeFileSync(目标路径, …)`。 */
 {
   const sites46 = [
-    ['core.mjs', 'reportPath'], ['m5.hud.mjs', 'hudActsPath'], ['session-facts.mjs', 'settlePath'],
+    ['core.mjs', 'reportPath'], ['m5.hud.mjs', 'actsFileOf(sid)'], ['session-facts.mjs', 'settlePath'],
     ['compact-tool.mjs', 'tierPath'], ['effort.mjs', 'statsPath'],
   ];
   const problems46 = [];
@@ -5861,6 +5863,62 @@ ok('R75（S4）：client 只剩**一份** unwrapEnv，面板复用模块级实�
   ok("R91 诊断：m2 上报 lastDeclProbe（asstLen / hasTierDecl / hasCompactDecl / toolCalls）",
     /state\.m2\.lastDeclProbe = \{/.test(m2src) && /hasTierDecl/.test(m2src) && /hasCompactDecl/.test(m2src),
     "没有诊断字段 ⇒ 下次再失效仍只能靠猜");
+}
+/* ═══ R92（2026-10-29 用户要求）：压缩记录按会话分文件（`.data/acts/<sid>.json`，每会话 ≤100）═══ */
+{
+  const m5Mod92 = await import(pathToFileURL(join(PLUGIN, "m5.hud.mjs")).href);
+  const mk92 = (dir) => m5Mod92.createM5Hud({
+    state: { m5: { hud: {}, acts: [] }, m3: {} }, log: () => {}, msg: (e) => String(e), schedule: () => {}, pluginDir: dir,
+    svc: () => null, pick: (...a) => a.find((x) => x != null), measureRatio: () => ({ ok: false }), criticalCapOf: () => 0.8,
+    mergeConfig: () => {}, M3: { effortEnabled: false, criticalRatio: 0.75 }, getEffortApi: () => null, getReportBase: () => null,
+  });
+  const tmp92 = mkdtempSync(join(tmpdir(), "dcp-acts-"));
+  const api92 = mk92(tmp92);
+  api92.recordHudAct("sid-A", "10:00 · 智能压缩 · 省 100K");
+  api92.recordHudAct("sid-B", "10:01 · 智能压缩 · 省 200K");
+  const fA92 = join(tmp92, ".data", "acts", "sid-A.json");
+  const fB92 = join(tmp92, ".data", "acts", "sid-B.json");
+  ok("R92 行为级：**每个会话一个文件**（.data/acts/<sid>.json），不再共用一个 hud-acts.json",
+    existsSync(fA92) && existsSync(fB92) && !existsSync(join(tmp92, ".data", "hud-acts.json")),
+    `A=${existsSync(fA92)} B=${existsSync(fB92)}`);
+  const dA92 = JSON.parse(readFileSync(fA92, "utf8"));
+  const dB92 = JSON.parse(readFileSync(fB92, "utf8"));
+  ok("R92 行为级：文件内**只含本会话**条目（sid 一致，不混存；文件头带 sid）",
+    dA92.acts.length === 1 && dA92.acts.every((x) => x.sid === "sid-A") && dA92.sid === "sid-A"
+    && dB92.acts.length === 1 && dB92.acts.every((x) => x.sid === "sid-B"),
+    `A=${JSON.stringify(dA92.acts.map((x) => x.sid))} B=${JSON.stringify(dB92.acts.map((x) => x.sid))}`);
+  for (let i = 0; i < 105; i += 1) api92.recordHudAct("sid-A", "fill-" + i);
+  const dA2 = JSON.parse(readFileSync(fA92, "utf8"));
+  ok("R92 行为级：每会话上限 **100** 条（原为全局 50），超出淘汰最旧的一条",
+    dA2.acts.length === 100 && !dA2.acts.some((x) => x.text === "10:00 · 智能压缩 · 省 100K"),
+    `实际 ${dA2.acts.length} 条；首条=${JSON.stringify(dA2.acts[0]?.text)}`);
+  const hudB92 = await api92.buildHudResponse("sid-B");
+  ok("R92 行为级：一个会话写爆**不会挤掉**另一个会话的记录（原全局 cap 的根因已消除）",
+    hudB92?.sessionMatched === 1 && hudB92?.actsTotal === 1 && /10:01/.test(hudB92?.hudLastAct ?? ""),
+    `matched=${hudB92?.sessionMatched} total=${hudB92?.actsTotal} lastAct=${JSON.stringify(hudB92?.hudLastAct)}`);
+  const hudNone92 = await api92.buildHudResponse("");
+  ok("R92 行为级：空 sid 不返回任何记录（不返回全局；宁缺勿错）",
+    hudNone92?.actsTotal === 0 && hudNone92?.hudLastAct === "", `total=${hudNone92?.actsTotal}`);
+  rmSync(tmp92, { recursive: true, force: true });
+
+  /* 迁移：旧共享文件 ⇒ 拆分到 per-session + 旧文件改名 .migrated（留档不删） */
+  const tmpMig = mkdtempSync(join(tmpdir(), "dcp-acts-mig-"));
+  mkdirSync(join(tmpMig, ".data"), { recursive: true });
+  writeFileSync(join(tmpMig, ".data", "hud-acts.json"), JSON.stringify({
+    version: 1, savedAt: new Date().toISOString(), acts: [
+      { sid: "old-A", text: "a1", at: "2026-10-01T01:00:00.000Z" },
+      { sid: "old-B", text: "b1", at: "2026-10-01T02:00:00.000Z" },
+      { sid: "old-A", text: "a2", at: "2026-10-01T03:00:00.000Z" },
+    ],
+  }));
+  mk92(tmpMig);   // 构造即 loadStoredActs() ⇒ 触发迁移
+  const mA92 = JSON.parse(readFileSync(join(tmpMig, ".data", "acts", "old-A.json"), "utf8"));
+  const mB92 = JSON.parse(readFileSync(join(tmpMig, ".data", "acts", "old-B.json"), "utf8"));
+  ok("R92 行为级：旧 hud-acts.json **自动迁移**到 per-session 文件，并把旧文件改名 `.migrated` 留档",
+    mA92.acts.length === 2 && mB92.acts.length === 1 && mA92.acts[0].text === "a2"
+    && existsSync(join(tmpMig, ".data", "hud-acts.json.migrated")) && !existsSync(join(tmpMig, ".data", "hud-acts.json")),
+    `A=${mA92.acts.length} B=${mB92.acts.length} migrated=${existsSync(join(tmpMig, ".data", "hud-acts.json.migrated"))}`);
+  rmSync(tmpMig, { recursive: true, force: true });
 }
 console.log(`契约对账：${checks - failures}/${checks} 通过${failures ? `，${failures} 项失败` : ' ✅'}`);
 console.log('='.repeat(52));
